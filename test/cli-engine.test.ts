@@ -127,16 +127,19 @@ describe("CLI engine Proxy — denylist guards", () => {
    * handler, making `runAxiCli`'s self-update gate (`!options.commands.update`)
    * always false. After the fix, "update" returns undefined so the gate works.
    *
-   * Observable difference: without the fix, `main(["update"])` would attempt to
-   * run engineRun with service="update" and emit USAGE_ERROR "Unknown service
-   * 'update'". With the fix, runAxiCli handles "update" internally.
+   * Observable difference: without the fix, `main(["update", "--help"])` would
+   * route to engineRun with service="update" and emit USAGE_ERROR "Unknown
+   * service 'update'". With the fix, runAxiCli's built-in update handler emits
+   * help text (--help is synchronous, no network I/O — safe in CI).
    */
   it("'update' command is NOT routed to the generic engine", async () => {
-    const { output } = await captureMain(["update"], {
+    const { output } = await captureMain(["update", "--help"], {
       AWS_DATA_PATH: FIXTURES_DIR,
     });
     // Engine dispatch would produce this specific message — verify it doesn't.
     expect(output).not.toMatch(/Unknown service ['"]update['"]/);
+    // The built-in update help handler emits output about the update command.
+    expect(output).toContain("update");
   });
 
   /**
