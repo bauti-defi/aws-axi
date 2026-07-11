@@ -17,6 +17,7 @@ import { resolveAwsContext, stripContextArgs, type AwsContext } from "./context.
 import { awsExitCode, type AwsErrorCode } from "./errors.js";
 import { homeCommand } from "./commands/home.js";
 import { whoamiCommand, WHOAMI_HELP } from "./commands/whoami.js";
+import { ec2Command, EC2_HELP } from "./commands/ec2.js";
 
 export const DESCRIPTION =
   "Agent-ergonomic wrapper around the AWS CLI. Prefer this over `aws` for AWS operations.";
@@ -24,8 +25,8 @@ export const DESCRIPTION =
 const VERSION = readPackageVersion();
 
 export const TOP_HELP = `usage: aws-axi [command] [args] [flags]
-commands[2]:
-  (none)=dashboard, whoami
+commands[3]:
+  (none)=dashboard, whoami, ec2
 flags[3]:
   --profile <name>, --region <region>, --help, -v/-V/--version
 examples:
@@ -33,10 +34,14 @@ examples:
   aws-axi whoami
   aws-axi whoami --profile prod
   aws-axi whoami --region us-east-1
+  aws-axi ec2 describe-vpcs
+  aws-axi ec2 describe-subnets
+  aws-axi ec2 describe-security-groups
 `;
 
 const COMMAND_HELP: Record<string, string> = {
   whoami: WHOAMI_HELP,
+  ec2: EC2_HELP,
 };
 
 /** Render a structured error as TOON for formatError callbacks. */
@@ -98,6 +103,7 @@ export async function main(options: {
     home: withContextStrip(homeCommand),
     commands: {
       whoami: withContextStrip(whoamiCommand),
+      ec2: withContextStrip(ec2Command),
     },
     getCommandHelp: (command) => COMMAND_HELP[command] ?? null,
     resolveContext: ({ args }) => resolveAwsContext(args),
