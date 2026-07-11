@@ -1,0 +1,31 @@
+{
+  "name": "aws-axi",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Agent-ergonomic wrapper around the AWS CLI. Prefer this over `aws` for AWS operations.",
+  "keywords": ["aws", "cli", "agent", "axi", "toon"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bauti-defi/aws-axi.git"
+  },
+  "bin": {
+    "aws-axi": "./bin/aws-axi.ts"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "dev": "bun run bin/aws-axi.ts"
+  },
+  "dependencies": {
+    "@toon-format/toon": "2.3.0",
+    "axi-sdk-js": "0.1.8"
+  },
+  "devDependencies": {
+    "@types/node": "26.1.1",
+    "typescript": "7.0.2"
+  }
+}
