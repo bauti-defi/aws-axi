@@ -18,7 +18,8 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "dev": "bun run bin/aws-axi.ts"
+    "dev": "bun run bin/aws-axi.ts",
+    "build:skill": "bun run scripts/build-skill.ts"
   },
   "dependencies": {
     "@toon-format/toon": "2.3.0",
