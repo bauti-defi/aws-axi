@@ -26,6 +26,7 @@ import { setupCommand, SETUP_HELP } from "./commands/setup.js";
 import { ssmCommand, SSM_HELP } from "./commands/ssm.js";
 import { secretsCommand, SECRETS_HELP } from "./commands/secrets.js";
 import { waitCommand, WAIT_HELP } from "./commands/wait.js";
+import { lambdaCommand, LAMBDA_HELP } from "./commands/lambda.js";
 
 export const DESCRIPTION =
   "Agent-ergonomic wrapper around the AWS CLI. Prefer this over `aws` for AWS operations.";
@@ -33,8 +34,8 @@ export const DESCRIPTION =
 const VERSION = readPackageVersion();
 
 export const TOP_HELP = `usage: aws-axi [command] [args] [flags]
-commands[11]:
-  (none)=dashboard, whoami, ec2, kms, s3, iam, logs, setup, ssm, secretsmanager (alias: secrets), wait
+commands[12]:
+  (none)=dashboard, whoami, ec2, kms, s3, iam, logs, setup, ssm, secretsmanager (alias: secrets), wait, lambda
 flags[3]:
   --profile <name>, --region <region>, --help, -v/-V/--version
 examples:
@@ -60,6 +61,9 @@ examples:
   aws-axi secretsmanager get-secret-value prod/my-app/api-key --reveal
   aws-axi wait ec2 instance-running --instance-ids i-0123456789abcdef0
   aws-axi wait s3 bucket-exists --bucket my-bucket
+  aws-axi lambda list-functions
+  aws-axi lambda get-function my-function
+  aws-axi lambda invoke --function-name my-function
 `;
 
 const COMMAND_HELP: Record<string, string> = {
@@ -74,6 +78,7 @@ const COMMAND_HELP: Record<string, string> = {
   secretsmanager: SECRETS_HELP,
   secrets: SECRETS_HELP,
   wait: WAIT_HELP,
+  lambda: LAMBDA_HELP,
 };
 
 /** Render a structured error as TOON for formatError callbacks. */
@@ -145,6 +150,7 @@ export async function main(options: {
       secretsmanager: withContextStrip(secretsCommand),
       secrets: withContextStrip(secretsCommand),
       wait: withContextStrip(waitCommand),
+      lambda: withContextStrip((args, context) => lambdaCommand(args, context)),
     },
     getCommandHelp: (command) => COMMAND_HELP[command] ?? null,
     resolveContext: ({ args }) => resolveAwsContext(args),
