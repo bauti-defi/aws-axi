@@ -119,6 +119,40 @@ async function captureMain(
   return { output: chunks.join(""), exitCode };
 }
 
+// ── Proxy denylist — reserved keys must NOT route to the engine ──────────────
+
+describe("CLI engine Proxy — denylist guards", () => {
+  /**
+   * Before the denylist fix, `commands["update"]` returned a truthy engine
+   * handler, making `runAxiCli`'s self-update gate (`!options.commands.update`)
+   * always false. After the fix, "update" returns undefined so the gate works.
+   *
+   * Observable difference: without the fix, `main(["update"])` would attempt to
+   * run engineRun with service="update" and emit USAGE_ERROR "Unknown service
+   * 'update'". With the fix, runAxiCli handles "update" internally.
+   */
+  it("'update' command is NOT routed to the generic engine", async () => {
+    const { output } = await captureMain(["update"], {
+      AWS_DATA_PATH: FIXTURES_DIR,
+    });
+    // Engine dispatch would produce this specific message — verify it doesn't.
+    expect(output).not.toMatch(/Unknown service ['"]update['"]/);
+  });
+
+  /**
+   * "then"/"catch"/"finally" in the Proxy create a thenable footgun:
+   * `Promise.resolve(commands)` would detect the object as a thenable and
+   * try to resolve through it, causing infinite recursion or unexpected behavior.
+   * The denylist prevents these keys from ever returning a handler.
+   */
+  it("'then' is NOT routed to the generic engine", async () => {
+    const { output } = await captureMain(["then"], {
+      AWS_DATA_PATH: FIXTURES_DIR,
+    });
+    expect(output).not.toMatch(/Unknown service ['"]then['"]/);
+  });
+});
+
 // ── Overlay services still work ───────────────────────────────────────────────
 
 describe("CLI engine fallback — overlay services take precedence", () => {

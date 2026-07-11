@@ -26,6 +26,16 @@
       "http": { "method": "GET", "requestUri": "/" },
       "input": { "shape": "PaginatedOpRequest" },
       "output": { "shape": "PaginatedOpResponse" }
+    },
+    "GetIPThing": {
+      "name": "GetIPThing",
+      "http": { "method": "GET", "requestUri": "/" },
+      "output": { "shape": "GetIPThingResponse" }
+    },
+    "GetDBThing": {
+      "name": "GetDBThing",
+      "http": { "method": "GET", "requestUri": "/" },
+      "output": { "shape": "GetDBThingResponse" }
     }
   },
   "shapes": {
@@ -71,6 +81,18 @@
     "ItemList": {
       "type": "list",
       "member": { "shape": "StringType" }
+    },
+    "GetIPThingResponse": {
+      "type": "structure",
+      "members": {
+        "Thing": { "shape": "StringType" }
+      }
+    },
+    "GetDBThingResponse": {
+      "type": "structure",
+      "members": {
+        "Thing": { "shape": "StringType" }
+      }
     },
     "StringType": { "type": "string" },
     "IntegerType": { "type": "integer" },

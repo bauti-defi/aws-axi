@@ -14,11 +14,11 @@ import { fileURLToPath } from "node:url";
 import { AxiError } from "axi-sdk-js";
 import {
   engineRun,
-  toPascalCase,
   toCliFlag,
   stripOutputFlag,
   type EngineRunOptions,
 } from "../src/engine.js";
+import { resolveOperationName, loadService } from "../src/model.js";
 
 // ── Fixture paths ─────────────────────────────────────────────────────────────
 
@@ -83,17 +83,44 @@ function baseOptions(
 
 // ── Unit tests for pure helpers ───────────────────────────────────────────────
 
-describe("toPascalCase", () => {
-  it("converts kebab-case to PascalCase", () => {
-    expect(toPascalCase("list-queues")).toBe("ListQueues");
-    expect(toPascalCase("describe-instances")).toBe("DescribeInstances");
-    expect(toPascalCase("get-caller-identity")).toBe("GetCallerIdentity");
-    expect(toPascalCase("simple-op")).toBe("SimpleOp");
+describe("resolveOperationName — acronym-safe reverse-map lookup", () => {
+  const getModel = () => loadService("fake-svc", { dataDir: FIXTURES_DIR });
+
+  it("resolves a simple op", () => {
+    expect(resolveOperationName(getModel(), "simple-op")).toBe("SimpleOp");
   });
 
-  it("handles single-word names", () => {
-    expect(toPascalCase("whoami")).toBe("Whoami");
-    expect(toPascalCase("query")).toBe("Query");
+  it("resolves required-op", () => {
+    expect(resolveOperationName(getModel(), "required-op")).toBe("RequiredOp");
+  });
+
+  it("resolves GetIPThing from get-ip-thing (IP acronym)", () => {
+    // Naive toPascalCase("get-ip-thing") = "GetIpThing" ≠ "GetIPThing"
+    // Reverse-map is the only correct approach for acronym-bearing op names.
+    expect(resolveOperationName(getModel(), "get-ip-thing")).toBe("GetIPThing");
+  });
+
+  it("resolves GetDBThing from get-db-thing (DB acronym)", () => {
+    // Naive toPascalCase("get-db-thing") = "GetDbThing" ≠ "GetDBThing"
+    expect(resolveOperationName(getModel(), "get-db-thing")).toBe("GetDBThing");
+  });
+
+  it("returns undefined for unknown ops", () => {
+    expect(resolveOperationName(getModel(), "nonexistent-op")).toBeUndefined();
+  });
+
+  it("demonstrates naive title-casing fails for acronym ops", () => {
+    // This is the exact bug that naive toPascalCase has. We document it here
+    // so the test suite explicitly shows WHY the reverse-map is required.
+    const naiveGetIPThing = "get-ip-thing"
+      .split("-")
+      .map((w) => (w.length > 0 ? w.charAt(0).toUpperCase() + w.slice(1) : ""))
+      .join("");
+    // Naive conversion = "GetIpThing" — NOT in the model.
+    expect(naiveGetIPThing).toBe("GetIpThing");
+    expect(getModel().operations.has(naiveGetIPThing)).toBe(false);
+    // But resolveOperationName finds it correctly via the reverse-map.
+    expect(resolveOperationName(getModel(), "get-ip-thing")).toBe("GetIPThing");
   });
 });
 
@@ -248,6 +275,27 @@ describe("engineRun — happy path (simple-op)", () => {
       }),
     );
     expect(result).toMatchObject({ Value: "world" });
+  });
+});
+
+// ── Acronym operation names (regression: naive toPascalCase fails) ───────────
+
+describe("engineRun — acronym operation names", () => {
+  it("dispatches get-ip-thing to GetIPThing via reverse-map lookup", async () => {
+    // If the engine used naive toPascalCase, get-ip-thing → GetIpThing (not found).
+    const stub = createStub({ stdout: '{"Thing":"ip-found"}', exitCode: 0 });
+    const result = await engineRun(
+      baseOptions({ operation: "get-ip-thing", args: [], binary: stub }),
+    );
+    expect(result).toMatchObject({ Thing: "ip-found" });
+  });
+
+  it("dispatches get-db-thing to GetDBThing via reverse-map lookup", async () => {
+    const stub = createStub({ stdout: '{"Thing":"db-found"}', exitCode: 0 });
+    const result = await engineRun(
+      baseOptions({ operation: "get-db-thing", args: [], binary: stub }),
+    );
+    expect(result).toMatchObject({ Thing: "db-found" });
   });
 });
 

@@ -20,7 +20,8 @@ import type { AwsContext } from "./context.js";
 import { awsJson } from "./aws.js";
 import {
   loadService,
-  getOperation,
+  resolveOperationName,
+  pascalToKebab,
   getPaginator,
   type OperationInfo,
   type PaginatorConfig,
@@ -32,7 +33,7 @@ import {
 export interface EngineRunOptions {
   /** AWS service name as the CLI knows it (e.g., "sqs", "dynamodb"). */
   readonly service: string;
-  /** Operation name in CLI kebab-case (e.g., "list-queues"). Converted internally to PascalCase. */
+  /** Operation name in CLI kebab-case (e.g., "list-queues", "get-ip-set"). Resolved internally via reverse-map lookup. */
   readonly operation: string;
   /** All remaining flags/args after service + operation, already stripped of --profile/--region. */
   readonly args: readonly string[];
@@ -48,21 +49,6 @@ export interface EngineRunOptions {
 /** Default item cap for auto-paginated operations (token-safety contract). */
 const DEFAULT_MAX_ITEMS = 50;
 
-// ── Name conversion — pure, exported for tests ────────────────────────────────
-
-/**
- * Convert a CLI kebab-case operation name to botocore PascalCase.
- * "list-queues"      → "ListQueues"
- * "simple-op"        → "SimpleOp"
- * "get-caller-identity" → "GetCallerIdentity"
- */
-export function toPascalCase(name: string): string {
-  return name
-    .split("-")
-    .map((w) => (w.length > 0 ? w.charAt(0).toUpperCase() + w.slice(1) : ""))
-    .join("");
-}
-
 /**
  * Convert a botocore PascalCase parameter name to its CLI --flag form.
  * "Bucket"    → "--bucket"
@@ -74,7 +60,7 @@ export function toCliFlag(paramName: string): string {
   return "--" + paramName.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
 }
 
-// ── Arg helpers — pure, exported for tests ────────────────────────────────────
+// ── CLI flag / arg helpers — pure, exported for tests ────────────────────────
 
 /**
  * Strip --output (and its value) from user args.
@@ -182,16 +168,15 @@ export async function engineRun(
     );
   }
 
-  // ── 2. Resolve operation (CLI kebab-case → botocore PascalCase) ───────────
-  const opPascal = toPascalCase(operation);
-  let opInfo: OperationInfo;
-  try {
-    opInfo = getOperation(model, opPascal);
-  } catch {
+  // ── 2. Resolve operation (CLI kebab-case → exact botocore PascalCase) ───────
+  // Uses a reverse-map over the model's real PascalCase keys — the only correct
+  // approach for acronym-bearing names (e.g. get-ip-set → GetIPSet, not GetIpSet).
+  const pascalKey = resolveOperationName(model, operation);
+  if (pascalKey === undefined) {
     // Surface first 10 available ops (as kebab-case) in the hint
     const available = [...model.operations.keys()]
       .slice(0, 10)
-      .map((k) => k.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase());
+      .map(pascalToKebab);
     throw new AxiError(
       `Unknown operation '${operation}' for service '${service}'.`,
       "USAGE_ERROR",
@@ -201,6 +186,8 @@ export async function engineRun(
       ],
     );
   }
+  // pascalKey is verified to exist in the map — non-null assertion is safe.
+  const opInfo = model.operations.get(pascalKey) as OperationInfo;
 
   // ── 3. Validate required params ────────────────────────────────────────────
   // Strip --output first (it affects arg scanning but not required-param check)
@@ -219,7 +206,7 @@ export async function engineRun(
   }
 
   // ── 4. Pagination setup ────────────────────────────────────────────────────
-  const paginator = getPaginator(model, opPascal);
+  const paginator = getPaginator(model, pascalKey);
   const awsArgs: string[] = [service, operation, ...cleanedArgs];
 
   if (paginator !== undefined && !hasMaxItemsFlag(cleanedArgs)) {
