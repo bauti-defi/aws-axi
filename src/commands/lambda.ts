@@ -195,7 +195,7 @@ flags (list-functions):
 
 flags (invoke):
   --function-name <name>      Function name or ARN (required)
-  --payload <json>            JSON input payload (default: {})
+  --payload <json>            Raw JSON input payload (CLI v2: passes raw-in-base64-out automatically)
   --invocation-type <type>    RequestResponse|Event|DryRun (default: RequestResponse)
   --log-type <type>           None|Tail — Tail returns last 4 KB of logs
 
@@ -502,6 +502,10 @@ async function runInvoke(
   const payload = extractFlag(options.args, "--payload");
   if (payload !== undefined) {
     invokeArgs.push("--payload", payload);
+    // AWS CLI v2 defaults to base64 binary format. Pass raw-in-base64-out so a
+    // literal JSON string is accepted as-is instead of rejected as invalid base64.
+    // aws-cli/2 docs: "required if you're using AWS CLI v2" with a raw payload.
+    invokeArgs.push("--cli-binary-format", "raw-in-base64-out");
   }
 
   const invocationType = extractFlag(options.args, "--invocation-type");
@@ -524,10 +528,11 @@ async function runInvoke(
 
     const metadataResult = await awsRaw(invokeArgs, toRunOpts(options));
 
-    // aws invoke: non-zero exit means infra-level failure (throttle, not found, etc.)
-    // StatusCode 200 + FunctionError means function threw — that's a result, not an error.
-    if (metadataResult.exitCode !== 0 && metadataResult.exitCode !== 200) {
-      // Propagate as a structured AxiError
+    // aws invoke: non-zero process exit means an infra-level failure (throttle,
+    // function-not-found, auth, etc.). FunctionError on a zero-exit invocation
+    // is a function-level outcome — surfaced as a result field, not an error.
+    // NOTE: do NOT conflate HTTP StatusCode (200/400/...) with process exit code.
+    if (metadataResult.exitCode !== 0) {
       const { mapAwsError } = await import("../errors.js");
       throw mapAwsError(metadataResult.stderr, metadataResult.exitCode);
     }

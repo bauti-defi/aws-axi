@@ -779,3 +779,85 @@ describe("lambdaCommand — CLI arg dispatch", () => {
     expect("invocation" in inner).toBe(true);
   });
 });
+
+// ─── invoke: --cli-binary-format correctness (CLI v2 blocker) ─────────────────
+//
+// AWS CLI v2 default binary format is base64. Passing a raw-JSON --payload
+// without --cli-binary-format raw-in-base64-out causes:
+//   "Invalid base64: ..." and the invocation fails on real CLI v2.
+//
+// Fix contract:
+//   When --payload is supplied → aws call MUST include
+//   --cli-binary-format raw-in-base64-out so the JSON is accepted as-is.
+//   When --payload is absent  → flag MUST NOT appear (avoid unnecessary args).
+//
+// We verify by capturing the actual args received by the aws stub binary.
+
+/**
+ * Create a stub binary that, on `lambda invoke`, records all received args
+ * to `argsFile` then returns a valid invoke response so the caller succeeds.
+ */
+function createCapturingInvokeStub(): { binary: string; argsFile: string } {
+  const dir = mkdtempSync(join(tmpdir(), "aws-axi-lambda-capture-"));
+  tempDirs.push(dir);
+  const argsFile = join(dir, "captured-args");
+  const binary = join(dir, "aws");
+
+  const script = [
+    "#!/bin/sh",
+    'case "$1" in',
+    "  lambda)",
+    '    case "$2" in',
+    "      invoke)",
+    // Record all args (space-separated) to the capture file
+    `        echo "$@" > ${shellQuote(argsFile)}`,
+    // Find the outfile: arg immediately before "--output" (appended by buildArgs)
+    "        prev=''",
+    "        outfile=''",
+    "        for arg in \"$@\"; do",
+    "          if [ \"$arg\" = \"--output\" ]; then outfile=\"$prev\"; break; fi",
+    "          prev=\"$arg\"",
+    "        done",
+    `        if [ -n "$outfile" ]; then printf '%s' ${shellQuote(INVOKE_PAYLOAD_OK)} > "$outfile"; fi`,
+    `        printf '%s' ${shellQuote(INVOKE_METADATA_OK)}`,
+    "        exit 0;;",
+    "    esac;;",
+    "esac",
+    "exit 0",
+  ].join("\n");
+
+  writeFileSync(binary, script);
+  chmodSync(binary, 0o755);
+  return { binary, argsFile };
+}
+
+describe("lambdaRun invoke — --cli-binary-format raw-in-base64-out (CLI v2)", () => {
+  it("includes --cli-binary-format raw-in-base64-out when --payload is supplied", async () => {
+    const { binary, argsFile } = createCapturingInvokeStub();
+
+    await lambdaRun({
+      subcommand: "invoke",
+      args: ["--function-name", FN_NAME, "--payload", '{"key":"value"}'],
+      binary,
+    });
+
+    const capturedArgs = readFileSync(argsFile, "utf-8");
+    expect(capturedArgs).toContain("--cli-binary-format");
+    expect(capturedArgs).toContain("raw-in-base64-out");
+    // The raw JSON payload must appear as-is (no base64 encoding applied by us)
+    expect(capturedArgs).toContain('{"key":"value"}');
+  });
+
+  it("does NOT include --cli-binary-format when --payload is absent", async () => {
+    const { binary, argsFile } = createCapturingInvokeStub();
+
+    await lambdaRun({
+      subcommand: "invoke",
+      args: ["--function-name", FN_NAME],
+      binary,
+    });
+
+    const capturedArgs = readFileSync(argsFile, "utf-8");
+    expect(capturedArgs).not.toContain("--cli-binary-format");
+  });
+});
