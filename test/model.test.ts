@@ -131,18 +131,18 @@ describe("getPaginator — fixture", () => {
 // ── waiters ───────────────────────────────────────────────────────────────────
 
 describe("listWaiters — fixture", () => {
-  it("lists waiter names", () => {
+  it("lists waiter names (raw PascalCase keys from botocore)", () => {
     const model = loadService("fake-svc", { dataDir: FIXTURES_DIR });
-    expect(listWaiters(model)).toContain("ItemExists");
+    expect(listWaiters(model)).toContain("ItemReady");
   });
 });
 
 describe("getWaiter — fixture", () => {
-  it("returns the ItemExists waiter definition", () => {
+  it("returns the ItemReady waiter definition by PascalCase key", () => {
     const model = loadService("fake-svc", { dataDir: FIXTURES_DIR });
-    const waiter = getWaiter(model, "ItemExists");
+    const waiter = getWaiter(model, "ItemReady");
     expect(waiter).toBeDefined();
-    expect(waiter?.name).toBe("ItemExists");
+    expect(waiter?.name).toBe("ItemReady");
     expect(waiter?.operation).toBe("PaginatedOp");
     expect(waiter?.delay).toBe(5);
     expect(waiter?.maxAttempts).toBe(20);
@@ -156,7 +156,7 @@ describe("getWaiter — fixture", () => {
 
   it("parses acceptor fields correctly", () => {
     const model = loadService("fake-svc", { dataDir: FIXTURES_DIR });
-    const waiter = getWaiter(model, "ItemExists");
+    const waiter = getWaiter(model, "ItemReady");
     const success = waiter?.acceptors.find((a) => a.state === "success");
     expect(success?.matcher).toBe("pathAll");
     expect(success?.expected).toBe("available");

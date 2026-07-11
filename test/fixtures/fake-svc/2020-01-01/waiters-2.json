@@ -1,7 +1,7 @@
 {
   "version": 2,
   "waiters": {
-    "ItemExists": {
+    "ItemReady": {
       "delay": 5,
       "operation": "PaginatedOp",
       "maxAttempts": 20,

@@ -3,8 +3,14 @@
  *
  * Wraps `aws <service> wait <waiter-name> [--flags]` and enriches the result
  * with model-derived metadata so the agent knows the polling budget up-front
- * and gets a definitive terminal outcome — success or structured failure —
- * instead of a raw exit code.
+ * and gets a definitive terminal outcome — success or structured failure.
+ *
+ * CASING CONTRACT (mirrors the AWS CLI 1:1):
+ *   - Users provide waiter names in kebab-case: `instance-running`, `bucket-exists`
+ *   - botocore `waiters-2.json` keys are PascalCase: `InstanceRunning`, `BucketExists`
+ *   - The shell invocation uses the user's kebab-case (what `aws … wait` accepts)
+ *   - The model lookup converts via a reverse map: kebab → PascalCase
+ *   - Error messages and available-waiters listings use kebab-case throughout
  *
  * Exported shape:
  *   waitRun(options)              → typed result (for testing / composition)
@@ -14,7 +20,7 @@
 import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import { awsRaw } from "../aws.js";
-import { loadService, getWaiter, listWaiters } from "../model.js";
+import { loadService, getWaiter, type ServiceModel } from "../model.js";
 import { parseAwsError } from "../errors.js";
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -25,7 +31,10 @@ export interface WaitResult {
   readonly waited: true;
   /** The AWS service that owns this waiter (e.g. `"ec2"`, `"s3"`). */
   readonly service: string;
-  /** Waiter name as it appears in `waiters-2.json` (e.g. `"instance-running"`). */
+  /**
+   * Waiter name in kebab-case — the user-facing CLI form (e.g. `"instance-running"`).
+   * This is what you pass back to `aws-axi wait` in a retry.
+   */
   readonly waiter: string;
   /** The underlying operation the waiter polls (e.g. `"DescribeInstances"`). */
   readonly targetOp: string;
@@ -41,7 +50,7 @@ export interface WaitResult {
 export interface WaitRunOptions {
   /** AWS service name (e.g. `"ec2"`, `"s3"`). */
   readonly service: string;
-  /** Waiter name as it appears in `waiters-2.json` (e.g. `"instance-running"`). */
+  /** Waiter name in kebab-case, as accepted by the AWS CLI (e.g. `"instance-running"`). */
   readonly waiterName: string;
   /** Pass-through flags forwarded verbatim to `aws <service> wait <waiter-name>`. */
   readonly flags: readonly string[];
@@ -69,16 +78,20 @@ Block until the named AWS waiter reaches its success state, then emit a
 definitive result with polling budget metadata. Waiter definitions are read
 from the installed aws CLI's botocore models (waiters-2.json).
 
+Waiter names use kebab-case, matching the AWS CLI convention:
+  aws-axi wait ec2 instance-running   (not InstanceRunning)
+  aws-axi wait s3 bucket-exists       (not BucketExists)
+
 args:
   <service>       AWS service name (e.g. ec2, s3, rds)
-  <waiter-name>   Waiter name as reported by \`aws <service> wait help\`
+  <waiter-name>   Waiter name in kebab-case (e.g. instance-running, bucket-exists)
 
 flags:
   --profile <name>   AWS profile to use
   --region <region>  AWS region to use
   --help             Show this help
 
-additional flags (e.g. --instance-ids, --bucket) are forwarded to the
+Additional flags (e.g. --instance-ids, --bucket) are forwarded to the
 underlying aws waiter command unchanged.
 
 examples:
@@ -88,6 +101,50 @@ examples:
   aws-axi wait ec2 instance-running --profile prod --region us-east-1 --instance-ids i-xxx
 `;
 
+// ── Casing conversion ─────────────────────────────────────────────────────────
+
+/**
+ * Convert a botocore PascalCase waiter key to the AWS CLI kebab-case form.
+ *
+ * Handles acronyms correctly (DB, VPC, ECS) using the same two-pass algorithm
+ * as botocore's xform_name:
+ *   1. Insert `-` between a run of uppercase letters and an uppercase-then-lowercase
+ *      sequence (e.g. `DBI` + `nstance` → `DB-Instance`)
+ *   2. Insert `-` between a lowercase/digit and an uppercase letter
+ *      (e.g. `Instance` + `Running` → `Instance-Running`)
+ *   3. Lowercase the result
+ *
+ * Examples:
+ *   InstanceRunning       → instance-running
+ *   BucketExists          → bucket-exists
+ *   DBInstanceAvailable   → db-instance-available
+ *   VpcAvailable          → vpc-available
+ */
+function pascalToKebab(s: string): string {
+  return s
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1-$2")
+    .replace(/([a-z\d])([A-Z])/g, "$1-$2")
+    .toLowerCase();
+}
+
+/**
+ * Build a reverse map from kebab-case CLI names to their raw PascalCase
+ * botocore keys for a given service model.
+ *
+ * This map is the authoritative lookup table for resolving what a user types
+ * (`instance-running`) to the botocore key (`InstanceRunning`) that
+ * `getWaiter` requires. Building the reverse map (rather than inverting the
+ * kebab→pascal conversion) is essential for lossless round-trips of names
+ * that contain acronyms (e.g. `DBInstanceAvailable`).
+ */
+function buildKebabWaiterMap(model: ServiceModel): ReadonlyMap<string, string> {
+  const map = new Map<string, string>();
+  for (const pascalKey of model.waiters.keys()) {
+    map.set(pascalToKebab(pascalKey), pascalKey);
+  }
+  return map;
+}
+
 // ── Core logic ────────────────────────────────────────────────────────────────
 
 /**
@@ -95,35 +152,46 @@ examples:
  * a structured AxiError on timeout / failure acceptor / credential error.
  *
  * Steps:
- *   1. Load the botocore model for `service` and validate the waiter exists.
- *      If not, throw USAGE_ERROR listing available waiters.
- *   2. Shell to `aws <service> wait <waiterName> [...flags] --output json`
- *      via the exec seam (`awsRaw`).
+ *   1. Load the botocore model for `service` and resolve the user's kebab
+ *      waiter name to the PascalCase key via the reverse map.
+ *      If not found, throw USAGE_ERROR listing available waiters in kebab-case.
+ *   2. Shell to `aws <service> wait <waiterName> [...flags]`
+ *      via the exec seam (`awsRaw`). The kebab name is passed unchanged —
+ *      that is what the AWS CLI accepts.
  *   3. Exit 0 → return `WaitResult` enriched with model metadata.
- *   4. Non-zero exit → propagate well-known errors (no-credentials,
- *      auth-expired) or map to SERVICE_CLIENT_ERROR with budget context.
+ *   4. Non-zero exit:
+ *      a. Propagate well-known taxonomy errors (no-credentials, auth-expired).
+ *      b. "terminal failure state" stderr → SERVICE_CLIENT_ERROR indicating a
+ *         failure acceptor was matched (no retry advice — agent could loop).
+ *      c. Otherwise (max-attempts exhausted) → SERVICE_CLIENT_ERROR with budget
+ *         context and retry advice.
  */
 export async function waitRun(options: WaitRunOptions): Promise<WaitResult> {
-  // 1. Load model + validate waiter
+  // 1. Load model + resolve kebab → PascalCase via reverse map
   const model = loadService(options.service, { dataDir: options.dataDir });
-  const waiterDef = getWaiter(model, options.waiterName);
+  const kebabMap = buildKebabWaiterMap(model);
+  const pascalKey = kebabMap.get(options.waiterName);
 
-  if (waiterDef === undefined) {
-    const available = listWaiters(model);
+  if (pascalKey === undefined) {
+    const availableKebab = [...kebabMap.keys()].sort();
     throw new AxiError(
       `Unknown waiter '${options.waiterName}' for service '${options.service}'`,
       "USAGE_ERROR",
       [
-        `Available waiters for ${options.service}: ${available.join(", ")}`,
+        `Available waiters for ${options.service}: ${availableKebab.join(", ")}`,
         `Run: aws-axi wait ${options.service} <waiter-name> [--flags]`,
       ],
     );
   }
 
+  // Must exist — we just confirmed the key via the map
+  // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
+  const waiterDef = getWaiter(model, pascalKey)!;
   const budgetSeconds = waiterDef.delay * waiterDef.maxAttempts;
 
   // 2. Shell to `aws <service> wait <waiterName> [...flags]`
   //    awsRaw appends --output json (harmless for wait; produces no output).
+  //    The kebab waiter name is passed unchanged — that is what `aws` expects.
   const result = await awsRaw(
     [options.service, "wait", options.waiterName, ...options.flags],
     { binary: options.binary, context: options.context },
@@ -134,7 +202,7 @@ export async function waitRun(options: WaitRunOptions): Promise<WaitResult> {
     return Object.freeze({
       waited: true as const,
       service: options.service,
-      waiter: options.waiterName,
+      waiter: options.waiterName, // return the kebab form the user typed
       targetOp: waiterDef.operation,
       budgetSeconds,
       polls: waiterDef.maxAttempts,
@@ -142,22 +210,36 @@ export async function waitRun(options: WaitRunOptions): Promise<WaitResult> {
     });
   }
 
-  // 4. Non-zero — check for well-known taxonomy errors first
+  // 4a. Propagate well-known taxonomy errors (no-credentials, auth-expired, …)
   const parsed = parseAwsError(result.stderr, result.exitCode);
-
-  // Propagate: no-credentials, auth-expired, service-client-error, aws-not-installed
   if (parsed.code !== "UNKNOWN") {
     throw new AxiError(parsed.message, parsed.code, [...parsed.suggestions]);
   }
 
-  // Waiter timeout or failure acceptor hit — structured error with budget context
+  const botoMsg = result.stderr.trim();
+
+  // 4b. Terminal failure acceptor hit — resource reached a permanent bad state.
+  //     Do NOT advise retry: the agent could loop forever on a terminated instance.
+  if (/terminal failure state/i.test(botoMsg)) {
+    throw new AxiError(
+      `Waiter '${options.waiterName}' for service '${options.service}' reached a terminal failure state`,
+      "SERVICE_CLIENT_ERROR",
+      [
+        botoMsg, // preserve botocore's exact message (includes the matched state)
+        `The resource reached a permanent non-success state — check its current state`,
+      ],
+    );
+  }
+
+  // 4c. Timeout: max attempts exhausted (or unknown non-zero exit).
   throw new AxiError(
     `Waiter '${options.waiterName}' for service '${options.service}' did not reach success state ` +
       `within budget: ${waiterDef.maxAttempts} polls × ${waiterDef.delay}s = ${budgetSeconds}s`,
     "SERVICE_CLIENT_ERROR",
     [
       `Polls ${waiterDef.operation} every ${waiterDef.delay}s, up to ${waiterDef.maxAttempts} times (${budgetSeconds}s total)`,
-      `Resource may still be transitioning — retry or check its current state`,
+      `Resource may still be transitioning — retry with a longer budget or check its current state`,
+      ...(botoMsg ? [`AWS: ${botoMsg}`] : []),
     ],
   );
 }
@@ -167,7 +249,7 @@ export async function waitRun(options: WaitRunOptions): Promise<WaitResult> {
 /**
  * AxiCliCommand adapter.
  * Args are pre-stripped of --profile/--region by the CLI wrapper.
- * Expected shape: `[<service>, <waiter-name>, ...pass-through-flags]`
+ * Expected shape: `[<service>, <waiter-name-kebab>, ...pass-through-flags]`
  *
  * The optional third `testOptions` parameter is only used in tests to inject
  * a stub binary and fixture dataDir without touching global state.
@@ -177,9 +259,7 @@ export async function waitCommand(
   context: AwsContext | undefined,
   testOptions?: WaitCommandTestOptions,
 ): Promise<Record<string, unknown>> {
-  // We need at least 2 positional args: service and waiter-name.
-  // Since pass-through flags can appear anywhere, we pick the first two
-  // non-flag tokens as the positionals.
+  // Pick the first two non-flag tokens as <service> and <waiter-name>.
   const positionals = args.filter((a) => !a.startsWith("-"));
 
   if (positionals.length < 2) {
@@ -196,8 +276,8 @@ export async function waitCommand(
   const service = positionals[0] as string;
   const waiterName = positionals[1] as string;
 
-  // Pass-through: everything after the first two positionals (in original order).
-  // Slice after the second positional's position in args.
+  // Everything after the second positional's position in the original args is
+  // forwarded as pass-through flags (preserving flag-value pairs in order).
   const serviceIdx = args.indexOf(service);
   const waiterIdx = args.indexOf(waiterName, serviceIdx + 1);
   const passThrough = args.slice(waiterIdx + 1);
