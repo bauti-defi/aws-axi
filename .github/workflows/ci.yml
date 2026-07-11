@@ -23,3 +23,6 @@ jobs:
 
       - name: Test
         run: bun test
+
+      - name: Skill drift check
+        run: bun run build:skill -- --check
