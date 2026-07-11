@@ -25,6 +25,7 @@ import { logsCommand, LOGS_HELP } from "./commands/logs.js";
 import { setupCommand, SETUP_HELP } from "./commands/setup.js";
 import { ssmCommand, SSM_HELP } from "./commands/ssm.js";
 import { secretsCommand, SECRETS_HELP } from "./commands/secrets.js";
+import { waitCommand, WAIT_HELP } from "./commands/wait.js";
 
 export const DESCRIPTION =
   "Agent-ergonomic wrapper around the AWS CLI. Prefer this over `aws` for AWS operations.";
@@ -32,8 +33,8 @@ export const DESCRIPTION =
 const VERSION = readPackageVersion();
 
 export const TOP_HELP = `usage: aws-axi [command] [args] [flags]
-commands[10]:
-  (none)=dashboard, whoami, ec2, kms, s3, iam, logs, setup, ssm, secretsmanager (alias: secrets)
+commands[11]:
+  (none)=dashboard, whoami, ec2, kms, s3, iam, logs, setup, ssm, secretsmanager (alias: secrets), wait
 flags[3]:
   --profile <name>, --region <region>, --help, -v/-V/--version
 examples:
@@ -57,6 +58,8 @@ examples:
   aws-axi ssm get-parameter /my/app/db-password --reveal
   aws-axi secretsmanager list-secrets
   aws-axi secretsmanager get-secret-value prod/my-app/api-key --reveal
+  aws-axi wait ec2 instance-running --instance-ids i-0123456789abcdef0
+  aws-axi wait s3 bucket-exists --bucket my-bucket
 `;
 
 const COMMAND_HELP: Record<string, string> = {
@@ -70,6 +73,7 @@ const COMMAND_HELP: Record<string, string> = {
   ssm: SSM_HELP,
   secretsmanager: SECRETS_HELP,
   secrets: SECRETS_HELP,
+  wait: WAIT_HELP,
 };
 
 /** Render a structured error as TOON for formatError callbacks. */
@@ -140,6 +144,7 @@ export async function main(options: {
       ssm: withContextStrip(ssmCommand),
       secretsmanager: withContextStrip(secretsCommand),
       secrets: withContextStrip(secretsCommand),
+      wait: withContextStrip(waitCommand),
     },
     getCommandHelp: (command) => COMMAND_HELP[command] ?? null,
     resolveContext: ({ args }) => resolveAwsContext(args),
