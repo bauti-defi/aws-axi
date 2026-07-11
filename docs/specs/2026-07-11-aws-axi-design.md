@@ -229,7 +229,7 @@ by the generic engine until promoted.
   work unchanged.
 - **Exact-pinned deps** (`axi-sdk-js`, `@toon-format/toon`) — no `^`/`~`.
 - **Skill** generated from the home view (single source of truth) with a CI drift check.
-- **Release** via release-please + OIDC `npm publish --provenance` (no static token).
+- **Release** via manual `bun run release` → `npm publish` (operator decision, PR #29): mirrors DAMM-sdk pattern; no CI automation, no release-please, no OIDC/provenance. Human bumps version in package.json and runs `bun run release` locally.
 - **Ambient context** via `aws-axi setup` (SessionStart hooks for Claude Code / Codex /
   OpenCode) — the home view surfaces current identity/region as ambient context.
 
