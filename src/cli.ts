@@ -20,6 +20,7 @@ import { whoamiCommand, WHOAMI_HELP } from "./commands/whoami.js";
 import { ec2Command, EC2_HELP } from "./commands/ec2.js";
 import { kmsCommand, KMS_HELP } from "./commands/kms.js";
 import { s3Command, S3_HELP } from "./commands/s3.js";
+import { iamCommand, IAM_HELP } from "./commands/iam.js";
 
 export const DESCRIPTION =
   "Agent-ergonomic wrapper around the AWS CLI. Prefer this over `aws` for AWS operations.";
@@ -27,13 +28,15 @@ export const DESCRIPTION =
 const VERSION = readPackageVersion();
 
 export const TOP_HELP = `usage: aws-axi [command] [args] [flags]
-commands[5]:
-  (none)=dashboard, whoami, ec2, kms, s3
+commands[6]:
+  (none)=dashboard, whoami, ec2, kms, s3, iam
 flags[3]:
   --profile <name>, --region <region>, --help, -v/-V/--version
 examples:
   aws-axi
   aws-axi whoami
+  aws-axi iam list-roles
+  aws-axi iam get-role my-role
   aws-axi whoami --profile prod
   aws-axi whoami --region us-east-1
   aws-axi ec2 describe-vpcs
@@ -50,6 +53,7 @@ const COMMAND_HELP: Record<string, string> = {
   ec2: EC2_HELP,
   kms: KMS_HELP,
   s3: S3_HELP,
+  iam: IAM_HELP,
 };
 
 /** Render a structured error as TOON for formatError callbacks. */
@@ -114,6 +118,7 @@ export async function main(options: {
       ec2: withContextStrip(ec2Command),
       kms: withContextStrip(kmsCommand),
       s3: withContextStrip(s3Command),
+      iam: withContextStrip(iamCommand),
     },
     getCommandHelp: (command) => COMMAND_HELP[command] ?? null,
     resolveContext: ({ args }) => resolveAwsContext(args),
