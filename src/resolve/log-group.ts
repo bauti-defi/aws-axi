@@ -8,7 +8,6 @@
  * Cached per process invocation — each CLI run is a fresh process, so the
  * cache only saves redundant calls within a single command execution.
  */
-import { AxiError } from "axi-sdk-js";
 import { awsJson, type AwsRunOptions } from "../aws.js";
 import type { AwsContext } from "../context.js";
 
@@ -64,12 +63,15 @@ export function _clearCache(): void {
  * Prefers an exact name match; falls back to the first result when only a
  * prefix was matched (useful when the caller passes a unique prefix).
  *
- * Throws SERVICE_CLIENT_ERROR (exit 254) if no group is found.
+ * Returns `null` when the group is not found — callers should degrade
+ * gracefully (e.g. fall back to the raw name). This matches the IAM and
+ * EC2 resolve-primitive convention: enrichment primitives never throw on
+ * not-found; they return null and let the caller decide.
  */
 export async function resolveLogGroup(
   nameOrArn: string,
   options: ResolveLogGroupOptions = {},
-): Promise<LogGroupDescriptor> {
+): Promise<LogGroupDescriptor | null> {
   const name = extractLogGroupName(nameOrArn);
 
   const cached = _cache.get(name);
@@ -91,13 +93,7 @@ export async function resolveLogGroup(
     response.logGroups[0];
 
   if (group === undefined) {
-    throw new AxiError(
-      `Log group not found: ${name}`,
-      "SERVICE_CLIENT_ERROR",
-      [
-        `Run \`aws-axi logs describe-log-groups --prefix ${name}\` to list available groups`,
-      ],
-    );
+    return null; // caller falls back to the raw name
   }
 
   const descriptor: LogGroupDescriptor = {
@@ -118,17 +114,26 @@ export async function resolveLogGroup(
 /**
  * Extract a bare log group name from either a bare name or a CloudWatch Logs ARN.
  *
- * ARN format: `arn:aws:logs:<region>:<account>:log-group:<name>`
+ * ARN format: `arn:aws:logs:<region>:<account>:log-group:<name>[:<suffix>]`
  *
- * The log group name starts after the `:log-group:` segment and may itself
- * contain colons (e.g. `/aws/ecs/cluster:task`).
+ * Real CloudWatch ARNs end with a `:*` wildcard suffix that is NOT part of the
+ * log group name. This function strips it (and a bare trailing `:`) so the
+ * returned value can be used directly in API calls and prefix-search queries.
  */
 export function extractLogGroupName(nameOrArn: string): string {
   if (nameOrArn.startsWith("arn:aws:logs:")) {
     const marker = ":log-group:";
     const idx = nameOrArn.indexOf(marker);
     if (idx !== -1) {
-      return nameOrArn.slice(idx + marker.length);
+      let name = nameOrArn.slice(idx + marker.length);
+      // Strip the trailing ":*" wildcard suffix present on real CW ARNs,
+      // or a bare trailing ":" (wildcard omitted by the caller).
+      if (name.endsWith(":*")) {
+        name = name.slice(0, -2);
+      } else if (name.endsWith(":")) {
+        name = name.slice(0, -1);
+      }
+      return name;
     }
   }
   return nameOrArn;

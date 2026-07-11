@@ -15,6 +15,8 @@ import {
   tailRun,
   filterRun,
   describeLogGroupsRun,
+  _extractTailArgs,
+  _extractFilterArgs,
 } from "../src/commands/logs.js";
 import {
   resolveLogGroup,
@@ -116,9 +118,26 @@ describe("parseSince", () => {
     expect(parseSince(String(ms), NOW)).toBe(ms);
   });
 
-  it("accepts ISO timestamp strings", () => {
-    const iso = new Date(NOW - 900_000).toISOString();
+  it("accepts fully-qualified ISO timestamps (Z suffix)", () => {
+    const iso = new Date(NOW - 900_000).toISOString(); // always produces ...Z
     expect(parseSince(iso, NOW)).toBe(NOW - 900_000);
+  });
+
+  it("accepts ISO timestamps with explicit UTC offset (+00:00)", () => {
+    // Replace the trailing Z with +00:00 — still unambiguous
+    const iso = new Date(NOW - 900_000).toISOString().replace("Z", "+00:00");
+    expect(parseSince(iso, NOW)).toBe(NOW - 900_000);
+  });
+
+  it("throws USAGE_ERROR for bare ISO datetime without timezone", () => {
+    // "2026-07-11T10:00:00" has no Z or offset → non-deterministic local-time parse
+    expect(() => parseSince("2026-07-11T10:00:00", NOW)).toThrow();
+    try {
+      parseSince("2026-07-11T10:00:00", NOW);
+    } catch (e) {
+      expect((e as AxiError).code).toBe("USAGE_ERROR");
+      expect((e as AxiError).message).toContain("timezone");
+    }
   });
 
   it("throws USAGE_ERROR for unrecognised formats", () => {
@@ -146,10 +165,94 @@ describe("extractLogGroupName", () => {
     expect(extractLogGroupName(arn)).toBe("/aws/lambda/my-function");
   });
 
-  it("handles names that contain colons (edge case)", () => {
+  it("strips trailing :* wildcard suffix from real CloudWatch ARNs", () => {
+    // Real CW ARNs end in ":*" — strip it so the name can be used for API calls.
     const arn =
-      "arn:aws:logs:us-east-1:123456789012:log-group:/aws/ecs/my-cluster:task";
-    expect(extractLogGroupName(arn)).toBe("/aws/ecs/my-cluster:task");
+      "arn:aws:logs:us-west-2:123456789012:log-group:/aws/cloudtrail/damm-trail:*";
+    expect(extractLogGroupName(arn)).toBe("/aws/cloudtrail/damm-trail");
+  });
+
+  it("strips a bare trailing : suffix (wildcard omitted)", () => {
+    const arn =
+      "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/my-function:";
+    expect(extractLogGroupName(arn)).toBe("/aws/lambda/my-function");
+  });
+});
+
+// ─── _extractTailArgs — position-independent parsing ─────────────────────────
+
+describe("_extractTailArgs — position-independent parsing", () => {
+  it("identifies group name when flags come before the positional", () => {
+    // Bug: previously picked "1h" as group (flag value was mistaken for positional)
+    const result = _extractTailArgs(["--since", "1h", "/aws/lambda/fn"]);
+    expect(result.logGroupName).toBe("/aws/lambda/fn");
+    expect(result.since).toBe("1h");
+  });
+
+  it("handles all flags before the group name", () => {
+    const result = _extractTailArgs([
+      "--since", "30m",
+      "--limit", "100",
+      "--stream", "my-stream",
+      "--pattern", "ERROR",
+      "/aws/lambda/fn",
+    ]);
+    expect(result.logGroupName).toBe("/aws/lambda/fn");
+    expect(result.since).toBe("30m");
+    expect(result.limit).toBe(100);
+    expect(result.streamName).toBe("my-stream");
+    expect(result.pattern).toBe("ERROR");
+  });
+
+  it("works with group name before flags (original positional order)", () => {
+    const result = _extractTailArgs(["/aws/lambda/fn", "--since", "15m"]);
+    expect(result.logGroupName).toBe("/aws/lambda/fn");
+    expect(result.since).toBe("15m");
+  });
+
+  it("throws USAGE_ERROR when no positional group name is provided", () => {
+    expect(() => _extractTailArgs(["--since", "1h"])).toThrow();
+    try {
+      _extractTailArgs(["--since", "1h"]);
+    } catch (e) {
+      expect((e as AxiError).code).toBe("USAGE_ERROR");
+    }
+  });
+});
+
+// ─── _extractFilterArgs — position-independent parsing ───────────────────────
+
+describe("_extractFilterArgs — position-independent parsing", () => {
+  it("identifies group and pattern when flags come before positionals", () => {
+    const result = _extractFilterArgs([
+      "--since", "2h",
+      "/aws/lambda/fn",
+      "ERROR",
+    ]);
+    expect(result.logGroupName).toBe("/aws/lambda/fn");
+    expect(result.pattern).toBe("ERROR");
+    expect(result.since).toBe("2h");
+  });
+
+  it("works with positionals before flags (original order)", () => {
+    const result = _extractFilterArgs([
+      "/aws/lambda/fn",
+      "ERROR",
+      "--since",
+      "15m",
+    ]);
+    expect(result.logGroupName).toBe("/aws/lambda/fn");
+    expect(result.pattern).toBe("ERROR");
+    expect(result.since).toBe("15m");
+  });
+
+  it("throws USAGE_ERROR when pattern is missing", () => {
+    expect(() => _extractFilterArgs(["/aws/lambda/fn"])).toThrow();
+    try {
+      _extractFilterArgs(["/aws/lambda/fn"]);
+    } catch (e) {
+      expect((e as AxiError).code).toBe("USAGE_ERROR");
+    }
   });
 });
 
@@ -252,30 +355,17 @@ describe("tailRun — empty window", () => {
 });
 
 describe("tailRun — filter pattern forwarded", () => {
-  it("passes --filter-pattern to aws (stub echoes args on stdout for inspection)", async () => {
-    // This stub echoes its own args so we can inspect what aws-axi sent.
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-logs-echo-"));
-    tempDirs.push(dir);
-    const stubPath = join(dir, "aws");
-    writeFileSync(
-      stubPath,
-      [
-        "#!/bin/sh",
-        // Write args to stderr so tailRun doesn't try to parse as JSON
-        "echo \"$@\" >&2",
-        // Return minimal valid JSON on stdout
-        `printf '%s' '{"events":[]}'`,
-        "exit 0",
-      ].join("\n"),
-    );
-    chmodSync(stubPath, 0o755);
+  it("accepts --pattern without error", async () => {
+    const stub = createStub({
+      stdout: JSON.stringify({ events: [] }),
+      exitCode: 0,
+    });
 
-    // tailRun should not throw; we just verify it doesn't error
     const result = await tailRun({
       logGroupName: "/aws/lambda/fn",
       since: "15m",
       pattern: "ERROR",
-      binary: stubPath,
+      binary: stub,
     });
 
     expect(result.events).toHaveLength(0);
@@ -302,10 +392,7 @@ describe("filterRun", () => {
 
 // ─── describeLogGroupsRun ────────────────────────────────────────────────────
 
-function buildLogGroupsJson(
-  count: number,
-  nextToken?: string,
-): string {
+function buildLogGroupsJson(count: number, nextToken?: string): string {
   const logGroups = Array.from({ length: count }, (_, i) => ({
     logGroupName: `/aws/lambda/function-${i + 1}`,
     arn: `arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/function-${i + 1}`,
@@ -382,13 +469,14 @@ describe("resolveLogGroup — happy path", () => {
       binary: stub,
     });
 
-    expect(descriptor.name).toBe("/aws/lambda/function-1");
-    expect(descriptor.arn).toContain("arn:aws:logs");
-    expect(descriptor.storedBytes).toBe(1024);
-    expect(descriptor.retentionDays).toBe(30);
+    expect(descriptor).not.toBeNull();
+    expect(descriptor?.name).toBe("/aws/lambda/function-1");
+    expect(descriptor?.arn).toContain("arn:aws:logs");
+    expect(descriptor?.storedBytes).toBe(1024);
+    expect(descriptor?.retentionDays).toBe(30);
   });
 
-  it("resolves a log group from an ARN (strips prefix)", async () => {
+  it("resolves a log group from an ARN (strips prefix and :* suffix)", async () => {
     const payload = JSON.stringify({
       logGroups: [
         {
@@ -402,12 +490,14 @@ describe("resolveLogGroup — happy path", () => {
     });
     const stub = createStub({ stdout: payload, exitCode: 0 });
 
+    // Use an ARN with the real :* wildcard suffix — must resolve to the name.
     const arn =
-      "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/my-function";
+      "arn:aws:logs:us-east-1:123456789012:log-group:/aws/lambda/my-function:*";
     const descriptor = await resolveLogGroup(arn, { binary: stub });
 
-    expect(descriptor.name).toBe("/aws/lambda/my-function");
-    expect(descriptor.retentionDays).toBe(7);
+    expect(descriptor).not.toBeNull();
+    expect(descriptor?.name).toBe("/aws/lambda/my-function");
+    expect(descriptor?.retentionDays).toBe(7);
   });
 
   it("caches subsequent calls (second call without binary still resolves)", async () => {
@@ -417,34 +507,26 @@ describe("resolveLogGroup — happy path", () => {
     // First call: uses stub
     await resolveLogGroup("/aws/lambda/function-1", { binary: stub });
 
-    // Second call: no binary, but hits cache — must not throw
+    // Second call: no binary, but hits cache — must return descriptor, not null
     const cached = await resolveLogGroup("/aws/lambda/function-1", {
       binary: "/nonexistent/aws",
     });
-    expect(cached.name).toBe("/aws/lambda/function-1");
+    expect(cached).not.toBeNull();
+    expect(cached?.name).toBe("/aws/lambda/function-1");
   });
 });
 
 describe("resolveLogGroup — not found", () => {
-  it("throws SERVICE_CLIENT_ERROR when the log group list is empty", async () => {
+  it("returns null when the log group is not found (graceful degradation)", async () => {
     const stub = createStub({
       stdout: JSON.stringify({ logGroups: [] }),
       exitCode: 0,
     });
 
-    await expect(
-      resolveLogGroup("/aws/lambda/nonexistent", { binary: stub }),
-    ).rejects.toBeInstanceOf(AxiError);
+    const result = await resolveLogGroup("/aws/lambda/nonexistent", {
+      binary: stub,
+    });
 
-    try {
-      const stub2 = createStub({
-        stdout: JSON.stringify({ logGroups: [] }),
-        exitCode: 0,
-      });
-      await resolveLogGroup("/aws/lambda/nonexistent", { binary: stub2 });
-    } catch (e) {
-      expect((e as AxiError).code).toBe("SERVICE_CLIENT_ERROR");
-      expect((e as AxiError).message).toContain("not found");
-    }
+    expect(result).toBeNull();
   });
 });

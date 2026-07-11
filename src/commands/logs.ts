@@ -11,6 +11,8 @@
  *   tailRun(options)                  → TailResult
  *   filterRun(options)                → TailResult
  *   describeLogGroupsRun(options)     → LogGroupsResult
+ *   _extractTailArgs(args)            → TailArgs   (@internal, for arg-parsing tests)
+ *   _extractFilterArgs(args)          → FilterArgs (@internal, for arg-parsing tests)
  *   logsCommand(args, context)        → AxiCliCommand adapter
  *   LOGS_HELP                         → help string
  */
@@ -74,7 +76,12 @@ const UNIT_MS: Readonly<Record<string, number>> = {
  * Accepts:
  * - Relative durations: `15m`, `1h`, `2h`, `6h`, `1d`
  * - Epoch-millisecond integers: `1720692000000`
- * - ISO 8601 / RFC 2822 strings: `2026-07-11T10:00:00Z`
+ * - Fully-qualified ISO 8601 strings with a timezone: `2026-07-11T10:00:00Z`
+ *   or `2026-07-11T10:00:00+05:30`
+ *
+ * Explicitly rejects bare ISO datetimes without a timezone designator
+ * (e.g. `2026-07-11T10:00:00`) — `Date.parse` would silently parse them as
+ * local time, which is non-deterministic across runtimes.
  *
  * Throws USAGE_ERROR for anything else.
  */
@@ -92,7 +99,24 @@ export function parseSince(since: string, now = Date.now()): number {
     return asInt;
   }
 
-  // ISO / RFC 2822 / other date strings
+  // Reject bare ISO datetimes without a timezone designator — local-time
+  // parsing is non-deterministic and produces wrong results on agent machines
+  // in different TZs.  Valid: "...Z" or "...+HH:MM".
+  // Pattern: YYYY-MM-DDTHH:MM:SS with optional fractional seconds, no offset.
+  const BARE_ISO_DT_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$/;
+  if (BARE_ISO_DT_RE.test(since)) {
+    throw new AxiError(
+      `Ambiguous datetime "${since}" has no timezone — append Z for UTC or +HH:MM for a fixed offset`,
+      "USAGE_ERROR",
+      [
+        "Append Z for UTC: 2026-07-11T10:00:00Z",
+        "Or add an offset: 2026-07-11T10:00:00+00:00",
+        "Or use a relative duration: 15m, 1h, 2h, 1d",
+      ],
+    );
+  }
+
+  // Fully-qualified ISO / RFC 2822 strings (with timezone)
   const asDate = Date.parse(since);
   if (!Number.isNaN(asDate)) {
     return asDate;
@@ -433,38 +457,81 @@ export async function logsCommand(
   );
 }
 
-// ─── Sub-command arg parsers ──────────────────────────────────────────────────
+// ─── Exported arg-parsing helpers (@internal) ─────────────────────────────────
+//
+// These extract typed options from raw CLI args. Exported so tests can verify
+// position-independent parsing (flag-before-positional) without going through
+// the full subprocess boundary.
 
-async function parseTailArgs(
-  args: string[],
-  context: AwsContext | undefined,
-): Promise<TailResult> {
-  // First non-flag positional is the log group name
-  const logGroupName = args.find((a) => !a.startsWith("-"));
+export interface TailArgs {
+  readonly logGroupName: string;
+  readonly since: string | undefined;
+  readonly limit: number | undefined;
+  readonly streamName: string | undefined;
+  readonly pattern: string | undefined;
+  readonly nextToken: string | undefined;
+}
+
+/**
+ * Parse `logs tail` argv into typed options.
+ *
+ * Flags are consumed FIRST so their values are never mistaken for the positional
+ * log group name. This means `--since 1h /aws/lambda/fn` resolves correctly to
+ * `{logGroupName: "/aws/lambda/fn", since: "1h"}` — not `{logGroupName: "1h"}`.
+ *
+ * @internal — exported for arg-parsing unit tests.
+ */
+export function _extractTailArgs(args: readonly string[]): TailArgs {
+  // Pull ALL named flags first.
+  const [since, r1] = pullFlag([...args], "--since");
+  const [limitStr, r2] = pullFlag(r1, "--limit");
+  const [stream, r3] = pullFlag(r2, "--stream");
+  const [pattern, r4] = pullFlag(r3, "--pattern");
+  const [nextToken, r5] = pullFlag(r4, "--next-token");
+
+  // First remaining non-flag string is the log group name.
+  const logGroupName = r5.find((a) => !a.startsWith("-"));
   if (logGroupName === undefined) {
     throw new AxiError("logs tail requires a log group name", "USAGE_ERROR", [
       "Usage: aws-axi logs tail <log-group-name> [--since 15m] [--limit 50]",
     ]);
   }
 
-  let remaining: string[] = args.filter((a) => a !== logGroupName);
-
-  const [since, r1] = pullFlag(remaining, "--since");
-  const [limitStr, r2] = pullFlag(r1, "--limit");
-  const [stream, r3] = pullFlag(r2, "--stream");
-  const [pattern, r4] = pullFlag(r3, "--pattern");
-  const [nextToken] = pullFlag(r4, "--next-token");
-
-  const limit = parseLimit(limitStr);
-
-  return tailRun({ logGroupName, since, limit, streamName: stream, pattern, nextToken, context });
+  return {
+    logGroupName,
+    since,
+    limit: parseLimit(limitStr),
+    streamName: stream,
+    pattern,
+    nextToken,
+  };
 }
 
-async function parseFilterArgs(
-  args: string[],
-  context: AwsContext | undefined,
-): Promise<TailResult> {
-  const positionals = args.filter((a) => !a.startsWith("-"));
+export interface FilterArgs {
+  readonly logGroupName: string;
+  readonly pattern: string;
+  readonly since: string | undefined;
+  readonly limit: number | undefined;
+  readonly nextToken: string | undefined;
+}
+
+/**
+ * Parse `logs filter` argv into typed options.
+ *
+ * Flags are consumed FIRST (same fix as `_extractTailArgs`), then the first
+ * two remaining non-flag positionals are taken as `<log-group-name>` and
+ * `<pattern>`.
+ *
+ * @internal — exported for arg-parsing unit tests.
+ */
+export function _extractFilterArgs(args: readonly string[]): FilterArgs {
+  // Pull ALL named flags first.
+  const [since, r1] = pullFlag([...args], "--since");
+  const [limitStr, r2] = pullFlag(r1, "--limit");
+  const [nextToken, r3] = pullFlag(r2, "--next-token");
+
+  // Remaining non-flag positionals: [<log-group-name>, <pattern>]
+  const positionals = r3.filter((a) => !a.startsWith("-"));
   const logGroupName = positionals[0];
   const pattern = positionals[1];
 
@@ -474,26 +541,38 @@ async function parseFilterArgs(
     ]);
   }
   if (pattern === undefined) {
-    throw new AxiError(
-      "logs filter requires a filter pattern",
-      "USAGE_ERROR",
-      [
-        "Usage: aws-axi logs filter <log-group-name> <pattern> [--since 15m]",
-        'Example: aws-axi logs filter /aws/lambda/fn "ERROR"',
-      ],
-    );
+    throw new AxiError("logs filter requires a filter pattern", "USAGE_ERROR", [
+      "Usage: aws-axi logs filter <log-group-name> <pattern> [--since 15m]",
+      'Example: aws-axi logs filter /aws/lambda/fn "ERROR"',
+    ]);
   }
 
-  let remaining: string[] = args.filter(
-    (a) => a !== logGroupName && a !== pattern,
-  );
+  return {
+    logGroupName,
+    pattern,
+    since,
+    limit: parseLimit(limitStr),
+    nextToken,
+  };
+}
 
-  const [since, r1] = pullFlag(remaining, "--since");
-  const [limitStr, r2] = pullFlag(r1, "--limit");
-  const [nextToken] = pullFlag(r2, "--next-token");
+// ─── Sub-command arg parsers (private — thin callers of the exported helpers) ─
 
-  const limit = parseLimit(limitStr);
+async function parseTailArgs(
+  args: string[],
+  context: AwsContext | undefined,
+): Promise<TailResult> {
+  const { logGroupName, since, limit, streamName, pattern, nextToken } =
+    _extractTailArgs(args);
+  return tailRun({ logGroupName, since, limit, streamName, pattern, nextToken, context });
+}
 
+async function parseFilterArgs(
+  args: string[],
+  context: AwsContext | undefined,
+): Promise<TailResult> {
+  const { logGroupName, pattern, since, limit, nextToken } =
+    _extractFilterArgs(args);
   return filterRun({ logGroupName, pattern, since, limit, nextToken, context });
 }
 
@@ -501,14 +580,9 @@ async function parseDescribeLogGroupsArgs(
   args: string[],
   context: AwsContext | undefined,
 ): Promise<LogGroupsResult> {
-  let remaining: string[] = [...args];
-
-  const [prefix, r1] = pullFlag(remaining, "--prefix");
+  const [prefix, r1] = pullFlag([...args], "--prefix");
   const [limitStr] = pullFlag(r1, "--limit");
-
-  const limit = parseLimit(limitStr);
-
-  return describeLogGroupsRun({ prefix, limit, context });
+  return describeLogGroupsRun({ prefix, limit: parseLimit(limitStr), context });
 }
 
 // ─── Record builders (widen typed results to Record<string, unknown>) ─────────
