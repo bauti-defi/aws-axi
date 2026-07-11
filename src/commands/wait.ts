@@ -20,7 +20,7 @@
 import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import { awsRaw } from "../aws.js";
-import { loadService, getWaiter, type ServiceModel } from "../model.js";
+import { loadService, getWaiter, pascalToKebab, type ServiceModel } from "../model.js";
 import { parseAwsError } from "../errors.js";
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -100,32 +100,6 @@ examples:
   aws-axi wait rds db-instance-available --db-instance-identifier mydb
   aws-axi wait ec2 instance-running --profile prod --region us-east-1 --instance-ids i-xxx
 `;
-
-// ── Casing conversion ─────────────────────────────────────────────────────────
-
-/**
- * Convert a botocore PascalCase waiter key to the AWS CLI kebab-case form.
- *
- * Handles acronyms correctly (DB, VPC, ECS) using the same two-pass algorithm
- * as botocore's xform_name:
- *   1. Insert `-` between a run of uppercase letters and an uppercase-then-lowercase
- *      sequence (e.g. `DBI` + `nstance` → `DB-Instance`)
- *   2. Insert `-` between a lowercase/digit and an uppercase letter
- *      (e.g. `Instance` + `Running` → `Instance-Running`)
- *   3. Lowercase the result
- *
- * Examples:
- *   InstanceRunning       → instance-running
- *   BucketExists          → bucket-exists
- *   DBInstanceAvailable   → db-instance-available
- *   VpcAvailable          → vpc-available
- */
-function pascalToKebab(s: string): string {
-  return s
-    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1-$2")
-    .replace(/([a-z\d])([A-Z])/g, "$1-$2")
-    .toLowerCase();
-}
 
 /**
  * Build a reverse map from kebab-case CLI names to their raw PascalCase

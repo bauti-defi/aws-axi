@@ -325,6 +325,49 @@ export function listWaiters(service: ServiceModel): readonly string[] {
   return [...service.waiters.keys()];
 }
 
+// ── Name conversion utilities — exported for reuse by engine and wait ─────────
+
+/**
+ * Convert a botocore PascalCase name to its CLI kebab-case equivalent.
+ *
+ * Implements botocore's two-pass `xform_name` algorithm — acronym-safe:
+ *   "DescribeDBInstances"        → "describe-db-instances"
+ *   "GetIPSet"                   → "get-ip-set"
+ *   "ListSMSSandboxPhoneNumbers" → "list-sms-sandbox-phone-numbers"
+ *
+ * Exported here so the engine and the wait command share one implementation.
+ * The private copy that existed in `src/commands/wait.ts` imports this instead.
+ */
+export function pascalToKebab(s: string): string {
+  return s
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1-$2")
+    .replace(/([a-z\d])([A-Z])/g, "$1-$2")
+    .toLowerCase();
+}
+
+/**
+ * Resolve a user's kebab-case operation name to the exact PascalCase key
+ * stored in the botocore model.
+ *
+ * Performs a reverse-map lookup over the model's actual PascalCase keys via
+ * `pascalToKebab`. This is the only correct approach for acronym-bearing names:
+ *   "get-ip-set"   → "GetIPSet"   (naive title-casing gives "GetIpSet" — wrong)
+ *   "describe-db-instances" → "DescribeDBInstances"
+ *
+ * @returns The PascalCase key if found, or `undefined` if no op matches.
+ */
+export function resolveOperationName(
+  service: ServiceModel,
+  kebabOp: string,
+): string | undefined {
+  for (const pascalKey of service.operations.keys()) {
+    if (pascalToKebab(pascalKey) === kebabOp) {
+      return pascalKey;
+    }
+  }
+  return undefined;
+}
+
 // ── Parsing internals ─────────────────────────────────────────────────────────
 
 function parseService(name: string, dataDir: string): ServiceModel {

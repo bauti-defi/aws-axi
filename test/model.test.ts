@@ -26,7 +26,7 @@ describe("loadService — fixture", () => {
     const model = loadService("fake-svc", { dataDir: FIXTURES_DIR });
     expect(model.service).toBe("fake-svc");
     expect(model.apiVersion).toBe("2020-01-01");
-    expect(model.operations.size).toBe(3);
+    expect(model.operations.size).toBe(5); // SimpleOp, RequiredOp, PaginatedOp, GetIPThing, GetDBThing
   });
 
   it("is idempotent — second call returns same cached object", () => {
