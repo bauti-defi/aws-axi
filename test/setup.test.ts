@@ -1,6 +1,16 @@
 /**
  * E2E tests for the setup command and hook installation.
- * Real filesystem (mkdtempSync), no mocks — real installSessionStartHooks runs.
+ *
+ * Tests exercise the REAL bin path shape: `bin/aws-axi.ts` (a `.ts` file,
+ * committed as 100644/non-executable). This is the form that `process.argv[1]`
+ * holds during any `bun run bin/aws-axi.ts` invocation — the same shape that
+ * previously caused `installSessionStartHooks` to silently no-op while
+ * reporting success.
+ *
+ * Invariants:
+ *   - Every test that calls setupRun MUST assert at least one hook file was
+ *     actually written. A run that writes nothing fails the test.
+ *   - All tests use real temp directories (no mocks).
  */
 import { describe, it, expect, afterEach } from "bun:test";
 import {
@@ -11,11 +21,17 @@ import {
   existsSync,
   rmSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { setupRun } from "../src/commands/setup.js";
 
-const FAKE_EXEC_SUFFIX = "dist/bin/aws-axi.js";
+// The REAL bin entrypoint — use its abs path as execPath in all tests.
+// This is what process.argv[1] contains during `bun run bin/aws-axi.ts`.
+const REAL_BIN = resolve(
+  join(import.meta.dir, "..", "bin", "aws-axi.ts"),
+);
+
+const tempDirs: string[] = [];
 
 function makeHome(tmp: string): string {
   const home = join(tmp, "home");
@@ -23,33 +39,25 @@ function makeHome(tmp: string): string {
   return home;
 }
 
-function makeFakeExec(tmp: string): string {
-  const dir = join(tmp, "pkg", "dist", "bin");
-  mkdirSync(dir, { recursive: true });
-  const execFile = join(dir, "aws-axi.js");
-  writeFileSync(execFile, "// stub aws-axi dist entrypoint\n", "utf-8");
-  return execFile;
+function claudeSettingsPath(home: string): string {
+  return join(home, ".claude", "settings.json");
 }
 
-function readClaudeSettings(home: string): Record<string, unknown> {
-  const p = join(home, ".claude", "settings.json");
-  return JSON.parse(readFileSync(p, "utf-8")) as Record<string, unknown>;
+function codexHooksPath(home: string): string {
+  return join(home, ".codex", "hooks.json");
 }
 
-function readCodexHooks(home: string): Record<string, unknown> {
-  const p = join(home, ".codex", "hooks.json");
-  return JSON.parse(readFileSync(p, "utf-8")) as Record<string, unknown>;
-}
-
-function readCodexConfig(home: string): string {
-  return readFileSync(join(home, ".codex", "config.toml"), "utf-8");
+function codexConfigPath(home: string): string {
+  return join(home, ".codex", "config.toml");
 }
 
 function openCodePluginPath(home: string): string {
   return join(home, ".config", "opencode", "plugins", "axi-aws-axi.js");
 }
 
-const tempDirs: string[] = [];
+function readJson(p: string): Record<string, unknown> {
+  return JSON.parse(readFileSync(p, "utf-8")) as Record<string, unknown>;
+}
 
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
@@ -62,125 +70,175 @@ afterEach(() => {
 });
 
 // ---------------------------------------------------------------------------
-// Happy-path installation across all three targets
+// Happy-path — real .ts bin path shape writes all three targets
 // ---------------------------------------------------------------------------
 
-describe("setupRun — installs hooks across all three agent targets", () => {
-  it("writes Claude Code settings.json SessionStart hook", () => {
+describe("setupRun — writes all targets for the .ts bin path shape", () => {
+  it("reports overallStatus: installed when all targets succeed", () => {
     const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-"));
     tempDirs.push(tmp);
     const home = makeHome(tmp);
-    const execPath = makeFakeExec(tmp);
 
-    setupRun({ homeDir: home, execPath });
+    const result = setupRun({ homeDir: home, execPath: REAL_BIN });
 
-    const settings = readClaudeSettings(home);
-    const hooks = (settings as { hooks?: { SessionStart?: unknown[] } }).hooks;
-    expect(Array.isArray(hooks?.SessionStart)).toBe(true);
-    const group = (hooks?.SessionStart as Array<{ hooks?: unknown[] }>)[0];
-    expect(group?.hooks).toBeDefined();
-    const entry = (group?.hooks as Array<{ command?: string; type?: string }>)[0];
-    expect(typeof entry?.command).toBe("string");
-    expect(entry?.command).toContain("aws-axi");
-    expect(entry?.type).toBe("command");
+    expect(result.overallStatus).toBe("installed");
+    expect(result.targets["claude-code"].ok).toBe(true);
+    expect(result.targets.codex.ok).toBe(true);
+    expect(result.targets.opencode.ok).toBe(true);
   });
 
-  it("writes Codex hooks.json SessionStart hook", () => {
+  it("Claude Code settings.json is written with bun-run hook command", () => {
     const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-"));
     tempDirs.push(tmp);
     const home = makeHome(tmp);
-    const execPath = makeFakeExec(tmp);
 
-    setupRun({ homeDir: home, execPath });
+    setupRun({ homeDir: home, execPath: REAL_BIN });
 
-    const hooks = readCodexHooks(home);
-    const sessionStart = (hooks as { hooks?: { SessionStart?: unknown[] } }).hooks?.SessionStart;
-    expect(Array.isArray(sessionStart)).toBe(true);
+    // File must exist — a no-op / inert run would leave it absent.
+    expect(existsSync(claudeSettingsPath(home))).toBe(true);
+
+    const settings = readJson(claudeSettingsPath(home));
+    const groups = (
+      settings as {
+        hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string; type?: string }> }> };
+      }
+    ).hooks?.SessionStart ?? [];
+    expect(groups.length).toBeGreaterThan(0);
+
+    const hookEntry = (groups as Array<{ hooks?: Array<{ command?: string; type?: string }> }>)[0]
+      ?.hooks?.[0];
+    expect(hookEntry?.type).toBe("command");
+    // Command must use "bun run" (not a bare .ts path that would fail with permission denied).
+    expect(hookEntry?.command).toContain("aws-axi");
+    expect(hookEntry?.command).toMatch(/^bun run .+aws-axi\.ts$/);
   });
 
-  it("writes Codex config.toml with hooks = true", () => {
+  it("Codex hooks.json is written with bun-run hook command", () => {
     const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-"));
     tempDirs.push(tmp);
     const home = makeHome(tmp);
-    const execPath = makeFakeExec(tmp);
 
-    setupRun({ homeDir: home, execPath });
+    setupRun({ homeDir: home, execPath: REAL_BIN });
 
-    const toml = readCodexConfig(home);
+    expect(existsSync(codexHooksPath(home))).toBe(true);
+
+    const hooks = readJson(codexHooksPath(home));
+    const groups = (
+      hooks as {
+        hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string }> }> };
+      }
+    ).hooks?.SessionStart ?? [];
+    expect(groups.length).toBeGreaterThan(0);
+
+    const cmd = (groups as Array<{ hooks?: Array<{ command?: string }> }>)[0]?.hooks?.[0]?.command;
+    expect(cmd).toMatch(/^bun run .+aws-axi\.ts$/);
+  });
+
+  it("Codex config.toml is written with hooks = true", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-"));
+    tempDirs.push(tmp);
+    const home = makeHome(tmp);
+
+    setupRun({ homeDir: home, execPath: REAL_BIN });
+
+    expect(existsSync(codexConfigPath(home))).toBe(true);
+    const toml = readFileSync(codexConfigPath(home), "utf-8");
     expect(toml).toContain("[features]");
     expect(toml).toContain("hooks = true");
   });
 
-  it("writes OpenCode plugin file", () => {
+  it("OpenCode plugin is written with managed marker and correct split-arg spawn", () => {
     const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-"));
     tempDirs.push(tmp);
     const home = makeHome(tmp);
-    const execPath = makeFakeExec(tmp);
 
-    setupRun({ homeDir: home, execPath });
+    setupRun({ homeDir: home, execPath: REAL_BIN });
 
     expect(existsSync(openCodePluginPath(home))).toBe(true);
+
     const plugin = readFileSync(openCodePluginPath(home), "utf-8");
     expect(plugin).toContain("axi-sdk-js managed opencode plugin: aws-axi");
     expect(plugin).toContain("experimental.chat.system.transform");
+    expect(plugin).toContain("AxiAwsAxiAmbientContextPlugin");
+    // Must use split-args spawn so Node spawn with shell:false works correctly.
+    // A single-string "bun run /path/aws-axi.ts" would fail for shell:false.
+    expect(plugin).toContain('"bun", ["run",');
+    // Must reference the actual bin path
+    expect(plugin).toContain("aws-axi.ts");
   });
 });
 
 // ---------------------------------------------------------------------------
-// Idempotency — second run is a no-op
+// Idempotency — second run is a no-op; no duplicate hook groups
 // ---------------------------------------------------------------------------
 
-describe("setupRun — idempotency (second run produces identical state)", () => {
-  it("Claude Code settings.json is unchanged on second run", () => {
+describe("setupRun — idempotency", () => {
+  it("Claude Code settings.json is byte-identical after second run", () => {
     const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-"));
     tempDirs.push(tmp);
     const home = makeHome(tmp);
-    const execPath = makeFakeExec(tmp);
 
-    setupRun({ homeDir: home, execPath });
-    const after1 = readFileSync(join(home, ".claude", "settings.json"), "utf-8");
+    setupRun({ homeDir: home, execPath: REAL_BIN });
+    const after1 = readFileSync(claudeSettingsPath(home), "utf-8");
 
-    setupRun({ homeDir: home, execPath });
-    const after2 = readFileSync(join(home, ".claude", "settings.json"), "utf-8");
+    setupRun({ homeDir: home, execPath: REAL_BIN });
+    const after2 = readFileSync(claudeSettingsPath(home), "utf-8");
 
     expect(after2).toBe(after1);
   });
 
-  it("hooks appear exactly once in settings.json after two runs", () => {
+  it("exactly one managed hook group after two runs", () => {
     const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-"));
     tempDirs.push(tmp);
     const home = makeHome(tmp);
-    const execPath = makeFakeExec(tmp);
 
-    setupRun({ homeDir: home, execPath });
-    setupRun({ homeDir: home, execPath });
+    setupRun({ homeDir: home, execPath: REAL_BIN });
+    setupRun({ homeDir: home, execPath: REAL_BIN });
 
-    const settings = readClaudeSettings(home);
-    const groups = (settings as { hooks?: { SessionStart?: unknown[] } }).hooks?.SessionStart ?? [];
-    const managedGroups = (groups as Array<{ hooks?: Array<{ command?: string }> }>).filter(
+    const settings = readJson(claudeSettingsPath(home));
+    const groups =
+      (
+        settings as {
+          hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string }> }> };
+        }
+      ).hooks?.SessionStart ?? [];
+    const managed = (groups as Array<{ hooks?: Array<{ command?: string }> }>).filter(
       (g) => g.hooks?.some((h) => h.command?.includes("aws-axi")),
     );
-    expect(managedGroups).toHaveLength(1);
+    expect(managed).toHaveLength(1);
   });
 
-  it("Codex config.toml is unchanged on second run", () => {
+  it("Codex config.toml is byte-identical after second run", () => {
     const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-"));
     tempDirs.push(tmp);
     const home = makeHome(tmp);
-    const execPath = makeFakeExec(tmp);
 
-    setupRun({ homeDir: home, execPath });
-    const after1 = readCodexConfig(home);
+    setupRun({ homeDir: home, execPath: REAL_BIN });
+    const after1 = readFileSync(codexConfigPath(home), "utf-8");
 
-    setupRun({ homeDir: home, execPath });
-    const after2 = readCodexConfig(home);
+    setupRun({ homeDir: home, execPath: REAL_BIN });
+    const after2 = readFileSync(codexConfigPath(home), "utf-8");
+
+    expect(after2).toBe(after1);
+  });
+
+  it("OpenCode plugin is byte-identical after second run", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-"));
+    tempDirs.push(tmp);
+    const home = makeHome(tmp);
+
+    setupRun({ homeDir: home, execPath: REAL_BIN });
+    const after1 = readFileSync(openCodePluginPath(home), "utf-8");
+
+    setupRun({ homeDir: home, execPath: REAL_BIN });
+    const after2 = readFileSync(openCodePluginPath(home), "utf-8");
 
     expect(after2).toBe(after1);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Path repair — stale hook command is corrected
+// Path repair — stale hook command is corrected in-place
 // ---------------------------------------------------------------------------
 
 describe("setupRun — path repair", () => {
@@ -189,59 +247,113 @@ describe("setupRun — path repair", () => {
     tempDirs.push(tmp);
     const home = makeHome(tmp);
 
-    // Pre-seed a stale hook pointing to an old path
-    const oldExecDir = join(tmp, "old", "dist", "bin");
-    mkdirSync(oldExecDir, { recursive: true });
-    const oldExec = join(oldExecDir, "aws-axi.js");
-    writeFileSync(oldExec, "// old\n", "utf-8");
+    // Seed a stale hook pointing to a fake old .ts path
+    const oldBinDir = join(tmp, "v1", "bin");
+    mkdirSync(oldBinDir, { recursive: true });
+    const oldBin = join(oldBinDir, "aws-axi.ts");
+    writeFileSync(oldBin, "// old stub\n", "utf-8");
 
-    setupRun({ homeDir: home, execPath: oldExec });
-    const staleSettings = readClaudeSettings(home);
+    setupRun({ homeDir: home, execPath: oldBin });
     const staleCmd = (
-      staleSettings as { hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string }> }> } }
+      readJson(claudeSettingsPath(home)) as {
+        hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string }> }> };
+      }
     ).hooks?.SessionStart?.[0]?.hooks?.[0]?.command;
-    expect(staleCmd).toContain("aws-axi");
+    expect(staleCmd).toBe(`bun run ${oldBin}`);
 
-    // Now setup with a new exec path — should repair in place
-    const newExecDir = join(tmp, "new", "dist", "bin");
-    mkdirSync(newExecDir, { recursive: true });
-    const newExec = join(newExecDir, "aws-axi.js");
-    writeFileSync(newExec, "// new\n", "utf-8");
+    // Re-run with a new execPath — must repair the hook command in-place.
+    const newBinDir = join(tmp, "v2", "bin");
+    mkdirSync(newBinDir, { recursive: true });
+    const newBin = join(newBinDir, "aws-axi.ts");
+    writeFileSync(newBin, "// new stub\n", "utf-8");
 
-    setupRun({ homeDir: home, execPath: newExec });
+    setupRun({ homeDir: home, execPath: newBin });
 
-    const repairedSettings = readClaudeSettings(home);
     const repairedCmd = (
-      repairedSettings as { hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string }> }> } }
+      readJson(claudeSettingsPath(home)) as {
+        hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string }> }> };
+      }
     ).hooks?.SessionStart?.[0]?.hooks?.[0]?.command;
-    expect(repairedCmd).toContain(newExec);
-    expect(repairedCmd).not.toBe(staleCmd);
+
+    // Must be updated to the new path, not the old one
+    expect(repairedCmd).toBe(`bun run ${newBin}`);
+    expect(repairedCmd).toMatch(/^bun run .+aws-axi\.ts$/);
   });
 
-  it("still has exactly one managed hook group after repair", () => {
+  it("exactly one managed hook group after repair", () => {
     const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-"));
     tempDirs.push(tmp);
     const home = makeHome(tmp);
 
-    const oldExecDir = join(tmp, "old", "dist", "bin");
-    mkdirSync(oldExecDir, { recursive: true });
-    const oldExec = join(oldExecDir, "aws-axi.js");
-    writeFileSync(oldExec, "// old\n", "utf-8");
-    setupRun({ homeDir: home, execPath: oldExec });
+    const oldBinDir = join(tmp, "v1", "bin");
+    mkdirSync(oldBinDir, { recursive: true });
+    const oldBin = join(oldBinDir, "aws-axi.ts");
+    writeFileSync(oldBin, "// old\n", "utf-8");
+    setupRun({ homeDir: home, execPath: oldBin });
 
-    const newExecDir = join(tmp, "new", "dist", "bin");
-    mkdirSync(newExecDir, { recursive: true });
-    const newExec = join(newExecDir, "aws-axi.js");
-    writeFileSync(newExec, "// new\n", "utf-8");
-    setupRun({ homeDir: home, execPath: newExec });
+    const newBinDir = join(tmp, "v2", "bin");
+    mkdirSync(newBinDir, { recursive: true });
+    const newBin = join(newBinDir, "aws-axi.ts");
+    writeFileSync(newBin, "// new\n", "utf-8");
+    setupRun({ homeDir: home, execPath: newBin });
 
-    const settings = readClaudeSettings(home);
+    const settings = readJson(claudeSettingsPath(home));
     const groups =
-      (settings as { hooks?: { SessionStart?: unknown[] } }).hooks?.SessionStart ?? [];
-    const managedGroups = (groups as Array<{ hooks?: Array<{ command?: string }> }>).filter(
+      (
+        settings as {
+          hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string }> }> };
+        }
+      ).hooks?.SessionStart ?? [];
+    const managed = (groups as Array<{ hooks?: Array<{ command?: string }> }>).filter(
       (g) => g.hooks?.some((h) => h.command?.includes("aws-axi")),
     );
-    expect(managedGroups).toHaveLength(1);
+    expect(managed).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Error surface — malformed JSON must be reported, not swallowed
+// ---------------------------------------------------------------------------
+
+describe("setupRun — honest error reporting", () => {
+  it("surfaces malformed settings.json as a per-target error, not a silent no-op", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-"));
+    tempDirs.push(tmp);
+    const home = makeHome(tmp);
+
+    // Pre-seed a corrupt Claude Code settings file
+    const settingsDir = join(home, ".claude");
+    mkdirSync(settingsDir, { recursive: true });
+    writeFileSync(join(settingsDir, "settings.json"), "{ INVALID JSON }", "utf-8");
+
+    const result = setupRun({ homeDir: home, execPath: REAL_BIN });
+
+    // claude-code target must report the error, not silently succeed
+    expect(result.targets["claude-code"].ok).toBe(false);
+    expect(result.targets["claude-code"].error).toBeTruthy();
+    // overallStatus must reflect the partial failure
+    expect(result.overallStatus).toBe("partial");
+  });
+
+  it("reports partial status and refuses to overwrite unmanaged OpenCode plugin", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-"));
+    tempDirs.push(tmp);
+    const home = makeHome(tmp);
+
+    // Pre-seed an unmanaged OpenCode plugin
+    const pluginDir = join(home, ".config", "opencode", "plugins");
+    mkdirSync(pluginDir, { recursive: true });
+    writeFileSync(
+      join(pluginDir, "axi-aws-axi.js"),
+      "export const UserPlugin = async () => ({})\n",
+      "utf-8",
+    );
+
+    const result = setupRun({ homeDir: home, execPath: REAL_BIN });
+
+    expect(result.targets.opencode.ok).toBe(false);
+    expect(result.targets.opencode.error).toContain("refusing to overwrite");
+    expect(result.overallStatus).toBe("partial");
   });
 });
 
@@ -264,15 +376,27 @@ describe("setupCommand — argument validation", () => {
     await expect(setupCommand([], undefined)).rejects.toBeInstanceOf(AxiError);
   });
 
-  it("accepts 'hooks' subcommand and returns structured output", async () => {
+  it("accepts 'hooks' and returns structured per-target output", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-"));
     tempDirs.push(tmp);
     const home = makeHome(tmp);
-    const execPath = makeFakeExec(tmp);
 
     const { setupCommand } = await import("../src/commands/setup.js");
 
-    const result = await setupCommand(["hooks"], undefined, { homeDir: home, execPath });
-    expect(result).toMatchObject({ hooks: { status: "installed" } });
+    const result = await setupCommand(["hooks"], undefined, {
+      homeDir: home,
+      execPath: REAL_BIN,
+    });
+
+    expect(result).toMatchObject({
+      hooks: {
+        status: "installed",
+        targets: {
+          "claude-code": { status: "ok" },
+          codex: { status: "ok" },
+          opencode: { status: "ok" },
+        },
+      },
+    });
   });
 });
