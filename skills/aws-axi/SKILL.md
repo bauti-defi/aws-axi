@@ -33,8 +33,8 @@ Use aws-axi whenever a task touches AWS: describing EC2 instances, S3 buckets, I
 ## Commands
 
 ```
-commands[10]:
-  (none)=dashboard, whoami, ec2, kms, s3, iam, logs, setup, ssm, secretsmanager (alias: secrets)
+commands[11]:
+  (none)=dashboard, whoami, ec2, kms, s3, iam, logs, setup, ssm, secretsmanager (alias: secrets), wait
 ```
 
 Installed copies also inherit the SDK built-in `update` command.
