@@ -1,0 +1,10 @@
+{
+  "pagination": {
+    "PaginatedOp": {
+      "input_token": "NextToken",
+      "output_token": "NextToken",
+      "result_key": "Items",
+      "limit_key": "MaxResults"
+    }
+  }
+}

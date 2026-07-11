@@ -1,0 +1,24 @@
+{
+  "version": 2,
+  "waiters": {
+    "ItemExists": {
+      "delay": 5,
+      "operation": "PaginatedOp",
+      "maxAttempts": 20,
+      "acceptors": [
+        {
+          "expected": "available",
+          "matcher": "pathAll",
+          "state": "success",
+          "argument": "Items[].Status"
+        },
+        {
+          "expected": "deleted",
+          "matcher": "pathAny",
+          "state": "failure",
+          "argument": "Items[].Status"
+        }
+      ]
+    }
+  }
+}
