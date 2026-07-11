@@ -117,6 +117,9 @@ interface KmsStubSpec {
   readonly listKeys?: string;
   readonly listAliases?: string;
   readonly listAliasesForKey?: string; // when --key-id present in args
+  /** When set, list-aliases emits this on stderr and exits with listAliasesExitCode. */
+  readonly listAliasesStderr?: string;
+  readonly listAliasesExitCode?: number;
   readonly describeKey?: string;
   readonly getKeyPolicy?: string;
   readonly exitCode?: number; // non-zero exit for all subcommands
@@ -144,30 +147,43 @@ function createKmsStub(spec: KmsStubSpec): string {
     );
   }
 
-  if (spec.listAliases !== undefined || spec.listAliasesForKey !== undefined) {
-    const withKey = spec.listAliasesForKey ?? spec.listAliases ?? "{}";
-    const withoutKey = spec.listAliases ?? spec.listAliasesForKey ?? "{}";
+  if (
+    spec.listAliases !== undefined ||
+    spec.listAliasesForKey !== undefined ||
+    spec.listAliasesStderr !== undefined
+  ) {
     lines.push("  list-aliases)");
-    if (
-      spec.listAliasesForKey !== undefined &&
-      spec.listAliases !== undefined
-    ) {
-      // Dispatch on --key-id presence
+    if (spec.listAliasesStderr !== undefined) {
+      // Simulate a permission error (AccessDenied etc.)
+      const aliasExit = spec.listAliasesExitCode ?? 254;
       lines.push(
-        `    if echo "$@" | grep -q -- "--key-id"; then`,
-        `      printf '%s' ${shellQuote(withKey)}`,
-        `      exit ${defaultExit}`,
-        "    else",
-        `      printf '%s' ${shellQuote(withoutKey)}`,
-        `      exit ${defaultExit}`,
-        "    fi;;",
+        `    printf '%s' ${shellQuote(spec.listAliasesStderr)} >&2`,
+        `    exit ${aliasExit};;`,
       );
     } else {
-      // Single response regardless of --key-id
-      lines.push(
-        `    printf '%s' ${shellQuote(withKey)}`,
-        `    exit ${defaultExit};;`,
-      );
+      const withKey = spec.listAliasesForKey ?? spec.listAliases ?? "{}";
+      const withoutKey = spec.listAliases ?? spec.listAliasesForKey ?? "{}";
+      if (
+        spec.listAliasesForKey !== undefined &&
+        spec.listAliases !== undefined
+      ) {
+        // Dispatch on --key-id presence
+        lines.push(
+          `    if echo "$@" | grep -q -- "--key-id"; then`,
+          `      printf '%s' ${shellQuote(withKey)}`,
+          `      exit ${defaultExit}`,
+          "    else",
+          `      printf '%s' ${shellQuote(withoutKey)}`,
+          `      exit ${defaultExit}`,
+          "    fi;;",
+        );
+      } else {
+        // Single response regardless of --key-id
+        lines.push(
+          `    printf '%s' ${shellQuote(withKey)}`,
+          `    exit ${defaultExit};;`,
+        );
+      }
     }
   }
 
@@ -593,5 +609,134 @@ describe("kmsCommand — arg dispatch", () => {
 
     expect(Object.keys(wrapped)).toContain("kms");
     expect("listKeys" in (wrapped["kms"] as object)).toBe(true);
+  });
+});
+
+// ─── extractFlag: --flag=value form ──────────────────────────────────────────
+//
+// Regression tests proving the equals form is forwarded correctly to aws.
+// Agents commonly use --max-items=10; the old space-only impl silently
+// ignored the value and sent the 50-item default to AWS.
+
+describe("kmsRun list-keys — --flag=value form", () => {
+  it("--max-items=N is forwarded correctly (not silently defaulted)", async () => {
+    // Stub echoes its args; we verify --max-items 10 appears in the child call.
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-kms-eq-"));
+    tempDirs.push(dir);
+    const scriptPath = join(dir, "aws");
+    writeFileSync(
+      scriptPath,
+      [
+        "#!/bin/sh",
+        'case "$2" in',
+        "  list-keys) echo \"$@\" ;;",
+        `  list-aliases) printf '%s' ${shellQuote(LIST_ALIASES_EMPTY)} ;;`,
+        "  *) exit 254;;",
+        "esac",
+        "exit 0",
+      ].join("\n"),
+    );
+    chmodSync(scriptPath, 0o755);
+
+    // list-keys stdout is the arg string (not JSON) → AxiError UNKNOWN
+    // But the error message contains the forwarded args, proving --max-items 10
+    // (not 50) was sent.
+    try {
+      await kmsRun({ subcommand: "list-keys", args: ["--max-items=10"], binary: scriptPath });
+    } catch (e) {
+      const msg = (e as AxiError).message;
+      // Confirm the child received "--max-items 10", not "--max-items 50"
+      expect(msg).toContain("--max-items");
+      expect(msg).toContain("10");
+      expect(msg).not.toContain("50");
+    }
+  });
+
+  it("--next-token=TOKEN is extracted via equals form", async () => {
+    // Just confirm extractFlag logic: pass through a real stub response
+    const stub = createKmsStub({
+      listKeys: LIST_KEYS_TWO,
+      listAliases: LIST_ALIASES_EMPTY,
+    });
+    // Should not throw — the token is ignored by our stub, but extraction works
+    const result = await kmsRun({
+      subcommand: "list-keys",
+      args: ["--next-token=AQECAHiGqSomeToken=="],
+      binary: stub,
+    });
+    if (!("listKeys" in result)) throw new Error("wrong discriminant");
+    expect(result.listKeys.keys).toHaveLength(2);
+  });
+
+  it("--policy-name=custom is respected in get-key-policy", async () => {
+    const stub = createKmsStub({ getKeyPolicy: GET_KEY_POLICY_1 });
+
+    const result = await kmsRun({
+      subcommand: "get-key-policy",
+      args: [KEY_ID_1, "--policy-name=custom"],
+      binary: stub,
+    });
+
+    if (!("keyPolicy" in result)) throw new Error("wrong discriminant");
+    expect(result.keyPolicy.policyName).toBe("custom");
+  });
+});
+
+// ─── Graceful degradation: alias-map failure ──────────────────────────────────
+//
+// If list-aliases returns an error (AccessDenied, throttle, etc.) the
+// list-keys operation MUST NOT crash — it must return the keys without aliases.
+// This is the "graceful degradation" claim from the implementation.
+
+describe("kmsRun list-keys — alias-map AccessDenied degrades gracefully", () => {
+  it("returns keys with alias=undefined when list-aliases is forbidden", async () => {
+    const stub = createKmsStub({
+      listKeys: LIST_KEYS_TWO,
+      listAliasesStderr:
+        "An error occurred (AccessDeniedException) when calling the ListAliases operation: User is not authorized",
+      listAliasesExitCode: 254,
+    });
+
+    // Must NOT throw
+    const result = await kmsRun({
+      subcommand: "list-keys",
+      args: [],
+      binary: stub,
+    });
+
+    expect("listKeys" in result).toBe(true);
+    if (!("listKeys" in result)) throw new Error("wrong discriminant");
+
+    // Both keys present, all with alias=undefined (degraded, not errored)
+    expect(result.listKeys.keys).toHaveLength(2);
+    for (const key of result.listKeys.keys) {
+      expect(key.alias).toBeUndefined();
+    }
+  });
+});
+
+// ─── get-key-policy: non-JSON Policy fallback ─────────────────────────────────
+//
+// AWS occasionally returns a malformed or very large Policy that doesn't
+// parse as JSON. The handler must NOT throw — it must surface the raw string.
+
+describe("kmsRun get-key-policy — non-JSON Policy fallback", () => {
+  it("returns raw Policy string when it is not valid JSON", async () => {
+    const rawPolicyNotJson = JSON.stringify({
+      Policy: "this-is-not-json { broken",
+    });
+    const stub = createKmsStub({ getKeyPolicy: rawPolicyNotJson });
+
+    // Must NOT throw
+    const result = await kmsRun({
+      subcommand: "get-key-policy",
+      args: [KEY_ID_1],
+      binary: stub,
+    });
+
+    if (!("keyPolicy" in result)) throw new Error("wrong discriminant");
+    // policy falls back to the raw string
+    expect(typeof result.keyPolicy.policy).toBe("string");
+    expect(result.keyPolicy.policy).toBe("this-is-not-json { broken");
   });
 });

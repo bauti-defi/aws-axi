@@ -180,11 +180,26 @@ examples:
 
 // ─── Arg-parsing helpers ──────────────────────────────────────────────────────
 
-/** Extract the value of a named flag (e.g. "--max-items 50"). */
+/**
+ * Extract the value of a named flag.
+ *
+ * Accepts both forms that agents commonly use:
+ *   --flag value   (space-separated)
+ *   --flag=value   (equals-separated)
+ *
+ * The global `--profile`/`--region` flags already support both forms via
+ * context.ts; all KMS flags must be consistent.
+ */
 function extractFlag(args: readonly string[], flag: string): string | undefined {
-  const idx = args.indexOf(flag);
-  if (idx >= 0 && idx + 1 < args.length) {
-    return args[idx + 1];
+  const eqPrefix = `${flag}=`;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] ?? "";
+    if (arg === flag && i + 1 < args.length) {
+      return args[i + 1];
+    }
+    if (arg.startsWith(eqPrefix)) {
+      return arg.slice(eqPrefix.length);
+    }
   }
   return undefined;
 }
@@ -205,14 +220,22 @@ function extractMaxItems(args: readonly string[]): number {
 
 /**
  * Extract bare positional arguments (non-flag tokens) from args.
- * All flags are assumed to take a single value: --flag value.
+ *
+ * Handles both flag forms:
+ *   --flag value   → skip flag token AND the following value token
+ *   --flag=value   → skip only the combined token (value is embedded)
  */
 function extractPositionals(args: readonly string[]): string[] {
   const result: string[] = [];
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] ?? "";
+    if (arg.startsWith("--") && arg.includes("=")) {
+      // --flag=value form: value embedded, skip only this token
+      continue;
+    }
     if (arg.startsWith("--")) {
-      i++; // skip flag value
+      // --flag value form: skip this token AND the following value token
+      i++;
     } else if (arg !== "") {
       result.push(arg);
     }
