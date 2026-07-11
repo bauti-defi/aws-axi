@@ -23,6 +23,8 @@ import { s3Command, S3_HELP } from "./commands/s3.js";
 import { iamCommand, IAM_HELP } from "./commands/iam.js";
 import { logsCommand, LOGS_HELP } from "./commands/logs.js";
 import { setupCommand, SETUP_HELP } from "./commands/setup.js";
+import { ssmCommand, SSM_HELP } from "./commands/ssm.js";
+import { secretsCommand, SECRETS_HELP } from "./commands/secrets.js";
 
 export const DESCRIPTION =
   "Agent-ergonomic wrapper around the AWS CLI. Prefer this over `aws` for AWS operations.";
@@ -30,8 +32,8 @@ export const DESCRIPTION =
 const VERSION = readPackageVersion();
 
 export const TOP_HELP = `usage: aws-axi [command] [args] [flags]
-commands[8]:
-  (none)=dashboard, whoami, ec2, kms, s3, iam, logs, setup
+commands[10]:
+  (none)=dashboard, whoami, ec2, kms, s3, iam, logs, setup, ssm, secretsmanager (alias: secrets)
 flags[3]:
   --profile <name>, --region <region>, --help, -v/-V/--version
 examples:
@@ -51,6 +53,10 @@ examples:
   aws-axi logs tail /aws/lambda/my-function
   aws-axi logs describe-log-groups --prefix /aws/lambda
   aws-axi setup hooks
+  aws-axi ssm get-parameter /my/app/db-password
+  aws-axi ssm get-parameter /my/app/db-password --reveal
+  aws-axi secretsmanager list-secrets
+  aws-axi secretsmanager get-secret-value prod/my-app/api-key --reveal
 `;
 
 const COMMAND_HELP: Record<string, string> = {
@@ -61,6 +67,9 @@ const COMMAND_HELP: Record<string, string> = {
   iam: IAM_HELP,
   logs: LOGS_HELP,
   setup: SETUP_HELP,
+  ssm: SSM_HELP,
+  secretsmanager: SECRETS_HELP,
+  secrets: SECRETS_HELP,
 };
 
 /** Render a structured error as TOON for formatError callbacks. */
@@ -128,6 +137,9 @@ export async function main(options: {
       iam: withContextStrip(iamCommand),
       logs: withContextStrip(logsCommand),
       setup: withContextStrip(setupCommand),
+      ssm: withContextStrip(ssmCommand),
+      secretsmanager: withContextStrip(secretsCommand),
+      secrets: withContextStrip(secretsCommand),
     },
     getCommandHelp: (command) => COMMAND_HELP[command] ?? null,
     resolveContext: ({ args }) => resolveAwsContext(args),

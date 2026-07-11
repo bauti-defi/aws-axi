@@ -1,0 +1,509 @@
+/**
+ * `aws-axi secretsmanager` — Secrets Manager read overlay.
+ *
+ * Mirrors `aws secretsmanager <op>` 1:1 for read operations. Projects to
+ * curated TOON with secret values REDACTED by default, KMS alias enrichment,
+ * capped pagination, and definitive empty states.
+ *
+ * Operations:
+ *   list-secrets          List all secrets with curated metadata (default)
+ *   get-secret-value      Get a secret; value is redacted by default
+ *   describe-secret       Describe a secret (no value — metadata + KMS alias)
+ *
+ * Use --reveal to display actual secret values (get-secret-value only).
+ *
+ * Also exported as `secretsCommand` for both the `secretsmanager` command
+ * and the `secrets` alias.
+ *
+ * Exports:
+ *   secretsRun(options)       → typed SecretsRunResult (testing / composition)
+ *   secretsCommand(args, ctx) → AxiCliCommand adapter (CLI dispatch)
+ *   SECRETS_HELP              → help text string
+ */
+import { AxiError } from "axi-sdk-js";
+import type { AwsContext } from "../context.js";
+import type { AwsRunOptions } from "../aws.js";
+import { awsJson } from "../aws.js";
+import { resolveKey } from "../resolve/key.js";
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+
+const REDACTED = "<redacted>";
+const MAX_ITEMS_DEFAULT = 50;
+
+const KNOWN_SUBCOMMANDS = new Set([
+  "list-secrets",
+  "get-secret-value",
+  "describe-secret",
+]);
+
+// ─── Raw AWS response shapes ──────────────────────────────────────────────────
+
+interface RawGetSecretValueResponse {
+  readonly ARN: string;
+  readonly Name: string;
+  readonly VersionId: string;
+  readonly SecretString?: string;
+  readonly SecretBinary?: string;
+  readonly VersionStages: readonly string[];
+  readonly CreatedDate: string;
+  readonly LastChangedDate?: string;
+}
+
+interface RawSecretListEntry {
+  readonly ARN: string;
+  readonly Name: string;
+  readonly Description?: string;
+  readonly KmsKeyId?: string;
+  readonly RotationEnabled?: boolean;
+  readonly LastRotatedDate?: string;
+  readonly LastChangedDate?: string;
+  readonly LastAccessedDate?: string;
+  readonly Tags: readonly { readonly Key: string; readonly Value: string }[];
+}
+
+interface RawListSecretsResponse {
+  readonly SecretList: readonly RawSecretListEntry[];
+  readonly NextToken?: string;
+}
+
+interface RawDescribeSecretResponse {
+  readonly ARN: string;
+  readonly Name: string;
+  readonly Description?: string;
+  readonly KmsKeyId?: string;
+  readonly RotationEnabled?: boolean;
+  readonly LastRotatedDate?: string;
+  readonly LastChangedDate?: string;
+  readonly LastAccessedDate?: string;
+  readonly Tags: readonly { readonly Key: string; readonly Value: string }[];
+}
+
+// ─── Public result shapes ─────────────────────────────────────────────────────
+
+export interface SecretsGetValueResult {
+  readonly name: string;
+  readonly arn: string;
+  readonly versionId: string;
+  /** Actual value when --reveal is passed; "<redacted>" otherwise. */
+  readonly secretValue: string;
+  readonly versionStages: readonly string[];
+  readonly lastChanged: string | undefined;
+  /** KMS alias of the encrypting key, resolved via resolve-key. */
+  readonly kmsKeyAlias: string | undefined;
+}
+
+export interface SecretsListEntry {
+  readonly name: string;
+  readonly arn: string;
+  readonly description: string | undefined;
+  readonly rotationEnabled: boolean;
+  readonly lastChanged: string | undefined;
+  readonly lastRotated: string | undefined;
+  /** KMS alias of the encrypting key, resolved via resolve-key. */
+  readonly kmsKeyAlias: string | undefined;
+}
+
+export interface SecretsListResult {
+  readonly secrets: readonly SecretsListEntry[];
+  readonly count: string;
+  readonly nextToken?: string;
+  readonly message?: string;
+  readonly suggestion?: string;
+}
+
+export interface SecretsDetailResult {
+  readonly name: string;
+  readonly arn: string;
+  readonly description: string | undefined;
+  readonly rotationEnabled: boolean;
+  readonly lastChanged: string | undefined;
+  readonly lastRotated: string | undefined;
+  /** KMS alias of the encrypting key, resolved via resolve-key. */
+  readonly kmsKeyAlias: string | undefined;
+}
+
+/** Discriminated union returned by secretsRun. */
+export type SecretsRunResult =
+  | { readonly secret: SecretsGetValueResult; readonly suggestion?: string }
+  | { readonly secretList: SecretsListResult }
+  | { readonly secretDetail: SecretsDetailResult };
+
+export interface SecretsRunOptions {
+  readonly subcommand: string;
+  readonly args: readonly string[];
+  readonly binary?: string;
+  readonly context?: AwsContext;
+}
+
+// ─── Help ─────────────────────────────────────────────────────────────────────
+
+export const SECRETS_HELP = `usage: aws-axi secretsmanager <subcommand> [flags]
+       aws-axi secrets <subcommand> [flags]    (alias)
+
+subcommands:
+  list-secrets                   List all secrets with curated metadata (default)
+  get-secret-value <id>          Get a secret; value is redacted by default
+  describe-secret <id>           Describe a secret (metadata only; no value)
+
+flags (all subcommands):
+  --profile <name>      AWS profile (inherited from global --profile)
+  --region <region>     AWS region  (inherited from global --region)
+  --reveal              Show actual secret value (get-secret-value only)
+
+flags (list-secrets):
+  --max-items <n>       Cap results per page (default: ${MAX_ITEMS_DEFAULT})
+  --next-token <token>  Resume a previous paginated call
+
+flags (get-secret-value, describe-secret):
+  --secret-id <id>      Secret name or ARN (alternative to positional)
+
+examples:
+  aws-axi secretsmanager
+  aws-axi secretsmanager list-secrets
+  aws-axi secretsmanager get-secret-value prod/my-app/db-password
+  aws-axi secretsmanager get-secret-value prod/my-app/db-password --reveal
+  aws-axi secretsmanager describe-secret prod/my-app/db-password
+  aws-axi secrets list-secrets --max-items 10
+`;
+
+// ─── Arg-parsing helpers ──────────────────────────────────────────────────────
+
+function extractFlag(args: readonly string[], flag: string): string | undefined {
+  const eqPrefix = `${flag}=`;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] ?? "";
+    if (arg === flag && i + 1 < args.length) {
+      return args[i + 1];
+    }
+    if (arg.startsWith(eqPrefix)) {
+      return arg.slice(eqPrefix.length);
+    }
+  }
+  return undefined;
+}
+
+function hasFlag(args: readonly string[], flag: string): boolean {
+  return args.some((a) => a === flag || a.startsWith(`${flag}=`));
+}
+
+/**
+ * Boolean flags that take no separate value token.
+ * Without this list, extractPositionals would incorrectly consume the first
+ * positional after a boolean flag as that flag's value.
+ */
+const BOOLEAN_FLAGS = new Set([
+  "--reveal",
+  "--include-planned-deletion",
+  "--no-include-planned-deletion",
+]);
+
+function extractPositionals(args: readonly string[]): string[] {
+  const result: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] ?? "";
+    if (arg.startsWith("--") && arg.includes("=")) {
+      // --flag=value form: value embedded, no separate token
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      if (BOOLEAN_FLAGS.has(arg)) {
+        // Boolean flag — no value token follows; skip only this token
+        continue;
+      }
+      // Value flag — skip this AND the following value token
+      i++;
+    } else if (arg !== "") {
+      result.push(arg);
+    }
+  }
+  return result;
+}
+
+function extractMaxItems(args: readonly string[]): number {
+  const raw = extractFlag(args, "--max-items");
+  if (raw === undefined) return MAX_ITEMS_DEFAULT;
+  const parsed = parseInt(raw, 10);
+  if (isNaN(parsed) || parsed <= 0) {
+    throw new AxiError(
+      `--max-items must be a positive integer, got: ${raw}`,
+      "USAGE_ERROR",
+      [`Run \`aws-axi secretsmanager --help\` to see valid flags`],
+    );
+  }
+  return parsed;
+}
+
+function countString(n: number, nextToken: string | undefined): string {
+  if (nextToken !== undefined) {
+    return `showing ${n} (truncated); next-token=${nextToken}`;
+  }
+  return `${n} total`;
+}
+
+function toRunOpts(options: SecretsRunOptions): AwsRunOptions {
+  return { binary: options.binary, context: options.context };
+}
+
+function toResolveOpts(options: SecretsRunOptions) {
+  return { binary: options.binary, context: options.context };
+}
+
+/**
+ * Resolve a KMS key identifier to its alias.
+ * Returns the alias string on success; undefined on any failure (graceful degradation).
+ */
+async function resolveAlias(
+  keyId: string,
+  options: SecretsRunOptions,
+): Promise<string | undefined> {
+  const resolved = await resolveKey(keyId, toResolveOpts(options)).catch(() => undefined);
+  return resolved?.alias;
+}
+
+/**
+ * Bulk-resolve a set of unique key identifiers to aliases.
+ * Returns a Map<keyId, alias | undefined>.
+ */
+async function resolveAliasMap(
+  keyIds: readonly string[],
+  options: SecretsRunOptions,
+): Promise<ReadonlyMap<string, string | undefined>> {
+  const unique = [...new Set(keyIds)];
+  const entries = await Promise.all(
+    unique.map(async (id) => [id, await resolveAlias(id, options)] as const),
+  );
+  return new Map(entries);
+}
+
+// ─── Sub-operations ───────────────────────────────────────────────────────────
+
+async function runGetSecretValue(
+  options: SecretsRunOptions,
+): Promise<{ secret: SecretsGetValueResult; suggestion?: string }> {
+  const reveal = hasFlag(options.args, "--reveal");
+  const positionals = extractPositionals(options.args);
+  const secretId =
+    extractFlag(options.args, "--secret-id") ?? positionals[0];
+
+  if (secretId === undefined || secretId === "") {
+    throw new AxiError(
+      "get-secret-value requires a secret name or ARN",
+      "USAGE_ERROR",
+      [
+        "Usage: aws-axi secretsmanager get-secret-value <id>",
+        "Or: aws-axi secretsmanager get-secret-value --secret-id <id>",
+      ],
+    );
+  }
+
+  const runOpts = toRunOpts(options);
+
+  // Fetch the secret value and its metadata in parallel.
+  // describe-secret provides KmsKeyId for alias enrichment.
+  // If describe-secret fails, we degrade gracefully.
+  const [valueResponse, describeResponse] = await Promise.all([
+    awsJson<RawGetSecretValueResponse>(
+      ["secretsmanager", "get-secret-value", "--secret-id", secretId],
+      runOpts,
+    ),
+    awsJson<RawDescribeSecretResponse>(
+      ["secretsmanager", "describe-secret", "--secret-id", secretId],
+      runOpts,
+    ).catch(() => undefined),
+  ]);
+
+  const kmsKeyId = describeResponse?.KmsKeyId;
+  const kmsKeyAlias =
+    kmsKeyId !== undefined
+      ? await resolveAlias(kmsKeyId, options)
+      : undefined;
+
+  const rawValue =
+    valueResponse.SecretString ??
+    (valueResponse.SecretBinary !== undefined ? "<binary>" : "");
+
+  return {
+    secret: {
+      name: valueResponse.Name,
+      arn: valueResponse.ARN,
+      versionId: valueResponse.VersionId,
+      secretValue: reveal ? rawValue : REDACTED,
+      versionStages: valueResponse.VersionStages,
+      lastChanged: valueResponse.LastChangedDate,
+      kmsKeyAlias,
+    },
+    ...(reveal ? {} : { suggestion: "Pass --reveal to show the actual secret value" }),
+  };
+}
+
+async function runListSecrets(
+  options: SecretsRunOptions,
+): Promise<{ secretList: SecretsListResult }> {
+  const maxItems = extractMaxItems(options.args);
+  const nextTokenArg = extractFlag(options.args, "--next-token");
+
+  const awsArgs = [
+    "secretsmanager",
+    "list-secrets",
+    "--max-items",
+    String(maxItems),
+  ];
+  if (nextTokenArg !== undefined) {
+    awsArgs.push("--starting-token", nextTokenArg);
+  }
+
+  const response = await awsJson<RawListSecretsResponse>(awsArgs, toRunOpts(options));
+  const secrets = response.SecretList ?? [];
+  const nextToken = response.NextToken;
+
+  if (secrets.length === 0) {
+    return {
+      secretList: {
+        secrets: [],
+        count: "0 total",
+        message: "No secrets found in this account/region",
+        suggestion:
+          'Create a secret with `aws secretsmanager create-secret --name <name> --secret-string <value>`',
+      },
+    };
+  }
+
+  // Bulk-resolve unique KMS key aliases in parallel
+  const uniqueKeyIds = secrets
+    .map((s) => s.KmsKeyId)
+    .filter((k): k is string => k !== undefined && k !== "");
+  const aliasMap = await resolveAliasMap(uniqueKeyIds, options);
+
+  const projected: SecretsListEntry[] = secrets.map((s) => ({
+    name: s.Name,
+    arn: s.ARN,
+    description: s.Description,
+    rotationEnabled: s.RotationEnabled ?? false,
+    lastChanged: s.LastChangedDate,
+    lastRotated: s.LastRotatedDate,
+    kmsKeyAlias:
+      s.KmsKeyId !== undefined ? (aliasMap.get(s.KmsKeyId) ?? undefined) : undefined,
+  }));
+
+  return {
+    secretList: {
+      secrets: projected,
+      count: countString(projected.length, nextToken),
+      ...(nextToken !== undefined ? { nextToken } : {}),
+    },
+  };
+}
+
+async function runDescribeSecret(
+  options: SecretsRunOptions,
+): Promise<{ secretDetail: SecretsDetailResult }> {
+  const positionals = extractPositionals(options.args);
+  const secretId =
+    extractFlag(options.args, "--secret-id") ?? positionals[0];
+
+  if (secretId === undefined || secretId === "") {
+    throw new AxiError(
+      "describe-secret requires a secret name or ARN",
+      "USAGE_ERROR",
+      [
+        "Usage: aws-axi secretsmanager describe-secret <id>",
+        "Or: aws-axi secretsmanager describe-secret --secret-id <id>",
+      ],
+    );
+  }
+
+  const response = await awsJson<RawDescribeSecretResponse>(
+    ["secretsmanager", "describe-secret", "--secret-id", secretId],
+    toRunOpts(options),
+  );
+
+  const kmsKeyAlias =
+    response.KmsKeyId !== undefined
+      ? await resolveAlias(response.KmsKeyId, options)
+      : undefined;
+
+  return {
+    secretDetail: {
+      name: response.Name,
+      arn: response.ARN,
+      description: response.Description,
+      rotationEnabled: response.RotationEnabled ?? false,
+      lastChanged: response.LastChangedDate,
+      lastRotated: response.LastRotatedDate,
+      kmsKeyAlias,
+    },
+  };
+}
+
+// ─── secretsRun ───────────────────────────────────────────────────────────────
+
+/**
+ * Core Secrets Manager logic — testable without the CLI layer.
+ *
+ * Dispatches to the appropriate sub-operation based on options.subcommand.
+ * Empty subcommand defaults to list-secrets.
+ */
+export async function secretsRun(
+  options: SecretsRunOptions,
+): Promise<SecretsRunResult> {
+  switch (options.subcommand) {
+    case "list-secrets":
+    case "": // default
+      return runListSecrets(options);
+    case "get-secret-value":
+      return runGetSecretValue(options);
+    case "describe-secret":
+      return runDescribeSecret(options);
+    default:
+      throw new AxiError(
+        `Unknown secretsmanager subcommand: ${options.subcommand}`,
+        "USAGE_ERROR",
+        [
+          "Valid subcommands: list-secrets, get-secret-value, describe-secret",
+          "Run `aws-axi secretsmanager --help` for full usage",
+        ],
+      );
+  }
+}
+
+// ─── secretsCommand ───────────────────────────────────────────────────────────
+
+/**
+ * AxiCliCommand adapter.
+ *
+ * Parses the first arg as the subcommand (defaulting to list-secrets when
+ * absent or a flag), dispatches to secretsRun, and wraps the result under
+ * a top-level `secretsmanager` key for TOON rendering by the CLI layer.
+ *
+ * Used for both the `secretsmanager` command and the `secrets` alias.
+ */
+export async function secretsCommand(
+  args: string[],
+  context: AwsContext | undefined,
+): Promise<Record<string, unknown>> {
+  const firstArg = args[0] ?? "";
+
+  let subcommand: string;
+  let remainingArgs: string[];
+
+  if (firstArg === "" || firstArg.startsWith("--")) {
+    subcommand = "list-secrets";
+    remainingArgs = args.filter((a) => a !== "");
+  } else if (KNOWN_SUBCOMMANDS.has(firstArg)) {
+    subcommand = firstArg;
+    remainingArgs = args.slice(1);
+  } else {
+    throw new AxiError(
+      `Unknown secretsmanager subcommand: ${firstArg}`,
+      "USAGE_ERROR",
+      [
+        "Valid subcommands: list-secrets, get-secret-value, describe-secret",
+        "Run `aws-axi secretsmanager --help` for full usage",
+      ],
+    );
+  }
+
+  const result = await secretsRun({ subcommand, args: remainingArgs, context });
+  return { secretsmanager: result };
+}
