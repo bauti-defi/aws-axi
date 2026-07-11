@@ -1,5 +1,5 @@
 /**
- * Tests for the resolve-vpc / resolve-subnet / resolve-sg primitives.
+ * Tests for the resolve-vpc / resolve-subnet / resolve-sg / resolve-role primitives.
  *
  * No mocks — real stub aws binaries via the `binary` seam. Each primitive
  * resolves an AWS resource id to a human name using the Name tag (or
