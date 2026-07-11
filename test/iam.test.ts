@@ -52,6 +52,12 @@ afterEach(() => {
 // Fixtures
 // ---------------------------------------------------------------------------
 
+// Fixtures use the real shape the AWS CLI emits under --max-items:
+//   non-truncated: { <ResultKey>: [...] }            — no IsTruncated, no NextToken
+//   truncated:     { <ResultKey>: [...], NextToken: "<base64>" } — synthesised by botocore
+// IsTruncated / Marker are stripped by the CLI's client-side paginator and
+// must NOT appear in any fixture here.
+
 const LIST_ROLES_PAGE1 = JSON.stringify({
   Roles: [
     {
@@ -72,9 +78,9 @@ const LIST_ROLES_PAGE1 = JSON.stringify({
       MaxSessionDuration: 7200,
     },
   ],
-  IsTruncated: false,
 });
 
+// Real truncated shape: NextToken present, IsTruncated absent.
 const LIST_ROLES_TRUNCATED = JSON.stringify({
   Roles: [
     {
@@ -86,7 +92,6 @@ const LIST_ROLES_TRUNCATED = JSON.stringify({
       MaxSessionDuration: 3600,
     },
   ],
-  IsTruncated: true,
   NextToken: "eyJhbGciOiJIUzI1NiJ9.next-page-token",
 });
 
@@ -132,7 +137,23 @@ const LIST_POLICIES_RESPONSE = JSON.stringify({
       UpdateDate: "2023-06-01T00:00:00+00:00",
     },
   ],
-  IsTruncated: false,
+});
+
+const LIST_POLICIES_TRUNCATED = JSON.stringify({
+  Policies: [
+    {
+      PolicyName: "AdministratorAccess",
+      PolicyId: "ANPATEST1",
+      Arn: "arn:aws:iam::aws:policy/AdministratorAccess",
+      Path: "/",
+      DefaultVersionId: "v1",
+      AttachmentCount: 5,
+      IsAttachable: true,
+      CreateDate: "2015-02-06T18:39:46+00:00",
+      UpdateDate: "2023-01-01T00:00:00+00:00",
+    },
+  ],
+  NextToken: "eyJhbGciOiJIUzI1NiJ9.policy-next-token",
 });
 
 const GET_POLICY_RESPONSE = JSON.stringify({
@@ -160,7 +181,16 @@ const LIST_ATTACHED_POLICIES_RESPONSE = JSON.stringify({
       PolicyArn: "arn:aws:iam::aws:policy/CloudWatchReadOnlyAccess",
     },
   ],
-  IsTruncated: false,
+});
+
+const LIST_ATTACHED_POLICIES_TRUNCATED = JSON.stringify({
+  AttachedPolicies: [
+    {
+      PolicyName: "AdministratorAccess",
+      PolicyArn: "arn:aws:iam::aws:policy/AdministratorAccess",
+    },
+  ],
+  NextToken: "eyJhbGciOiJIUzI1NiJ9.attached-next-token",
 });
 
 // ---------------------------------------------------------------------------
@@ -193,18 +223,20 @@ describe("iamRun — list-roles", () => {
     expect(result["count"]).toBe(2);
   });
 
-  it("reports truncation with next-token when IsTruncated=true", async () => {
+  it("reports truncation with next-token when NextToken is present", async () => {
     const stub = createStub({ stdout: LIST_ROLES_TRUNCATED, exitCode: 0 });
     const result = await iamRun({ op: "list-roles", args: [], binary: stub });
 
     expect(result["truncated"]).toBe(true);
     expect(result["nextToken"]).toBe("eyJhbGciOiJIUzI1NiJ9.next-page-token");
-    expect(result["help"]).toBeDefined();
+    const help = result["help"] as string[];
+    // Must include a resume command the agent can copy-paste
+    expect(help.some((h) => h.includes("--next-token"))).toBe(true);
   });
 
   it("returns definitive empty state with a suggestion when no roles exist", async () => {
     const stub = createStub({
-      stdout: JSON.stringify({ Roles: [], IsTruncated: false }),
+      stdout: JSON.stringify({ Roles: [] }),
       exitCode: 0,
     });
     const result = await iamRun({ op: "list-roles", args: [], binary: stub });
@@ -291,9 +323,19 @@ describe("iamRun — list-policies", () => {
     expect(result["count"]).toBe(2);
   });
 
+  it("reports truncation with next-token when NextToken is present", async () => {
+    const stub = createStub({ stdout: LIST_POLICIES_TRUNCATED, exitCode: 0 });
+    const result = await iamRun({ op: "list-policies", args: [], binary: stub });
+
+    expect(result["truncated"]).toBe(true);
+    expect(result["nextToken"]).toBe("eyJhbGciOiJIUzI1NiJ9.policy-next-token");
+    const help = result["help"] as string[];
+    expect(help.some((h) => h.includes("--next-token"))).toBe(true);
+  });
+
   it("returns definitive empty state when no policies exist", async () => {
     const stub = createStub({
-      stdout: JSON.stringify({ Policies: [], IsTruncated: false }),
+      stdout: JSON.stringify({ Policies: [] }),
       exitCode: 0,
     });
     const result = await iamRun({ op: "list-policies", args: [], binary: stub });
@@ -373,9 +415,29 @@ describe("iamRun — list-attached-role-policies", () => {
     expect(result["count"]).toBe(2);
   });
 
+  it("reports truncation with next-token and resume command", async () => {
+    const stub = createStub({
+      stdout: LIST_ATTACHED_POLICIES_TRUNCATED,
+      exitCode: 0,
+    });
+    const result = await iamRun({
+      op: "list-attached-role-policies",
+      args: ["my-role"],
+      binary: stub,
+    });
+
+    expect(result["truncated"]).toBe(true);
+    expect(result["nextToken"]).toBe("eyJhbGciOiJIUzI1NiJ9.attached-next-token");
+    const help = result["help"] as string[];
+    // Must include both a description and the resume command
+    expect(help.length).toBeGreaterThanOrEqual(2);
+    expect(help.some((h) => h.includes("aws-axi iam list-attached-role-policies"))).toBe(true);
+    expect(help.some((h) => h.includes("--next-token"))).toBe(true);
+  });
+
   it("returns empty state when no policies attached", async () => {
     const stub = createStub({
-      stdout: JSON.stringify({ AttachedPolicies: [], IsTruncated: false }),
+      stdout: JSON.stringify({ AttachedPolicies: [] }),
       exitCode: 0,
     });
     const result = await iamRun({

@@ -117,7 +117,6 @@ describe("resolvePolicy — name input", () => {
           UpdateDate: "2023-06-01T00:00:00+00:00",
         },
       ],
-      IsTruncated: false,
     });
     const stub = createStub({ stdout: listJson, exitCode: 0 });
 
@@ -143,7 +142,6 @@ describe("resolvePolicy — name input", () => {
           UpdateDate: "2023-01-01T00:00:00+00:00",
         },
       ],
-      IsTruncated: false,
     });
     const stub = createStub({ stdout: listJson, exitCode: 0 });
 
@@ -174,7 +172,6 @@ describe("resolvePolicy — name input", () => {
           UpdateDate: "2023-01-01T00:00:00+00:00",
         },
       ],
-      IsTruncated: false,
     });
     const successDir = mkdtempSync(join(tmpdir(), "aws-axi-resolve-policy-hit-"));
     tempDirs.push(successDir);
@@ -201,5 +198,68 @@ describe("resolvePolicy — name input", () => {
       _cache: cache,
     });
     expect(second).toEqual(first);
+  });
+
+  it("paginates through multiple pages to find a policy by name", async () => {
+    // Page 1: does NOT contain the target — returns NextToken to signal more.
+    const page1 = JSON.stringify({
+      Policies: [
+        {
+          PolicyName: "OtherPolicy",
+          PolicyId: "ANPAOTHER",
+          Arn: "arn:aws:iam::123456789012:policy/OtherPolicy",
+          Path: "/",
+          AttachmentCount: 0,
+          CreateDate: "2023-01-01T00:00:00+00:00",
+          UpdateDate: "2023-01-01T00:00:00+00:00",
+        },
+      ],
+      NextToken: "eyJhbGciOiJIUzI1NiJ9.page2-token",
+    });
+
+    // Page 2: contains the target — no NextToken (last page).
+    const page2 = JSON.stringify({
+      Policies: [
+        {
+          PolicyName: "TargetPolicy",
+          PolicyId: "ANPATARGET",
+          Arn: "arn:aws:iam::123456789012:policy/TargetPolicy",
+          Path: "/",
+          AttachmentCount: 3,
+          CreateDate: "2023-01-01T00:00:00+00:00",
+          UpdateDate: "2023-06-01T00:00:00+00:00",
+        },
+      ],
+    });
+
+    // Counting stub: first call → page 1, subsequent calls → page 2.
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-resolve-policy-multi-"));
+    tempDirs.push(dir);
+    const countFile = join(dir, "count");
+    const stub = join(dir, "aws");
+    writeFileSync(
+      stub,
+      [
+        "#!/bin/sh",
+        `COUNT=$(cat "${countFile}" 2>/dev/null || echo 0)`,
+        `echo $((COUNT + 1)) > "${countFile}"`,
+        `if [ "$COUNT" = "0" ]; then`,
+        `  printf '%s' ${shellQuote(page1)}`,
+        "else",
+        `  printf '%s' ${shellQuote(page2)}`,
+        "fi",
+        "exit 0",
+      ].join("\n"),
+    );
+    chmodSync(stub, 0o755);
+
+    const result = await resolvePolicy({
+      nameOrArn: "TargetPolicy",
+      binary: stub,
+      _cache: new Map(),
+    });
+
+    expect(result.name).toBe("TargetPolicy");
+    expect(result.arn).toBe("arn:aws:iam::123456789012:policy/TargetPolicy");
   });
 });

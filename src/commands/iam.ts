@@ -47,9 +47,13 @@ interface IamRawAttachedPolicy {
   readonly PolicyArn: string;
 }
 
+// NOTE: these interfaces reflect the REAL shape the AWS CLI emits under
+// --max-items. The CLI's client-side paginator (botocore build_full_result)
+// aggregates the result key and synthesises NextToken when more pages exist.
+// It strips IsTruncated / Marker entirely — those fields are never present.
+// Gate truncation on `NextToken !== undefined` alone.
 interface IamListRolesResponse {
   readonly Roles: readonly IamRawRole[];
-  readonly IsTruncated: boolean;
   readonly NextToken?: string;
 }
 
@@ -63,7 +67,6 @@ interface IamGetRoleResponse {
 
 interface IamListPoliciesResponse {
   readonly Policies: readonly IamRawPolicy[];
-  readonly IsTruncated: boolean;
   readonly NextToken?: string;
 }
 
@@ -78,7 +81,6 @@ interface IamGetPolicyResponse {
 
 interface IamListAttachedRolePoliciesResponse {
   readonly AttachedPolicies: readonly IamRawAttachedPolicy[];
-  readonly IsTruncated: boolean;
   readonly NextToken?: string;
 }
 
@@ -287,7 +289,7 @@ async function runListRoles(
     count: roles.length,
   };
 
-  if (response.IsTruncated && response.NextToken !== undefined) {
+  if (response.NextToken !== undefined) {
     result["truncated"] = true;
     result["nextToken"] = response.NextToken;
     result["help"] = [
@@ -349,7 +351,7 @@ async function runListPolicies(
     count: policies.length,
   };
 
-  if (response.IsTruncated && response.NextToken !== undefined) {
+  if (response.NextToken !== undefined) {
     result["truncated"] = true;
     result["nextToken"] = response.NextToken;
     const scopeFlag = scope !== undefined ? ` --scope ${scope}` : "";
@@ -433,11 +435,12 @@ async function runListAttachedRolePolicies(
     count: attachedPolicies.length,
   };
 
-  if (response.IsTruncated && response.NextToken !== undefined) {
+  if (response.NextToken !== undefined) {
     result["truncated"] = true;
     result["nextToken"] = response.NextToken;
     result["help"] = [
       `Showing ${attachedPolicies.length} attached policies. More available — pass --next-token to continue.`,
+      `aws-axi iam list-attached-role-policies ${roleName} --next-token ${response.NextToken}`,
     ];
   } else if (attachedPolicies.length === 0) {
     result["help"] = [

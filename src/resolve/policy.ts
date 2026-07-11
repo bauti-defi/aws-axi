@@ -47,8 +47,9 @@ interface IamRawPolicy {
 }
 
 interface IamListPoliciesResponse {
+  // NOTE: IsTruncated is stripped by the AWS CLI's client-side paginator.
+  // Gate multi-page scan on NextToken !== undefined alone.
   readonly Policies: readonly IamRawPolicy[];
-  readonly IsTruncated: boolean;
   readonly NextToken?: string;
 }
 
@@ -83,7 +84,9 @@ function cacheKey(nameOrArn: string, context: AwsContext | undefined): string {
  * Resolve a policy ARN or name into { name, arn }.
  *
  * ARN input  → pure parse; no network call.
- * Name input → `aws iam list-policies --scope All` linear scan; result cached.
+ * Name input → paginated `aws iam list-policies --scope All` scan until the
+ *              policy is found or all pages are exhausted. Prefer ARN input
+ *              for production use on accounts with many policies.
  */
 export async function resolvePolicy(
   options: ResolvePolicyOptions,
@@ -101,12 +104,31 @@ export async function resolvePolicy(
     // Fast path: name is embedded in the ARN — no network call needed.
     result = { name: nameFromArn(nameOrArn), arn: nameOrArn };
   } else {
-    // Slow path: list all policies and search by name.
-    const response = await awsJson<IamListPoliciesResponse>(
-      ["iam", "list-policies", "--scope", "All", "--max-items", "1000"],
-      { binary, context },
-    );
-    const found = response.Policies.find((p) => p.PolicyName === nameOrArn);
+    // Slow path: paginate through list-policies until the name is found.
+    // A capped single-page scan would silently miss policies on later pages,
+    // so we loop until found or all pages exhausted.
+    let pageToken: string | undefined;
+    let found: IamRawPolicy | undefined;
+
+    do {
+      const awsArgs = [
+        "iam",
+        "list-policies",
+        "--scope",
+        "All",
+        "--max-items",
+        "100",
+      ];
+      if (pageToken !== undefined) awsArgs.push("--starting-token", pageToken);
+
+      const response = await awsJson<IamListPoliciesResponse>(awsArgs, {
+        binary,
+        context,
+      });
+      found = response.Policies.find((p) => p.PolicyName === nameOrArn);
+      pageToken = response.NextToken;
+    } while (!found && pageToken !== undefined);
+
     if (!found) {
       throw new AxiError(
         `Policy not found: ${nameOrArn}`,
