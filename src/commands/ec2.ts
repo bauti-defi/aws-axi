@@ -1,17 +1,16 @@
 /**
- * `aws-axi ec2` — EC2 networking reads (Tier 0).
+ * `aws-axi ec2` — EC2 networking reads (Tier 0) + EC2 instance reads (Tier 1).
  *
- * Hand-polished overlays for the three EC2 networking describe operations:
+ * Networking overlays (slice #7):
  *   describe-vpcs, describe-subnets, describe-security-groups
  *
- * Each mirrors the AWS CLI operation name 1:1 and projects raw AWS JSON into
- * a curated, token-efficient TOON shape. Pagination is capped at DEFAULT_MAX
- * items; truncation is reported honestly with a next-token continuation hint.
+ * Instance overlays (slice #11):
+ *   describe-instances — projected to id/state/type/AZ/IP/name-tag and enriched
+ *   with resolve-sg (SG names), resolve-subnet (subnet name), resolve-role
+ *   (instance-profile role name) so agents see human names, not raw IDs/ARNs.
  *
- * NOTE: EC2 *instances* (describe-instances, run-instances, etc.) are a
- * separate Tier-1 slice that will extend this same command file. Keep the
- * networking operations cleanly namespaced so that slice can add to this file
- * without touching networking logic.
+ * Pagination is capped via --max-items; truncation is gated ONLY on the
+ * synthesized botocore NextToken (never on native Reservations-level tokens).
  *
  * Exported shape:
  *   ec2Run({ operation, maxItems, nextToken, context, binary })  → typed object
@@ -21,6 +20,9 @@
 import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import { awsJson } from "../aws.js";
+import { resolveSg } from "../resolve/sg.js";
+import { resolveSubnet } from "../resolve/subnet.js";
+import { resolveRole } from "../resolve/role.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -129,15 +131,22 @@ export type Ec2NetworkingOperation =
   | "describe-subnets"
   | "describe-security-groups";
 
-/** The superset of valid operations this module handles. */
-const NETWORKING_OPERATIONS: ReadonlySet<string> = new Set<Ec2NetworkingOperation>([
+/** Tier-1 instance operations (slice #11). */
+export type Ec2InstancesOperation = "describe-instances";
+
+/** Union of all operations this module handles. */
+export type Ec2Operation = Ec2NetworkingOperation | Ec2InstancesOperation;
+
+/** All EC2 operations this overlay handles (networking + instances). */
+const ALL_EC2_OPERATIONS: ReadonlySet<string> = new Set<Ec2Operation>([
   "describe-vpcs",
   "describe-subnets",
   "describe-security-groups",
+  "describe-instances",
 ]);
 
 export interface Ec2RunOptions {
-  readonly operation: Ec2NetworkingOperation;
+  readonly operation: Ec2Operation;
   /** Max items to return. Defaults to DEFAULT_MAX_ITEMS (50). */
   readonly maxItems?: number;
   /** Pagination resume token from a previous truncated result. */
@@ -153,8 +162,8 @@ export interface Ec2RunOptions {
 
 export const EC2_HELP = `usage: aws-axi ec2 <operation> [--profile <name>] [--region <region>] [flags]
 
-operations[3]:
-  describe-vpcs, describe-subnets, describe-security-groups
+operations[4]:
+  describe-vpcs, describe-subnets, describe-security-groups, describe-instances
 
 flags:
   --profile <name>     AWS profile to use (default: AWS_PROFILE env or "default")
@@ -169,6 +178,9 @@ examples:
   aws-axi ec2 describe-subnets --max-items 10
   aws-axi ec2 describe-subnets --next-token <token>
   aws-axi ec2 describe-security-groups
+  aws-axi ec2 describe-instances
+  aws-axi ec2 describe-instances --max-items 10
+  aws-axi ec2 describe-instances --next-token <token>
 `;
 
 // ---------------------------------------------------------------------------
@@ -355,11 +367,177 @@ async function describeSecurityGroups(
 }
 
 // ---------------------------------------------------------------------------
+// Raw AWS response types (EC2 instances)
+// ---------------------------------------------------------------------------
+
+interface AwsInstanceState {
+  readonly Code: number;
+  readonly Name: string;
+}
+
+interface AwsInstanceSgRef {
+  readonly GroupId: string;
+  readonly GroupName: string;
+}
+
+interface AwsIamInstanceProfile {
+  readonly Arn: string;
+  readonly Id: string;
+}
+
+interface AwsInstance {
+  readonly InstanceId: string;
+  readonly InstanceType: string;
+  readonly State: AwsInstanceState;
+  readonly Placement: { readonly AvailabilityZone: string };
+  readonly PrivateIpAddress?: string;
+  readonly PublicIpAddress?: string;
+  readonly SubnetId?: string;
+  readonly VpcId?: string;
+  readonly SecurityGroups?: readonly AwsInstanceSgRef[];
+  readonly IamInstanceProfile?: AwsIamInstanceProfile;
+  readonly Tags?: readonly AwsTag[];
+}
+
+interface AwsReservation {
+  readonly ReservationId: string;
+  readonly OwnerId: string;
+  readonly Instances: readonly AwsInstance[];
+}
+
+interface DescribeInstancesResponse {
+  readonly Reservations: readonly AwsReservation[];
+  /**
+   * Synthesized by the botocore --max-items paginator.
+   * Gate truncation ONLY on this field — never on reservation-level tokens.
+   */
+  readonly NextToken?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Curated output type (EC2 instances)
+// ---------------------------------------------------------------------------
+
+interface InstanceSummary {
+  readonly id: string;
+  readonly name: string;
+  readonly state: string;
+  readonly type: string;
+  readonly az: string;
+  readonly privateIp: string | null;
+  readonly publicIp: string | null;
+  /** Resolved subnet name (from resolve-subnet). Null when unresolvable. */
+  readonly subnet: string | null;
+  /** Resolved SG names (from resolve-sg). Empty when instance has no SGs. */
+  readonly securityGroups: string[];
+  /** Role name from instance-profile ARN (from resolve-role). Null when absent. */
+  readonly role: string | null;
+}
+
+// ---------------------------------------------------------------------------
+// Instances implementation
+// ---------------------------------------------------------------------------
+
+async function describeInstances(
+  options: Ec2RunOptions,
+): Promise<Record<string, unknown>> {
+  const maxItems = options.maxItems ?? DEFAULT_MAX_ITEMS;
+
+  const resp = await awsJson<DescribeInstancesResponse>(
+    [
+      "ec2",
+      "describe-instances",
+      ...buildPaginationArgs({ maxItems, nextToken: options.nextToken }),
+    ],
+    { binary: options.binary, context: options.context },
+  );
+
+  // Flatten Reservations[].Instances[] into a single list.
+  const rawInstances: AwsInstance[] = resp.Reservations.flatMap(
+    (r) => [...r.Instances],
+  );
+
+  // Gate truncation on synthesized NextToken only — never on native fields.
+  const truncated = resp.NextToken !== undefined;
+
+  if (rawInstances.length === 0) {
+    return {
+      instances: [],
+      count: 0,
+      help: [
+        "No EC2 instances found in the current region.",
+        "Launch one with: aws ec2 run-instances --image-id <ami-id> --instance-type <type>",
+        "Or check a different region with: aws-axi ec2 describe-instances --region <region>",
+      ],
+    };
+  }
+
+  // Enrich each instance concurrently.
+  const instances: InstanceSummary[] = await Promise.all(
+    rawInstances.map(async (inst): Promise<InstanceSummary> => {
+      const resolveOpts = { binary: options.binary, context: options.context };
+
+      // Resolve SG names in parallel.
+      const sgNames = await Promise.all(
+        (inst.SecurityGroups ?? []).map(async (sg) => {
+          const resolved = await resolveSg({ id: sg.GroupId, ...resolveOpts });
+          return resolved?.name ?? sg.GroupName ?? sg.GroupId;
+        }),
+      );
+
+      // Resolve subnet name.
+      const subnetName = inst.SubnetId
+        ? await resolveSubnet({ id: inst.SubnetId, ...resolveOpts }).then(
+            (r) => r?.name ?? inst.SubnetId ?? null,
+          )
+        : null;
+
+      // Resolve role name from instance-profile ARN (pure parse — no network).
+      const roleName = inst.IamInstanceProfile?.Arn
+        ? await resolveRole({
+            nameOrArn: inst.IamInstanceProfile.Arn,
+            ...resolveOpts,
+          }).then((r) => r?.name ?? null)
+        : null;
+
+      return {
+        id: inst.InstanceId,
+        name: nameTag(inst.Tags, inst.InstanceId),
+        state: inst.State.Name,
+        type: inst.InstanceType,
+        az: inst.Placement.AvailabilityZone,
+        privateIp: inst.PrivateIpAddress ?? null,
+        publicIp: inst.PublicIpAddress ?? null,
+        subnet: subnetName ?? null,
+        securityGroups: sgNames,
+        role: roleName,
+      };
+    }),
+  );
+
+  const result: Record<string, unknown> = {
+    instances,
+    count: instances.length,
+  };
+
+  if (truncated) {
+    result["truncated"] = true;
+    result["nextToken"] = resp.NextToken;
+    result["help"] = [
+      `Showing ${instances.length} instances (more available).`,
+      `Continue with: aws-axi ec2 describe-instances --next-token ${resp.NextToken ?? ""}`,
+    ];
+  }
+
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // Core logic — testable without the CLI layer
 // ---------------------------------------------------------------------------
 
 /**
- * Run an EC2 networking read operation and return the curated result object.
+ * Run an EC2 operation and return the curated result object.
  *
  * Throws AxiError (USAGE_ERROR) for unknown operations; propagates AxiError
  * from the exec seam for credential and service errors.
@@ -369,12 +547,12 @@ export async function ec2Run(
 ): Promise<Record<string, unknown>> {
   const op = options.operation as string;
 
-  if (!NETWORKING_OPERATIONS.has(op)) {
+  if (!ALL_EC2_OPERATIONS.has(op)) {
     throw new AxiError(
       `Unknown ec2 operation: ${op}. Run \`aws-axi ec2 --help\` to see supported operations.`,
       "USAGE_ERROR",
       [
-        `Supported networking operations: ${[...NETWORKING_OPERATIONS].join(", ")}`,
+        `Supported operations: ${[...ALL_EC2_OPERATIONS].join(", ")}`,
         "For other EC2 operations, use the generic engine: aws ec2 <operation>",
       ],
     );
@@ -387,6 +565,8 @@ export async function ec2Run(
       return describeSubnets(options);
     case "describe-security-groups":
       return describeSecurityGroups(options);
+    case "describe-instances":
+      return describeInstances(options);
   }
 }
 
@@ -474,17 +654,17 @@ export async function ec2Command(
       "aws-axi ec2 requires an operation. Run `aws-axi ec2 --help` for usage.",
       "USAGE_ERROR",
       [
-        "Supported operations: describe-vpcs, describe-subnets, describe-security-groups",
+        `Supported operations: ${[...ALL_EC2_OPERATIONS].join(", ")}`,
       ],
     );
   }
 
-  if (!NETWORKING_OPERATIONS.has(operation)) {
+  if (!ALL_EC2_OPERATIONS.has(operation)) {
     throw new AxiError(
       `Unknown ec2 operation: ${operation}`,
       "USAGE_ERROR",
       [
-        `Supported networking operations: ${[...NETWORKING_OPERATIONS].join(", ")}`,
+        `Supported operations: ${[...ALL_EC2_OPERATIONS].join(", ")}`,
         "Run `aws-axi ec2 --help` to see all options",
       ],
     );
@@ -505,7 +685,7 @@ export async function ec2Command(
   }
 
   return ec2Run({
-    operation: operation as Ec2NetworkingOperation,
+    operation: operation as Ec2Operation,
     maxItems,
     nextToken,
     context,

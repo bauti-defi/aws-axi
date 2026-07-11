@@ -1,6 +1,7 @@
 /**
- * Tests for the EC2 networking command (describe-vpcs / describe-subnets /
- * describe-security-groups) through a real stub aws binary.
+ * Tests for the EC2 command:
+ *   - EC2 networking reads: describe-vpcs / describe-subnets / describe-security-groups
+ *   - EC2 instances reads: describe-instances (with SG/subnet/role enrichment)
  *
  * No mocks — the full `awsJson` exec seam runs with a subprocess boundary.
  * Stubs emit pinned EC2 JSON; we assert on curated output shapes.
@@ -386,5 +387,390 @@ describe("ec2Run — unknown operation", () => {
     } catch (e) {
       expect((e as AxiError).code).toBe("USAGE_ERROR");
     }
+  });
+});
+
+// ===========================================================================
+// EC2 instances — describe-instances (Tier-1, slice #11)
+// ===========================================================================
+
+/**
+ * Multi-operation dispatch stub.
+ *
+ * The aws binary receives args as:
+ *   $1 = service  (ec2 | iam)
+ *   $2 = operation (describe-instances | describe-security-groups | describe-subnets)
+ *
+ * We key on $2 and return the pre-configured JSON for each operation.
+ * Unrecognised operations exit 1 so tests fail loudly on unexpected calls.
+ */
+function shellQuoteMulti(s: string): string {
+  return `'${s.replaceAll("'", "'\\''")}'`;
+}
+
+function createDispatchStub(responses: {
+  readonly [operation: string]: { readonly stdout: string; readonly exitCode?: number };
+}): string {
+  const dir = mkdtempSync(join(tmpdir(), "aws-axi-ec2-inst-"));
+  tempDirs.push(dir);
+  const p = join(dir, "aws");
+
+  const cases = Object.entries(responses)
+    .map(([op, { stdout, exitCode }]) => {
+      return [
+        `  ${op})`,
+        `    printf '%s' ${shellQuoteMulti(stdout)}`,
+        `    exit ${exitCode ?? 0}`,
+        `    ;;`,
+      ].join("\n");
+    })
+    .join("\n");
+
+  const script = [
+    "#!/bin/sh",
+    `case "$2" in`,
+    cases,
+    "  *)",
+    `    printf '%s' "unexpected operation: $2" >&2`,
+    "    exit 1",
+    "    ;;",
+    "esac",
+  ].join("\n");
+
+  writeFileSync(p, script);
+  chmodSync(p, 0o755);
+  return p;
+}
+
+// ---------------------------------------------------------------------------
+// Pinned fixture JSON — instances
+// ---------------------------------------------------------------------------
+
+/** A single running instance with SGs, subnet, and instance profile. */
+const INSTANCE_FULL = JSON.stringify({
+  Reservations: [
+    {
+      ReservationId: "r-0a1b2c3d4e5f67890",
+      OwnerId: "123456789012",
+      Groups: [],
+      Instances: [
+        {
+          InstanceId: "i-0a1b2c3d4e5f67890",
+          InstanceType: "t3.micro",
+          State: { Code: 16, Name: "running" },
+          Placement: { AvailabilityZone: "us-east-1a", Tenancy: "default" },
+          PrivateIpAddress: "10.0.1.5",
+          PublicIpAddress: "34.201.1.1",
+          SubnetId: "subnet-0a1b2c3d4e5f67890",
+          VpcId: "vpc-0a1b2c3d4e5f67890",
+          SecurityGroups: [
+            { GroupId: "sg-0a1b2c3d4e5f67890", GroupName: "prod-web-sg" },
+          ],
+          IamInstanceProfile: {
+            Arn: "arn:aws:iam::123456789012:instance-profile/prod-ec2-role",
+            Id: "AIPA0123456789ABCDEF",
+          },
+          Tags: [{ Key: "Name", Value: "prod-web-1" }],
+          LaunchTime: "2026-07-01T12:00:00+00:00",
+          Architecture: "x86_64",
+        },
+      ],
+    },
+  ],
+});
+
+/** Two reservations (two instances) with a synthesized NextToken. */
+const INSTANCES_PAGE_ONE = JSON.stringify({
+  Reservations: [
+    {
+      ReservationId: "r-aaaaaaaaaa0000001",
+      OwnerId: "123456789012",
+      Groups: [],
+      Instances: [
+        {
+          InstanceId: "i-0aaaaaaaaaa000001",
+          InstanceType: "t3.small",
+          State: { Code: 16, Name: "running" },
+          Placement: { AvailabilityZone: "us-east-1b" },
+          PrivateIpAddress: "10.0.2.10",
+          SubnetId: "subnet-0a1b2c3d4e5f67890",
+          VpcId: "vpc-0a1b2c3d4e5f67890",
+          SecurityGroups: [
+            { GroupId: "sg-0a1b2c3d4e5f67890", GroupName: "prod-web-sg" },
+          ],
+          Tags: [{ Key: "Name", Value: "worker-1" }],
+          LaunchTime: "2026-07-01T08:00:00+00:00",
+          Architecture: "x86_64",
+        },
+      ],
+    },
+    {
+      ReservationId: "r-aaaaaaaaaa0000002",
+      OwnerId: "123456789012",
+      Groups: [],
+      Instances: [
+        {
+          InstanceId: "i-0aaaaaaaaaa000002",
+          InstanceType: "t3.small",
+          State: { Code: 16, Name: "running" },
+          Placement: { AvailabilityZone: "us-east-1c" },
+          PrivateIpAddress: "10.0.3.10",
+          SubnetId: "subnet-0a1b2c3d4e5f67890",
+          VpcId: "vpc-0a1b2c3d4e5f67890",
+          SecurityGroups: [],
+          Tags: [],
+          LaunchTime: "2026-07-01T09:00:00+00:00",
+          Architecture: "arm64",
+        },
+      ],
+    },
+  ],
+  // Synthesized NextToken emitted by botocore --max-items paginator
+  NextToken:
+    "eyJOZXh0VG9rZW4iOiBudWxsLCAiYm90b190cnVuY2F0ZV9hbW91bnQiOiAyfQ==",
+});
+
+/** Instance without a public IP or instance profile. */
+const INSTANCE_MINIMAL = JSON.stringify({
+  Reservations: [
+    {
+      ReservationId: "r-minimalminimal001",
+      OwnerId: "123456789012",
+      Groups: [],
+      Instances: [
+        {
+          InstanceId: "i-minimalminimal001",
+          InstanceType: "t2.nano",
+          State: { Code: 80, Name: "stopped" },
+          Placement: { AvailabilityZone: "eu-west-1a" },
+          PrivateIpAddress: "172.31.0.5",
+          SubnetId: "subnet-0a1b2c3d4e5f67890",
+          VpcId: "vpc-0a1b2c3d4e5f67890",
+          SecurityGroups: [],
+          Tags: [],
+          LaunchTime: "2026-06-01T00:00:00+00:00",
+          Architecture: "x86_64",
+        },
+      ],
+    },
+  ],
+});
+
+const INSTANCES_EMPTY = JSON.stringify({ Reservations: [] });
+
+/** SG stub response for enrichment. */
+const SG_ENRICH = JSON.stringify({
+  SecurityGroups: [
+    {
+      GroupId: "sg-0a1b2c3d4e5f67890",
+      GroupName: "prod-web-sg",
+      Description: "Production web security group",
+      VpcId: "vpc-0a1b2c3d4e5f67890",
+      IpPermissions: [],
+      IpPermissionsEgress: [],
+    },
+  ],
+});
+
+/** Subnet stub response for enrichment. */
+const SUBNET_ENRICH = JSON.stringify({
+  Subnets: [
+    {
+      SubnetId: "subnet-0a1b2c3d4e5f67890",
+      VpcId: "vpc-0a1b2c3d4e5f67890",
+      CidrBlock: "10.0.1.0/24",
+      AvailabilityZone: "us-east-1a",
+      AvailableIpAddressCount: 250,
+      MapPublicIpOnLaunch: false,
+      State: "available",
+      Tags: [{ Key: "Name", Value: "prod-subnet-a" }],
+    },
+  ],
+});
+
+// ---------------------------------------------------------------------------
+// describe-instances — enriched happy path
+// ---------------------------------------------------------------------------
+
+describe("ec2Run describe-instances — enriched happy path", () => {
+  it("returns curated instance list with resolved SG name, subnet name, and role name", async () => {
+    const stub = createDispatchStub({
+      "describe-instances": { stdout: INSTANCE_FULL },
+      "describe-security-groups": { stdout: SG_ENRICH },
+      "describe-subnets": { stdout: SUBNET_ENRICH },
+    });
+
+    const result = await ec2Run({
+      operation: "describe-instances",
+      binary: stub,
+    });
+
+    expect(result).toHaveProperty("instances");
+    const instances = result.instances as Array<{
+      id: string;
+      name: string;
+      state: string;
+      type: string;
+      az: string;
+      privateIp: string;
+      publicIp: string | null;
+      subnet: string | null;
+      securityGroups: string[];
+      role: string | null;
+    }>;
+
+    expect(instances).toHaveLength(1);
+
+    const inst = instances[0];
+    expect(inst).toBeDefined();
+    expect(inst?.id).toBe("i-0a1b2c3d4e5f67890");
+    expect(inst?.name).toBe("prod-web-1");
+    expect(inst?.state).toBe("running");
+    expect(inst?.type).toBe("t3.micro");
+    expect(inst?.az).toBe("us-east-1a");
+    expect(inst?.privateIp).toBe("10.0.1.5");
+    expect(inst?.publicIp).toBe("34.201.1.1");
+
+    // Enriched: human names, not raw IDs
+    expect(inst?.subnet).toBe("prod-subnet-a");
+    expect(inst?.securityGroups).toEqual(["prod-web-sg"]);
+    // Role name extracted from instance-profile ARN (pure parse, no network)
+    expect(inst?.role).toBe("prod-ec2-role");
+
+    expect(result).toHaveProperty("count", 1);
+    expect(result).not.toHaveProperty("nextToken");
+  });
+
+  it("falls back to instance-id as name when no Name tag", async () => {
+    const stub = createDispatchStub({
+      "describe-instances": { stdout: INSTANCE_MINIMAL },
+      "describe-subnets": { stdout: SUBNET_ENRICH },
+    });
+
+    const result = await ec2Run({
+      operation: "describe-instances",
+      binary: stub,
+    });
+
+    const instances = result.instances as Array<{ id: string; name: string }>;
+    expect(instances[0]?.name).toBe("i-minimalminimal001");
+  });
+
+  it("sets publicIp null when instance has no public address", async () => {
+    const stub = createDispatchStub({
+      "describe-instances": { stdout: INSTANCE_MINIMAL },
+      "describe-subnets": { stdout: SUBNET_ENRICH },
+    });
+
+    const result = await ec2Run({
+      operation: "describe-instances",
+      binary: stub,
+    });
+
+    const instances = result.instances as Array<{ publicIp: string | null }>;
+    expect(instances[0]?.publicIp).toBeNull();
+  });
+
+  it("sets role null when instance has no IamInstanceProfile", async () => {
+    const stub = createDispatchStub({
+      "describe-instances": { stdout: INSTANCE_MINIMAL },
+      "describe-subnets": { stdout: SUBNET_ENRICH },
+    });
+
+    const result = await ec2Run({
+      operation: "describe-instances",
+      binary: stub,
+    });
+
+    const instances = result.instances as Array<{ role: string | null }>;
+    expect(instances[0]?.role).toBeNull();
+  });
+
+  it("returns empty securityGroups array when instance has none", async () => {
+    const stub = createDispatchStub({
+      "describe-instances": { stdout: INSTANCE_MINIMAL },
+      "describe-subnets": { stdout: SUBNET_ENRICH },
+    });
+
+    const result = await ec2Run({
+      operation: "describe-instances",
+      binary: stub,
+    });
+
+    const instances = result.instances as Array<{ securityGroups: string[] }>;
+    expect(instances[0]?.securityGroups).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// describe-instances — pagination cap on synthesized NextToken
+// ---------------------------------------------------------------------------
+
+describe("ec2Run describe-instances — pagination cap", () => {
+  it("reports truncation and nextToken ONLY when synthesized NextToken is present", async () => {
+    const stub = createDispatchStub({
+      "describe-instances": { stdout: INSTANCES_PAGE_ONE },
+      "describe-security-groups": { stdout: SG_ENRICH },
+      "describe-subnets": { stdout: SUBNET_ENRICH },
+    });
+
+    const result = await ec2Run({
+      operation: "describe-instances",
+      binary: stub,
+    });
+
+    // Flattened: 1 instance per reservation × 2 reservations = 2 instances
+    expect(result).toHaveProperty("count", 2);
+    expect(result).toHaveProperty("truncated", true);
+    expect(result).toHaveProperty("nextToken");
+    expect(typeof (result as { nextToken: unknown }).nextToken).toBe("string");
+
+    // Resume hint must include --next-token
+    const help = result.help as string[];
+    expect(help.some((h) => h.includes("--next-token"))).toBe(true);
+  });
+
+  it("does NOT report truncation when NextToken is absent (complete page)", async () => {
+    const stub = createDispatchStub({
+      "describe-instances": { stdout: INSTANCE_FULL },
+      "describe-security-groups": { stdout: SG_ENRICH },
+      "describe-subnets": { stdout: SUBNET_ENRICH },
+    });
+
+    const result = await ec2Run({
+      operation: "describe-instances",
+      binary: stub,
+    });
+
+    expect(result).not.toHaveProperty("truncated");
+    expect(result).not.toHaveProperty("nextToken");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// describe-instances — empty state
+// ---------------------------------------------------------------------------
+
+describe("ec2Run describe-instances — empty state", () => {
+  it("returns empty instances list with count 0 and help suggestion", async () => {
+    const stub = createDispatchStub({
+      "describe-instances": { stdout: INSTANCES_EMPTY },
+    });
+
+    const result = await ec2Run({
+      operation: "describe-instances",
+      binary: stub,
+    });
+
+    expect(result).toHaveProperty("instances");
+    expect((result.instances as unknown[]).length).toBe(0);
+    expect(result).toHaveProperty("count", 0);
+
+    // Must include a help suggestion on empty
+    expect(result).toHaveProperty("help");
+    const help = result.help as string[];
+    expect(help.length).toBeGreaterThan(0);
+    // Suggestion should reference how to run instances
+    expect(help.some((h) => h.toLowerCase().includes("run-instances") || h.toLowerCase().includes("instance"))).toBe(true);
   });
 });
