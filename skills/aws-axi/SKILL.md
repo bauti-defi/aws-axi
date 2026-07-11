@@ -35,6 +35,7 @@ Use aws-axi whenever a task touches AWS: describing EC2 instances, S3 buckets, I
 ```
 commands[12]:
   (none)=dashboard, whoami, ec2, kms, s3, iam, logs, setup, ssm, secretsmanager (alias: secrets), wait, lambda
+  (any other AWS service name routes through the generic engine — ~18k ops covered)
 ```
 
 Installed copies also inherit the SDK built-in `update` command.

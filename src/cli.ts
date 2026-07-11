@@ -7,6 +7,9 @@
  *      (252/253/254/255) rather than axi-sdk-js's generic 1/2.
  *   3. Strip --profile/--region global flags from args before each command
  *      handler sees them (context carries them instead).
+ *   4. Wrap `commands` in a Proxy so any service without a hand-polished overlay
+ *      falls through to the model-driven generic engine instead of erroring.
+ *      Hand-polished overlays always take precedence.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -27,6 +30,7 @@ import { ssmCommand, SSM_HELP } from "./commands/ssm.js";
 import { secretsCommand, SECRETS_HELP } from "./commands/secrets.js";
 import { waitCommand, WAIT_HELP } from "./commands/wait.js";
 import { lambdaCommand, LAMBDA_HELP } from "./commands/lambda.js";
+import { engineRun } from "./engine.js";
 
 export const DESCRIPTION =
   "Agent-ergonomic wrapper around the AWS CLI. Prefer this over `aws` for AWS operations.";
@@ -36,6 +40,7 @@ const VERSION = readPackageVersion();
 export const TOP_HELP = `usage: aws-axi [command] [args] [flags]
 commands[12]:
   (none)=dashboard, whoami, ec2, kms, s3, iam, logs, setup, ssm, secretsmanager (alias: secrets), wait, lambda
+  (any other AWS service name routes through the generic engine — ~18k ops covered)
 flags[3]:
   --profile <name>, --region <region>, --help, -v/-V/--version
 examples:
@@ -64,6 +69,8 @@ examples:
   aws-axi lambda list-functions
   aws-axi lambda get-function my-function
   aws-axi lambda invoke --function-name my-function
+  aws-axi sqs list-queues
+  aws-axi rds describe-db-instances
 `;
 
 const COMMAND_HELP: Record<string, string> = {
@@ -127,6 +134,106 @@ function withContextStrip(
   };
 }
 
+/**
+ * Build a command handler for a generic (non-overlay) service via the
+ * model-driven engine. The returned handler follows the AxiCliCommand contract:
+ * it receives `args` (pre-stripped of --profile/--region by withContextStrip)
+ * where `args[0]` is the operation and `args.slice(1)` are the remaining flags.
+ */
+function makeEngineHandler(service: string): AxiCliCommand<AwsContext> {
+  return (args: string[], context: AwsContext | undefined) => {
+    const operation = args[0];
+    if (operation === undefined || operation.startsWith("-")) {
+      throw new AxiError(
+        `${service}: operation required. Usage: aws-axi ${service} <operation> [args]`,
+        "USAGE_ERROR",
+        [`Run \`aws ${service} help\` to list available operations.`],
+      );
+    }
+    return engineRun({
+      service,
+      operation,
+      args: args.slice(1),
+      context,
+    });
+  };
+}
+
+/**
+ * Hand-polished overlay commands — these always take precedence over the
+ * generic engine. Services NOT in this map fall through to makeEngineHandler.
+ */
+const OVERLAY_COMMANDS: Record<string, AxiCliCommand<AwsContext>> = {
+  whoami: withContextStrip(whoamiCommand),
+  ec2: withContextStrip(ec2Command),
+  kms: withContextStrip(kmsCommand),
+  s3: withContextStrip(s3Command),
+  iam: withContextStrip(iamCommand),
+  logs: withContextStrip(logsCommand),
+  setup: withContextStrip(setupCommand),
+  ssm: withContextStrip(ssmCommand),
+  secretsmanager: withContextStrip(secretsCommand),
+  secrets: withContextStrip(secretsCommand),
+  wait: withContextStrip(waitCommand),
+  lambda: withContextStrip((args, context) => lambdaCommand(args, context)),
+};
+
+/**
+ * Keys that must NEVER be intercepted by the engine Proxy.
+ *
+ * - "update": reserved by runAxiCli for self-update; it gates on `!options.commands.update`.
+ *   If the Proxy returned a truthy handler here, the self-update check would always be
+ *   bypassed. The Proxy must return `undefined` so runAxiCli's gate works correctly.
+ * - "then" / "catch" / "finally": if the Proxy returned handlers for these, the commands
+ *   object would be a thenable, causing `Promise.resolve(commands)` to spin recursively
+ *   and breaking any async code that touches the commands map.
+ */
+const PROXY_DENYLIST = new Set<string>(["update", "then", "catch", "finally"]);
+
+/**
+ * Build the command dispatch map: a Proxy over the overlay record that returns
+ * a model-driven engine handler for any service not covered by a hand overlay.
+ *
+ * The Proxy intercepts `commands[service]` lookups. When `service` has an
+ * overlay handler, it returns that. For any other string key, it returns a
+ * handler closure that captures the service name and dispatches via engineRun.
+ *
+ * This gives full ~18k-operation coverage on day one with zero hand-coding per
+ * service, while letting overlays shadow the engine on their specific services.
+ */
+function buildCommandsProxy(): Record<string, AxiCliCommand<AwsContext>> {
+  return new Proxy(OVERLAY_COMMANDS, {
+    get(
+      target: Record<string, AxiCliCommand<AwsContext>>,
+      prop: string | symbol,
+      receiver: unknown,
+    ): AxiCliCommand<AwsContext> | undefined {
+      // Non-string keys (Symbol.toPrimitive etc.) — delegate normally.
+      if (typeof prop !== "string") {
+        return Reflect.get(target, prop, receiver) as
+          | AxiCliCommand<AwsContext>
+          | undefined;
+      }
+
+      // Denylist: reserved keys must NOT produce an engine handler.
+      if (PROXY_DENYLIST.has(prop)) {
+        return undefined;
+      }
+
+      // Overlay takes precedence.
+      const overlay = Reflect.get(target, prop, receiver) as
+        | AxiCliCommand<AwsContext>
+        | undefined;
+      if (overlay !== undefined) {
+        return overlay;
+      }
+
+      // Unknown service → generic engine handler with context-strip wrapper.
+      return withContextStrip(makeEngineHandler(prop));
+    },
+  }) as Record<string, AxiCliCommand<AwsContext>>;
+}
+
 export async function main(options: {
   argv?: string[];
   stdout?: Pick<NodeJS.WriteStream, "write">;
@@ -138,20 +245,7 @@ export async function main(options: {
     version: VERSION,
     topLevelHelp: TOP_HELP,
     home: withContextStrip(homeCommand),
-    commands: {
-      whoami: withContextStrip(whoamiCommand),
-      ec2: withContextStrip(ec2Command),
-      kms: withContextStrip(kmsCommand),
-      s3: withContextStrip(s3Command),
-      iam: withContextStrip(iamCommand),
-      logs: withContextStrip(logsCommand),
-      setup: withContextStrip(setupCommand),
-      ssm: withContextStrip(ssmCommand),
-      secretsmanager: withContextStrip(secretsCommand),
-      secrets: withContextStrip(secretsCommand),
-      wait: withContextStrip(waitCommand),
-      lambda: withContextStrip((args, context) => lambdaCommand(args, context)),
-    },
+    commands: buildCommandsProxy(),
     getCommandHelp: (command) => COMMAND_HELP[command] ?? null,
     resolveContext: ({ args }) => resolveAwsContext(args),
     formatError,
