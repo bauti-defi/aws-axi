@@ -1,0 +1,88 @@
+{
+  "version": "2.0",
+  "metadata": {
+    "apiVersion": "2020-01-01",
+    "serviceId": "FakeSvc"
+  },
+  "operations": {
+    "SimpleOp": {
+      "name": "SimpleOp",
+      "http": { "method": "GET", "requestUri": "/" },
+      "input": { "shape": "SimpleOpRequest" },
+      "output": { "shape": "SimpleOpResponse" }
+    },
+    "RequiredOp": {
+      "name": "RequiredOp",
+      "http": { "method": "POST", "requestUri": "/" },
+      "input": { "shape": "RequiredOpRequest" },
+      "output": { "shape": "RequiredOpResponse" },
+      "errors": [
+        { "shape": "NotFoundException" },
+        { "shape": "AccessDeniedException" }
+      ]
+    },
+    "PaginatedOp": {
+      "name": "PaginatedOp",
+      "http": { "method": "GET", "requestUri": "/" },
+      "input": { "shape": "PaginatedOpRequest" },
+      "output": { "shape": "PaginatedOpResponse" }
+    }
+  },
+  "shapes": {
+    "SimpleOpRequest": {
+      "type": "structure",
+      "members": {}
+    },
+    "SimpleOpResponse": {
+      "type": "structure",
+      "members": {
+        "Value": { "shape": "StringType" }
+      }
+    },
+    "RequiredOpRequest": {
+      "type": "structure",
+      "required": ["Bucket", "Key"],
+      "members": {
+        "Bucket": { "shape": "StringType" },
+        "Key": { "shape": "StringType" },
+        "Count": { "shape": "IntegerType" }
+      }
+    },
+    "RequiredOpResponse": {
+      "type": "structure",
+      "members": {
+        "Result": { "shape": "StringType" }
+      }
+    },
+    "PaginatedOpRequest": {
+      "type": "structure",
+      "members": {
+        "NextToken": { "shape": "StringType" },
+        "MaxResults": { "shape": "IntegerType" }
+      }
+    },
+    "PaginatedOpResponse": {
+      "type": "structure",
+      "members": {
+        "Items": { "shape": "ItemList" },
+        "NextToken": { "shape": "StringType" }
+      }
+    },
+    "ItemList": {
+      "type": "list",
+      "member": { "shape": "StringType" }
+    },
+    "StringType": { "type": "string" },
+    "IntegerType": { "type": "integer" },
+    "NotFoundException": {
+      "type": "structure",
+      "members": {},
+      "error": { "code": "NotFound", "httpStatusCode": 404 }
+    },
+    "AccessDeniedException": {
+      "type": "structure",
+      "members": {},
+      "error": { "code": "AccessDenied", "httpStatusCode": 403 }
+    }
+  }
+}
