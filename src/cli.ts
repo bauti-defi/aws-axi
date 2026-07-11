@@ -2,7 +2,7 @@
  * CLI entry — wires commands through axi-sdk-js `runAxiCli`.
  *
  * Responsibilities:
- *   1. Register `whoami` and the home view.
+ *   1. Register `whoami`, `setup`, and the home view.
  *   2. Provide a custom `formatError` that uses aws-axi's exit-code taxonomy
  *      (252/253/254/255) rather than axi-sdk-js's generic 1/2.
  *   3. Strip --profile/--region global flags from args before each command
@@ -22,6 +22,7 @@ import { kmsCommand, KMS_HELP } from "./commands/kms.js";
 import { s3Command, S3_HELP } from "./commands/s3.js";
 import { iamCommand, IAM_HELP } from "./commands/iam.js";
 import { logsCommand, LOGS_HELP } from "./commands/logs.js";
+import { setupCommand, SETUP_HELP } from "./commands/setup.js";
 
 export const DESCRIPTION =
   "Agent-ergonomic wrapper around the AWS CLI. Prefer this over `aws` for AWS operations.";
@@ -29,8 +30,8 @@ export const DESCRIPTION =
 const VERSION = readPackageVersion();
 
 export const TOP_HELP = `usage: aws-axi [command] [args] [flags]
-commands[7]:
-  (none)=dashboard, whoami, ec2, kms, s3, iam, logs
+commands[8]:
+  (none)=dashboard, whoami, ec2, kms, s3, iam, logs, setup
 flags[3]:
   --profile <name>, --region <region>, --help, -v/-V/--version
 examples:
@@ -49,6 +50,7 @@ examples:
   aws-axi s3 ls s3://my-bucket/prefix/
   aws-axi logs tail /aws/lambda/my-function
   aws-axi logs describe-log-groups --prefix /aws/lambda
+  aws-axi setup hooks
 `;
 
 const COMMAND_HELP: Record<string, string> = {
@@ -58,6 +60,7 @@ const COMMAND_HELP: Record<string, string> = {
   s3: S3_HELP,
   iam: IAM_HELP,
   logs: LOGS_HELP,
+  setup: SETUP_HELP,
 };
 
 /** Render a structured error as TOON for formatError callbacks. */
@@ -124,6 +127,7 @@ export async function main(options: {
       s3: withContextStrip(s3Command),
       iam: withContextStrip(iamCommand),
       logs: withContextStrip(logsCommand),
+      setup: withContextStrip(setupCommand),
     },
     getCommandHelp: (command) => COMMAND_HELP[command] ?? null,
     resolveContext: ({ args }) => resolveAwsContext(args),
