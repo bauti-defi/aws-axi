@@ -34,6 +34,38 @@ export const S3_PAGE_SIZE = 20;
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Query the region the `aws` CLI would use for the active profile by calling
+ * `aws configure get region`. This reads the profile's config-file entry —
+ * NOT the env-var region (which context.region already captures).
+ *
+ * Returns the trimmed region string, or `undefined` if not configured or if
+ * the command fails.
+ *
+ * Used by `s3CreateBucketRun` to resolve the LocationConstraint when no
+ * --region flag or AWS_REGION/AWS_DEFAULT_REGION env var is present, which
+ * is the normal `aws configure` setup.
+ */
+async function resolveConfigRegion(opts: {
+  readonly binary?: string;
+  readonly context?: AwsContext;
+}): Promise<string | undefined> {
+  // Pass context so AWS_PROFILE is injected, but region injection is skipped
+  // (context.region is undefined at this call site by construction).
+  const result = await awsRaw(
+    ["configure", "get", "region"],
+    { binary: opts.binary, context: opts.context },
+  );
+
+  if (result.exitCode === 0) {
+    const region = result.stdout.trim();
+    if (region.length > 0) {
+      return region;
+    }
+  }
+  return undefined;
+}
+
 function parseFlag(args: readonly string[], flag: string): string | undefined {
   const i = args.indexOf(flag);
   if (i === -1 || i + 1 >= args.length) return undefined;
@@ -311,9 +343,39 @@ export async function s3CreateBucketRun(
 ): Promise<S3CreateBucketResult> {
   const args: string[] = ["s3api", "create-bucket", "--bucket", options.bucket];
 
-  // us-east-1 does not allow LocationConstraint — all other regions require it.
-  const effectiveRegion = options.region ?? options.context?.region;
-  if (effectiveRegion !== undefined && effectiveRegion !== "us-east-1") {
+  // Resolve the effective region in priority order:
+  //   1. Explicit --region option
+  //   2. Context region (from --region argv flag or AWS_REGION/AWS_DEFAULT_REGION env)
+  //   3. Profile config-file region (what the `aws` child process itself would use)
+  //
+  // We must determine this before calling create-bucket because:
+  //   - us-east-1 must NOT include LocationConstraint (AWS API requirement)
+  //   - all other regions MUST include it
+  // Silently omitting it when the child targets a non-us-east-1 endpoint
+  // (via the profile config) causes IllegalLocationConstraintException.
+  let effectiveRegion: string | undefined = options.region ?? options.context?.region;
+
+  if (effectiveRegion === undefined) {
+    effectiveRegion = await resolveConfigRegion({
+      binary: options.binary,
+      context: options.context,
+    });
+  }
+
+  if (effectiveRegion === undefined) {
+    throw new AxiError(
+      "Cannot determine bucket region: no --region flag, AWS_REGION/AWS_DEFAULT_REGION env var, or configured region in the active AWS profile.",
+      "USAGE_ERROR",
+      [
+        "Pass --region <region> to specify the bucket region explicitly",
+        "Or run: aws configure set region <region>",
+        "Or run: aws configure set region <region> --profile <profile>",
+      ],
+    );
+  }
+
+  // us-east-1 must NOT include LocationConstraint — all other regions require it.
+  if (effectiveRegion !== "us-east-1") {
     args.push(
       "--create-bucket-configuration",
       `LocationConstraint=${effectiveRegion}`,

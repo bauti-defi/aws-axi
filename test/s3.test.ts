@@ -287,13 +287,15 @@ describe("s3HeadObjectRun", () => {
 // ---------------------------------------------------------------------------
 
 describe("s3CreateBucketRun — idempotent create", () => {
-  it("returns created=true on fresh bucket creation", async () => {
+  it("returns created=true on fresh bucket creation (us-east-1 explicit)", async () => {
+    // us-east-1: no LocationConstraint, no configure-get-region call needed.
     const stub = createStub({
       stdout: JSON.stringify({ Location: "/fresh-bucket" }),
       exitCode: 0,
     });
     const result = await s3CreateBucketRun({
       bucket: "fresh-bucket",
+      region: "us-east-1",
       binary: stub,
     });
 
@@ -309,8 +311,11 @@ describe("s3CreateBucketRun — idempotent create", () => {
         "An error occurred (BucketAlreadyOwnedByYou) when calling the CreateBucket operation: Your previous request to create the named bucket succeeded and you already own it.",
       exitCode: 255,
     });
+    // Pass region explicitly so configure-get-region is not called — the stub
+    // would otherwise interpret the configure call as BucketAlreadyOwnedByYou.
     const result = await s3CreateBucketRun({
       bucket: "existing-owned-bucket",
+      region: "us-east-1",
       binary: stub,
     });
 
@@ -328,7 +333,7 @@ describe("s3CreateBucketRun — idempotent create", () => {
     });
 
     await expect(
-      s3CreateBucketRun({ bucket: "taken-bucket", binary: stub }),
+      s3CreateBucketRun({ bucket: "taken-bucket", region: "us-east-1", binary: stub }),
     ).rejects.toBeInstanceOf(AxiError);
 
     const stub2 = createStub({
@@ -339,26 +344,27 @@ describe("s3CreateBucketRun — idempotent create", () => {
     });
 
     try {
-      await s3CreateBucketRun({ bucket: "taken-bucket", binary: stub2 });
+      await s3CreateBucketRun({ bucket: "taken-bucket", region: "us-east-1", binary: stub2 });
     } catch (e) {
       expect((e as AxiError).code).toBe("SERVICE_CLIENT_ERROR");
     }
   });
 
-  it("passes --region when region specified", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-region-"));
+  it("emits LocationConstraint when --region is specified and not us-east-1", async () => {
+    // The stub FAILS if create-bucket-configuration is absent, proving the
+    // LocationConstraint IS emitted for non-us-east-1 explicit --region.
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-loc-"));
     tempDirs.push(dir);
     const p = join(dir, "aws");
     writeFileSync(
       p,
       `#!/bin/sh
-if echo "$@" | grep -q "create-bucket-configuration"; then
+if echo "$@" | grep -q "LocationConstraint=eu-west-1"; then
   printf '{"Location":"/region-bucket"}'
   exit 0
 fi
-# no region arg — treat as us-east-1 (no LocationConstraint needed)
-printf '{"Location":"/region-bucket"}'
-exit 0
+printf 'An error occurred (IllegalLocationConstraintException) when calling the CreateBucket operation: Missing LocationConstraint.' >&2
+exit 255
 `,
     );
     chmodSync(p, 0o755);
@@ -369,6 +375,103 @@ exit 0
       binary: p,
     });
     expect(result.created).toBe(true);
+  });
+
+  it("emits LocationConstraint when region is resolved from profile config (no argv/env region)", async () => {
+    // Stub dispatches on args:
+    //   configure get region → returns "eu-west-2"
+    //   create-bucket with LocationConstraint=eu-west-2 → success
+    //   create-bucket without LocationConstraint → failure (proves the constraint was added)
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-cfg-region-"));
+    tempDirs.push(dir);
+    const p = join(dir, "aws");
+    writeFileSync(
+      p,
+      `#!/bin/sh
+if echo "$@" | grep -q "configure get region"; then
+  printf 'eu-west-2'
+  exit 0
+fi
+if echo "$@" | grep -q "LocationConstraint=eu-west-2"; then
+  printf '{"Location":"/cfg-region-bucket"}'
+  exit 0
+fi
+printf 'An error occurred (IllegalLocationConstraintException) when calling the CreateBucket operation: Missing or wrong LocationConstraint.' >&2
+exit 255
+`,
+    );
+    chmodSync(p, 0o755);
+
+    // No options.region, no context.region — must fall back to configure get region.
+    const result = await s3CreateBucketRun({
+      bucket: "cfg-region-bucket",
+      binary: p,
+    });
+    expect(result.created).toBe(true);
+    expect(result.bucket).toBe("cfg-region-bucket");
+  });
+
+  it("omits LocationConstraint when profile config region is us-east-1", async () => {
+    // Stub: configure get region → "us-east-1"; create-bucket WITHOUT constraint → success.
+    // If LocationConstraint is (wrongly) added, the stub returns an error.
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-use1-"));
+    tempDirs.push(dir);
+    const p = join(dir, "aws");
+    writeFileSync(
+      p,
+      `#!/bin/sh
+if echo "$@" | grep -q "configure get region"; then
+  printf 'us-east-1'
+  exit 0
+fi
+if echo "$@" | grep -q "create-bucket-configuration"; then
+  printf 'An error occurred (InvalidLocationConstraint) when calling the CreateBucket operation: us-east-1 must not have LocationConstraint.' >&2
+  exit 255
+fi
+printf '{"Location":"/us-east-1-bucket"}'
+exit 0
+`,
+    );
+    chmodSync(p, 0o755);
+
+    const result = await s3CreateBucketRun({
+      bucket: "us-east-1-bucket",
+      binary: p,
+    });
+    expect(result.created).toBe(true);
+  });
+
+  it("throws USAGE_ERROR when no region can be determined from any source", async () => {
+    // Stub: configure get region exits 1 (not configured); create-bucket never reached.
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-no-region-"));
+    tempDirs.push(dir);
+    const p = join(dir, "aws");
+    writeFileSync(
+      p,
+      `#!/bin/sh
+if echo "$@" | grep -q "configure get region"; then
+  exit 1
+fi
+exit 1
+`,
+    );
+    chmodSync(p, 0o755);
+
+    await expect(
+      s3CreateBucketRun({ bucket: "no-region-bucket", binary: p }),
+    ).rejects.toBeInstanceOf(AxiError);
+
+    const dir2 = mkdtempSync(join(tmpdir(), "aws-axi-s3-no-region2-"));
+    tempDirs.push(dir2);
+    const p2 = join(dir2, "aws");
+    writeFileSync(p2, `#!/bin/sh\nif echo "$@" | grep -q "configure get region"; then\n  exit 1\nfi\nexit 1`);
+    chmodSync(p2, 0o755);
+
+    try {
+      await s3CreateBucketRun({ bucket: "no-region-bucket-2", binary: p2 });
+    } catch (e) {
+      expect((e as AxiError).code).toBe("USAGE_ERROR");
+    }
   });
 });
 

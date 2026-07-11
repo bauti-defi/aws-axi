@@ -39,7 +39,8 @@ function cacheKey(options: ResolveBucketOptions): string {
 }
 
 // Botocore codes that mean "the bucket does not exist".
-const NOT_FOUND_CODES = new Set(["NoSuchBucket", "404", "NoSuchKey"]);
+// NoSuchKey is intentionally excluded — head-bucket never emits it.
+const NOT_FOUND_CODES = new Set(["NoSuchBucket", "404"]);
 
 /**
  * Resolve whether a bucket exists and is accessible to the current caller.
