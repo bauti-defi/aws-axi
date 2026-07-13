@@ -58,6 +58,50 @@ describe("checkExactPins", () => {
     expect(result.violations[0]!.specifier).toBe("~3.4.5");
   });
 
+  it("fails for dist-tags (latest / next)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-pins-"));
+    const path = makePkgJson(dir, {
+      dependencies: { foo: "latest", bar: "next" },
+    });
+    const result = checkExactPins(path);
+    expect(result.ok).toBe(false);
+    expect(result.violations).toHaveLength(2);
+    expect(result.violations.map((v) => v.specifier).sort()).toEqual([
+      "latest",
+      "next",
+    ]);
+  });
+
+  it("fails for partial wildcards (1.2.x / 1.x / *)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-pins-"));
+    const path = makePkgJson(dir, {
+      dependencies: { a: "1.2.x", b: "1.x", c: "*" },
+    });
+    const result = checkExactPins(path);
+    expect(result.ok).toBe(false);
+    expect(result.violations).toHaveLength(3);
+  });
+
+  it("fails for comparator ranges (>=1.0.0)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-pins-"));
+    const path = makePkgJson(dir, {
+      dependencies: { foo: ">=1.0.0" },
+    });
+    const result = checkExactPins(path);
+    expect(result.ok).toBe(false);
+    expect(result.violations[0]!.specifier).toBe(">=1.0.0");
+  });
+
+  it("passes for exact prerelease / build-metadata versions", () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-pins-"));
+    const path = makePkgJson(dir, {
+      dependencies: { foo: "1.2.3-beta.1", bar: "2.0.0+build.5" },
+    });
+    const result = checkExactPins(path);
+    expect(result.ok).toBe(true);
+    expect(result.violations).toHaveLength(0);
+  });
+
   it("reports all violations, not just the first", () => {
     const dir = mkdtempSync(join(tmpdir(), "aws-axi-pins-"));
     const path = makePkgJson(dir, {

@@ -24,18 +24,30 @@ export interface PinCheckResult {
 }
 
 /**
+ * A specifier is an exact pin only if it is strict `MAJOR.MINOR.PATCH`
+ * semver, optionally with a `-prerelease` and/or `+build` suffix.
+ *   1.2.3  ·  1.2.3-beta.1  ·  1.2.3+build.5  ·  1.2.3-rc.1+build
+ */
+const EXACT_SEMVER =
+  /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-.]+)?(?:\+[0-9A-Za-z-.]+)?$/;
+
+/**
  * Check a package.json file for non-exact dependency version specifiers.
  *
- * Flags:
- *   - Caret ranges:  "^1.2.3"
- *   - Tilde ranges:  "~1.2.3"
- *   - Comparators:   ">1.0.0", ">=1.0.0", "<2.0.0"
- *   - Wildcards:     "*", "x"
+ * Uses an allowlist: a specifier passes ONLY if it is strict exact semver
+ * (see EXACT_SEMVER). Everything else is a violation, including:
+ *   - Caret / tilde ranges:  "^1.2.3", "~1.2.3"
+ *   - Comparators:           ">1.0.0", ">=1.0.0", "<2.0.0"
+ *   - Wildcards / partials:  "*", "1.2.x", "1.x"
+ *   - Dist-tags:             "latest", "next"
  *
- * Allows:
- *   - Exact versions: "1.2.3"
- *   - Workspace refs: "workspace:*" (monorepo relative — skip these)
- *   - "file:..." local deps (development iteration — skip these)
+ * Skipped (dev-only shorthands, never published-range risks):
+ *   - Workspace refs: "workspace:*"
+ *   - "file:..." local deps
+ *
+ * An allowlist (not a denylist) matters here: `bunfig.toml [install] exact`
+ * only governs how `bun add` *writes* specifiers, so a hand-edited "latest"
+ * or "1.2.x" would silently float a pin on a security-sensitive CLI.
  */
 export function checkExactPins(packageJsonPath: string): PinCheckResult {
   const raw = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as {
@@ -49,11 +61,12 @@ export function checkExactPins(packageJsonPath: string): PinCheckResult {
     const deps = raw[field];
     if (deps == null) continue;
     for (const [name, specifier] of Object.entries(deps)) {
+      const spec = specifier.trim();
       // Skip workspace and local-file references — these are dev-only shorthands.
-      if (specifier.startsWith("workspace:") || specifier.startsWith("file:")) {
+      if (spec.startsWith("workspace:") || spec.startsWith("file:")) {
         continue;
       }
-      if (/^[\^~]/.test(specifier) || /^\s*[<>*x]/.test(specifier)) {
+      if (!EXACT_SEMVER.test(spec)) {
         violations.push({ field, name, specifier });
       }
     }
