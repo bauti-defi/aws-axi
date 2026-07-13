@@ -322,7 +322,18 @@ function installOpenCodePlugin(
  * status is derived from what was (or wasn't) written.
  */
 export function setupRun(options: SetupRunOptions = {}): SetupResult {
-  const rawExecPath = options.execPath ?? process.argv[1] ?? "";
+  // Priority: explicit override → launcher env var → argv[1] fallback.
+  //
+  // AWS_AXI_BIN is exported by the POSIX sh launcher with its own resolved
+  // path ($_dir/aws-axi). This is necessary because after `exec bun … .js`,
+  // process.argv[1] points at the .js module, not the launcher.  Storing the
+  // .js path in agent configs would bypass --no-env-file and re-open #32 on
+  // the agent surface (every SessionStart hook would load the cwd .env).
+  //
+  // Fallback to process.argv[1] is correct for dev (bun bin/aws-axi.ts), where
+  // the path ends with .ts and buildHookCommand prefixes `bun run`.
+  const rawExecPath =
+    options.execPath ?? process.env["AWS_AXI_BIN"] ?? process.argv[1] ?? "";
   const execPath = resolve(rawExecPath);
   const command = buildHookCommand(execPath);
   const home = options.homeDir ?? homedir();

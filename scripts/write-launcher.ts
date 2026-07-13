@@ -33,7 +33,12 @@ const LAUNCHER = join(ROOT, "dist", "bin", "aws-axi");
  *   2. Follows each symlink level via `readlink` (one level at a time, POSIX).
  *   3. Handles both absolute and relative symlink targets.
  *   4. When $0 is no longer a symlink, cd into its directory for the canonical path.
- *   5. Exec bun --no-env-file on the sibling aws-axi.js, forwarding all args.
+ *   5. Export AWS_AXI_BIN=$_dir/aws-axi (the resolved launcher path) so that
+ *      `aws-axi setup hooks` stores the launcher in agent configs, not the
+ *      .js module that process.argv[1] points at after exec.  Without this,
+ *      the persisted hook command would invoke aws-axi.js directly (bypassing
+ *      --no-env-file) — reproducing issue #32 on the agent surface.
+ *   6. Exec bun --no-env-file on the sibling aws-axi.js, forwarding all args.
  */
 const LAUNCHER_CONTENT = `#!/bin/sh
 # Portable POSIX launcher for aws-axi.
@@ -50,6 +55,10 @@ while [ -L "$_self" ]; do
   esac
 done
 _dir=$(cd "$(dirname "$_self")" && pwd)
+# Export the resolved launcher path so setup hooks writes the correct command.
+# After exec, process.argv[1] inside Bun is the .js module, not this launcher.
+# setup.ts reads AWS_AXI_BIN and prefers it over process.argv[1].
+export AWS_AXI_BIN="$_dir/aws-axi"
 exec bun --no-env-file "$_dir/aws-axi.js" "$@"
 `;
 

@@ -358,6 +358,89 @@ describe("setupRun — honest error reporting", () => {
 });
 
 // ---------------------------------------------------------------------------
+// AWS_AXI_BIN preference — setup hooks must write the LAUNCHER, not the .js
+//
+// When aws-axi is invoked via the POSIX sh launcher, process.argv[1] is the
+// bundled .js module (dist/bin/aws-axi.js), not the launcher.  Running the
+// .js path directly would bypass --no-env-file and re-open issue #32 on the
+// agent surface.  The launcher exports AWS_AXI_BIN=$_dir/aws-axi (the
+// launcher itself); setupRun must prefer that over process.argv[1].
+//
+// The test sets AWS_AXI_BIN to a fake launcher path, calls setupRun({}) with
+// no execPath override (simulating a real installed-CLI invocation), and asserts
+// the written hook command equals the fake launcher path.  FAILS IF REVERTED:
+// without the AWS_AXI_BIN preference, setupRun would fall through to
+// process.argv[1] (the bun test runner path), which is not the fake launcher.
+// ---------------------------------------------------------------------------
+
+describe("setupRun — prefers AWS_AXI_BIN over process.argv[1] for hook command", () => {
+  const FAKE_LAUNCHER = "/usr/local/lib/node_modules/aws-axi/dist/bin/aws-axi";
+
+  it("writes the launcher path (from AWS_AXI_BIN) to Claude Code settings, not the .js module path", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-bin-"));
+    tempDirs.push(tmp);
+    const home = makeHome(tmp);
+
+    // Simulate a real installed-CLI invocation: the launcher exports AWS_AXI_BIN,
+    // then execs bun aws-axi.js.  We set AWS_AXI_BIN here and call setupRun
+    // without execPath — setupRun must pick up the env var.
+    const savedEnvBin = process.env["AWS_AXI_BIN"];
+    process.env["AWS_AXI_BIN"] = FAKE_LAUNCHER;
+    try {
+      setupRun({ homeDir: home }); // no execPath — must use AWS_AXI_BIN
+    } finally {
+      if (savedEnvBin === undefined) {
+        delete process.env["AWS_AXI_BIN"];
+      } else {
+        process.env["AWS_AXI_BIN"] = savedEnvBin;
+      }
+    }
+
+    expect(existsSync(claudeSettingsPath(home))).toBe(true);
+    const settings = readJson(claudeSettingsPath(home));
+    const cmd = (
+      settings as {
+        hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string }> }> };
+      }
+    ).hooks?.SessionStart?.[0]?.hooks?.[0]?.command;
+
+    // Must be the launcher path, not the .js module.
+    expect(cmd).toBe(FAKE_LAUNCHER);
+    expect(cmd).not.toMatch(/\.js$/);
+  });
+
+  it("options.execPath still wins over AWS_AXI_BIN (explicit override has highest priority)", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-bin-priority-"));
+    tempDirs.push(tmp);
+    const home = makeHome(tmp);
+
+    const savedEnvBin = process.env["AWS_AXI_BIN"];
+    process.env["AWS_AXI_BIN"] = FAKE_LAUNCHER;
+    try {
+      // REAL_BIN (the .ts file) takes priority over the env var.
+      setupRun({ homeDir: home, execPath: REAL_BIN });
+    } finally {
+      if (savedEnvBin === undefined) {
+        delete process.env["AWS_AXI_BIN"];
+      } else {
+        process.env["AWS_AXI_BIN"] = savedEnvBin;
+      }
+    }
+
+    const settings = readJson(claudeSettingsPath(home));
+    const cmd = (
+      settings as {
+        hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string }> }> };
+      }
+    ).hooks?.SessionStart?.[0]?.hooks?.[0]?.command;
+
+    // execPath wins — must be the .ts bin, not the fake launcher.
+    expect(cmd).toBe(`bun run ${REAL_BIN}`);
+    expect(cmd).not.toBe(FAKE_LAUNCHER);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // setupCommand — CLI adapter validation
 // ---------------------------------------------------------------------------
 

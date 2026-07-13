@@ -23,6 +23,7 @@
   },
   "scripts": {
     "test": "bun test",
+    "pretest": "bun run build",
     "typecheck": "tsc --noEmit",
     "dev": "bun --no-env-file bin/aws-axi.ts",
     "build": "rm -rf ./dist && bun build ./bin/aws-axi.ts --outdir ./dist/bin --target bun --packages external --sourcemap=external && bun run scripts/write-launcher.ts",

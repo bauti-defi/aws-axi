@@ -92,22 +92,25 @@ Homebrew tap or GitHub release download flow. Defer to a future slice if demand 
 
 ## Impact on slice #14 (setup hooks)
 
-`setup.ts` already handles both the development (`.ts` bin) and packaged forms:
+`setup.ts` handles both the development (`.ts` bin) and installed (launcher) forms:
 
 ```typescript
 function buildHookCommand(execPath: string): string {
   if (execPath.endsWith(".ts")) {
     return `bun run ${execPath}`;   // dev: bun run /abs/path/aws-axi.ts
   }
-  return execPath;                   // packaged: /abs/path/dist/bin/aws-axi.js
+  return execPath;                   // packaged: /abs/path/dist/bin/aws-axi (the launcher)
 }
 ```
 
-After npm install, `process.argv[1]` is the path to `dist/bin/aws-axi.js` (the Bun
-module invoked by the launcher), which does not end with `.ts` → `buildHookCommand`
-returns it directly. However, what we want stored in hooks is the **launcher** path
-(so the hook also benefits from `--no-env-file`). This may require a follow-up to
-`setup.ts` to detect the `.js` form and substitute the sibling launcher path.
+After npm install, when a user runs `aws-axi setup hooks`:
+- The launcher exports `AWS_AXI_BIN=$_dir/aws-axi` (its own resolved path).
+- `setupRun` prefers `AWS_AXI_BIN` over `process.argv[1]` (which is the `.js` module).
+- `buildHookCommand(launcherPath)` returns the launcher path directly (no `.ts` → no `bun run` prefix).
+- The persisted hook command is the launcher — which passes `--no-env-file` to Bun.
+
+This closes the previously-noted gap: the hook now benefits from the same `.env` isolation
+as a direct invocation. `test/setup.test.ts` asserts this invariant and fails if reverted.
 
 ## Operator-only steps to complete this slice
 
