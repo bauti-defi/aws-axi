@@ -92,6 +92,13 @@ ends with contextual `help:` next-step hints.
 **What is implemented today.** Anything not listed as an enriched overlay still *works* through the
 generic engine (correct, structured, capped) — it just isn't curated.
 
+**Overlay superset invariant.** Every enriched overlay's input contract is a strict *superset* of the
+real `aws` CLI's. Any flag the underlying `aws` operation accepts — `--filters`, `--path-prefix`,
+`--grant-tokens`, `--recursive`, etc. — is forwarded verbatim to the child `aws` invocation. The
+overlay changes the *output*, never restricts the *input*. Two flags are handled specially:
+`--output` is stripped (the exec seam always appends `--output json`); `--query` is forwarded but
+bypasses the overlay's curated projection, returning the raw JMESPath result as-is.
+
 | Service          | Command            | Enriched overlay operations                                                                  | Everything else                    |
 | ---------------- | ------------------ | -------------------------------------------------------------------------------------------- | ---------------------------------- |
 | STS              | `whoami`           | identity fused with profile, region, credential source                                       | —                                  |
@@ -131,6 +138,8 @@ apart from the `aws-axi` prefix. Where the ergonomics differ, here is the map bo
 | You'd run with `aws`                                   | With `aws-axi`                                         | What changed                                                                 |
 | ------------------------------------------------------ | ----------------------------------------------------- | --------------------------------------------------------------------------- |
 | `aws ec2 describe-instances --output json`             | `aws-axi ec2 describe-instances`                       | Output is always TOON; `--output` is ignored (stripped)                     |
+| `aws ec2 describe-instances --filters Name=...,Values=...` | `aws-axi ec2 describe-instances --filters Name=...,Values=...` | `--filters` (and any other aws flag) forwarded verbatim; output is still enriched TOON |
+| `aws iam list-roles --query 'Roles[].RoleName'`        | `aws-axi iam list-roles --query 'Roles[].RoleName'`   | `--query` forwarded; JMESPath applied by aws CLI; overlay projection bypassed |
 | `aws sts get-caller-identity`                          | `aws-axi whoami`                                       | Fused with profile, region, and credential source                          |
 | *(no equivalent)*                                      | `aws-axi`                                              | No-arg dashboard: current identity + region                                |
 | `aws s3 ls s3://bucket/`                               | `aws-axi s3 ls s3://bucket/`                           | Same; output capped + TOON                                                  |
@@ -158,6 +167,9 @@ apart from the `aws-axi` prefix. Where the ergonomics differ, here is the map bo
   directory. Only genuinely-exported shell environment variables and `~/.aws/*` config are honored,
   matching the `aws` CLI exactly. (If you run `bun run bin/aws-axi.ts` directly in a repo that has a
   `.env`, use `bun --no-env-file bin/aws-axi.ts` to get the same isolation.)
+- **Overlay superset** — any flag the underlying `aws` operation accepts is forwarded verbatim. Overlays
+  change the output, never restrict the input. Exception: `--output` is stripped (always `json` internally);
+  `--query` is forwarded but bypasses the overlay's curated projection, returning the raw JMESPath result.
 
 ## Reporting issues
 

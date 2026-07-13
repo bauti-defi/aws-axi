@@ -38,6 +38,7 @@ import { resolveSubnet } from "../resolve/subnet.js";
 import { resolveLogGroup } from "../resolve/log-group.js";
 import { resolveKey } from "../resolve/key.js";
 import { fallThroughToEngine } from "../engine.js";
+import { collectPassthroughFlags, buildPassthrough } from "../overlay-args.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -180,6 +181,10 @@ export interface LambdaRunOptions {
 
 export const LAMBDA_HELP = `usage: aws-axi lambda <subcommand> [flags]
 
+Any flag accepted by the underlying \`aws lambda\` operation (e.g.
+--function-version, --qualifier, --query) is forwarded verbatim — overlays never
+restrict the input contract, only enrich the output.
+
 subcommands (enriched overlays):
   list-functions              List Lambda functions (default when omitted)
   get-function <name>         Describe a function including code location
@@ -187,9 +192,11 @@ subcommands (enriched overlays):
   invoke --function-name <n>  Invoke a function synchronously
   (any other lambda subcommand falls through to the generic engine — run \`aws lambda help\` to list all)
 
-flags (all subcommands):
+flags (overlay-specific):
   --profile <name>            AWS profile (inherited from global --profile)
   --region <region>           AWS region  (inherited from global --region)
+  --query <expr>              JMESPath; bypasses overlay projection, returns raw result
+  --output                    stripped (aws-axi always uses --output json internally)
 
 flags (list-functions):
   --max-items <n>             Cap results per page (default: ${MAX_ITEMS_DEFAULT})
@@ -207,6 +214,7 @@ examples:
   aws-axi lambda list-functions --max-items 10
   aws-axi lambda list-functions --next-token AQE...
   aws-axi lambda get-function my-function
+  aws-axi lambda get-function my-function --qualifier v1  # forwarded to aws
   aws-axi lambda get-function-configuration my-function
   aws-axi lambda invoke --function-name my-function --payload '{"key":"val"}'
   aws-axi lambda invoke --function-name my-function --log-type Tail
@@ -391,10 +399,15 @@ async function runListFunctions(
   const nextTokenArg = extractFlag(options.args, "--next-token");
   const runOpts = toRunOpts(options);
 
+  // Forward unknown flags verbatim (superset contract).
+  const rawPassthrough = collectPassthroughFlags(options.args, ["--max-items", "--next-token"]);
+  const { passthrough } = buildPassthrough(rawPassthrough);
+
   const awsArgs: string[] = ["lambda", "list-functions", "--max-items", String(maxItems)];
   if (nextTokenArg !== undefined) {
     awsArgs.push("--starting-token", nextTokenArg);
   }
+  awsArgs.push(...passthrough);
 
   const response = await awsJson<RawListFunctionsResponse>(awsArgs, runOpts);
   const fns = response.Functions ?? [];
@@ -439,8 +452,12 @@ async function runGetFunction(
   const fnName = positionals[0] as string;
   const runOpts = toRunOpts(options);
 
+  // Forward unknown flags verbatim (superset contract — e.g. --qualifier).
+  const rawPassthrough = collectPassthroughFlags(options.args, []);
+  const { passthrough } = buildPassthrough(rawPassthrough);
+
   const response = await awsJson<RawGetFunctionResponse>(
-    ["lambda", "get-function", "--function-name", fnName],
+    ["lambda", "get-function", "--function-name", fnName, ...passthrough],
     runOpts,
   );
 
@@ -463,8 +480,12 @@ async function runGetFunctionConfiguration(
   const fnName = positionals[0] as string;
   const runOpts = toRunOpts(options);
 
+  // Forward unknown flags verbatim (superset contract — e.g. --qualifier).
+  const rawPassthrough = collectPassthroughFlags(options.args, []);
+  const { passthrough } = buildPassthrough(rawPassthrough);
+
   const rawConfig = await awsJson<RawLambdaFunction>(
-    ["lambda", "get-function-configuration", "--function-name", fnName],
+    ["lambda", "get-function-configuration", "--function-name", fnName, ...passthrough],
     runOpts,
   );
 
@@ -519,6 +540,15 @@ async function runInvoke(
   if (logType !== undefined) {
     invokeArgs.push("--log-type", logType);
   }
+
+  // Forward unknown flags verbatim (superset contract).
+  // Note: the outfile positional must come AFTER passthrough flags below.
+  const rawPassthrough = collectPassthroughFlags(
+    options.args,
+    ["--function-name", "--payload", "--invocation-type", "--log-type", "--cli-binary-format"],
+  );
+  const { passthrough } = buildPassthrough(rawPassthrough);
+  invokeArgs.push(...passthrough);
 
   // Create a temp file for the response payload
   const tmpDir = mkdtempSync(join(tmpdir(), "aws-axi-lambda-invoke-"));

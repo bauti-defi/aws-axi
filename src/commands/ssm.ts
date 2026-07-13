@@ -24,6 +24,7 @@ import type { AwsRunOptions } from "../aws.js";
 import { awsJson } from "../aws.js";
 import { resolveKey } from "../resolve/key.js";
 import { fallThroughToEngine } from "../engine.js";
+import { collectPassthroughFlags, buildPassthrough } from "../overlay-args.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -153,6 +154,10 @@ export interface SsmRunOptions {
 
 export const SSM_HELP = `usage: aws-axi ssm <subcommand> [flags]
 
+Any flag accepted by the underlying \`aws ssm\` operation (e.g. --recursive,
+--filters, --with-decryption, --query) is forwarded verbatim — overlays never
+restrict the input contract, only enrich the output.
+
 subcommands (enriched overlays):
   describe-parameters                List parameter metadata (default when omitted)
   get-parameter <name>               Get one parameter; value is redacted by default
@@ -160,10 +165,12 @@ subcommands (enriched overlays):
   get-parameters-by-path <path>      Get all parameters under a path prefix
   (any other ssm subcommand falls through to the generic engine — run \`aws ssm help\` to list all)
 
-flags (all subcommands):
+flags (overlay-specific):
   --profile <name>       AWS profile (inherited from global --profile)
   --region <region>      AWS region  (inherited from global --region)
-  --reveal               Show actual parameter values (default: redacted)
+  --reveal               Show actual parameter values (default: redacted; alias for --with-decryption)
+  --query <expr>         JMESPath; bypasses overlay projection, returns raw result
+  --output               stripped (aws-axi always uses --output json internally)
 
 flags (list operations):
   --max-items <n>        Cap results per page (default: ${MAX_ITEMS_DEFAULT})
@@ -171,7 +178,6 @@ flags (list operations):
 
 flags (get-parameter, get-parameters):
   --name <name>          Parameter name (alternative to positional)
-  --with-decryption      Passed through to aws when --reveal is active
 
 flags (get-parameters-by-path):
   --path <path>          Parameter path prefix (alternative to positional)
@@ -182,8 +188,10 @@ examples:
   aws-axi ssm get-parameter /my/app/db-password --reveal
   aws-axi ssm get-parameters /my/app/db-password /my/app/api-key
   aws-axi ssm get-parameters-by-path /my/app --max-items 20
+  aws-axi ssm get-parameters-by-path /my/app --recursive     # forwarded to aws
   aws-axi ssm describe-parameters
   aws-axi ssm describe-parameters --max-items 10 --next-token AQE...
+  aws-axi ssm describe-parameters --filters Key=Path,Values=/my/app  # forwarded
 `;
 
 // ─── Arg-parsing helpers ──────────────────────────────────────────────────────
@@ -310,10 +318,16 @@ async function runGetParameter(
     );
   }
 
+  // Forward unknown flags verbatim (superset contract).
+  // --reveal is an overlay alias for --with-decryption; skip it here (handled above).
+  const rawPassthrough = collectPassthroughFlags(options.args, ["--name"], ["--reveal"]);
+  const { passthrough } = buildPassthrough(rawPassthrough);
+
   const awsArgs = ["ssm", "get-parameter", "--name", nameArg];
   if (reveal) {
     awsArgs.push("--with-decryption");
   }
+  awsArgs.push(...passthrough);
 
   const response = await awsJson<RawGetParameterResponse>(awsArgs, toRunOpts(options));
 
@@ -347,10 +361,15 @@ async function runGetParameters(
     );
   }
 
+  // Forward unknown flags verbatim (superset contract).
+  const rawPassthrough = collectPassthroughFlags(options.args, ["--names"], ["--reveal"]);
+  const { passthrough } = buildPassthrough(rawPassthrough);
+
   const awsArgs = ["ssm", "get-parameters", "--names", ...names];
   if (reveal) {
     awsArgs.push("--with-decryption");
   }
+  awsArgs.push(...passthrough);
 
   const response = await awsJson<RawGetParametersResponse>(awsArgs, toRunOpts(options));
   const params = response.Parameters ?? [];
@@ -388,6 +407,14 @@ async function runGetParametersByPath(
   const maxItems = extractMaxItems(options.args);
   const nextTokenArg = extractFlag(options.args, "--next-token");
 
+  // Forward unknown flags verbatim (superset contract).
+  const rawPassthrough = collectPassthroughFlags(
+    options.args,
+    ["--path", "--max-items", "--next-token"],
+    ["--reveal"],
+  );
+  const { passthrough } = buildPassthrough(rawPassthrough);
+
   const awsArgs = [
     "ssm",
     "get-parameters-by-path",
@@ -402,6 +429,7 @@ async function runGetParametersByPath(
   if (nextTokenArg !== undefined) {
     awsArgs.push("--starting-token", nextTokenArg);
   }
+  awsArgs.push(...passthrough);
 
   const response = await awsJson<RawGetParametersByPathResponse>(
     awsArgs,
@@ -437,10 +465,15 @@ async function runDescribeParameters(
   const maxItems = extractMaxItems(options.args);
   const nextTokenArg = extractFlag(options.args, "--next-token");
 
+  // Forward unknown flags verbatim (superset contract — e.g. --filters).
+  const rawPassthrough = collectPassthroughFlags(options.args, ["--max-items", "--next-token"]);
+  const { passthrough } = buildPassthrough(rawPassthrough);
+
   const awsArgs = ["ssm", "describe-parameters", "--max-items", String(maxItems)];
   if (nextTokenArg !== undefined) {
     awsArgs.push("--starting-token", nextTokenArg);
   }
+  awsArgs.push(...passthrough);
 
   const response = await awsJson<RawDescribeParametersResponse>(
     awsArgs,
