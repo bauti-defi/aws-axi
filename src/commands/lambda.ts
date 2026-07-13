@@ -37,6 +37,7 @@ import { resolveSg } from "../resolve/sg.js";
 import { resolveSubnet } from "../resolve/subnet.js";
 import { resolveLogGroup } from "../resolve/log-group.js";
 import { resolveKey } from "../resolve/key.js";
+import { fallThroughToEngine } from "../engine.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -179,11 +180,12 @@ export interface LambdaRunOptions {
 
 export const LAMBDA_HELP = `usage: aws-axi lambda <subcommand> [flags]
 
-subcommands:
+subcommands (enriched overlays):
   list-functions              List Lambda functions (default when omitted)
   get-function <name>         Describe a function including code location
   get-function-configuration <name>  Configuration only (no code URL)
   invoke --function-name <n>  Invoke a function synchronously
+  (any other lambda subcommand falls through to the generic engine — run \`aws lambda help\` to list all)
 
 flags (all subcommands):
   --profile <name>            AWS profile (inherited from global --profile)
@@ -657,14 +659,10 @@ export async function lambdaCommand(
     subcommand = firstArg;
     remainingArgs = args.slice(1);
   } else {
-    throw new AxiError(
-      `Unknown lambda subcommand: ${firstArg}`,
-      "USAGE_ERROR",
-      [
-        "Valid subcommands: list-functions, get-function, get-function-configuration, invoke",
-        "Run `aws-axi lambda --help` for full usage",
-      ],
-    );
+    // Not in the overlay's hot-path — delegate to the model-driven engine.
+    // The engine validates against the botocore lambda model and surfaces a clean
+    // USAGE_ERROR for ops that are genuinely unknown to AWS.
+    return fallThroughToEngine("lambda", firstArg, args.slice(1), context);
   }
 
   const result = await lambdaRun({ subcommand, args: remainingArgs, context, binary });

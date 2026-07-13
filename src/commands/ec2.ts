@@ -20,6 +20,7 @@
 import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import { awsJson } from "../aws.js";
+import { fallThroughToEngine } from "../engine.js";
 import { resolveSg } from "../resolve/sg.js";
 import { resolveSubnet } from "../resolve/subnet.js";
 import { resolveRole } from "../resolve/role.js";
@@ -162,8 +163,9 @@ export interface Ec2RunOptions {
 
 export const EC2_HELP = `usage: aws-axi ec2 <operation> [--profile <name>] [--region <region>] [flags]
 
-operations[4]:
+operations[4] (enriched overlays):
   describe-vpcs, describe-subnets, describe-security-groups, describe-instances
+  (any other ec2 operation falls through to the generic engine — run \`aws ec2 help\` to list all)
 
 flags:
   --profile <name>     AWS profile to use (default: AWS_PROFILE env or "default")
@@ -181,6 +183,8 @@ examples:
   aws-axi ec2 describe-instances
   aws-axi ec2 describe-instances --max-items 10
   aws-axi ec2 describe-instances --next-token <token>
+  aws-axi ec2 describe-regions
+  aws-axi ec2 describe-availability-zones
 `;
 
 // ---------------------------------------------------------------------------
@@ -660,14 +664,10 @@ export async function ec2Command(
   }
 
   if (!ALL_EC2_OPERATIONS.has(operation)) {
-    throw new AxiError(
-      `Unknown ec2 operation: ${operation}`,
-      "USAGE_ERROR",
-      [
-        `Supported operations: ${[...ALL_EC2_OPERATIONS].join(", ")}`,
-        "Run `aws-axi ec2 --help` to see all options",
-      ],
-    );
+    // Not in the overlay's hot-path — delegate to the model-driven engine.
+    // The engine validates against the botocore ec2 model and surfaces a clean
+    // USAGE_ERROR for ops that are genuinely unknown to AWS.
+    return fallThroughToEngine("ec2", operation, args.slice(1), context);
   }
 
   const remainingArgs = args.slice(1);

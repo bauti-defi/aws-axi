@@ -1,0 +1,67 @@
+{
+  "version": "2.0",
+  "metadata": {
+    "apiVersion": "2014-03-28",
+    "serviceId": "CloudWatch Logs"
+  },
+  "operations": {
+    "FilterLogEvents": {
+      "name": "FilterLogEvents",
+      "http": { "method": "POST", "requestUri": "/" },
+      "input": { "shape": "FilterLogEventsRequest" },
+      "output": { "shape": "FilterLogEventsResponse" }
+    },
+    "DescribeLogGroups": {
+      "name": "DescribeLogGroups",
+      "http": { "method": "POST", "requestUri": "/" },
+      "input": { "shape": "DescribeLogGroupsRequest" },
+      "output": { "shape": "DescribeLogGroupsResponse" }
+    }
+  },
+  "shapes": {
+    "FilterLogEventsRequest": {
+      "type": "structure",
+      "required": ["logGroupName"],
+      "members": {
+        "logGroupName": { "shape": "String" },
+        "filterPattern": { "shape": "String" }
+      }
+    },
+    "FilterLogEventsResponse": {
+      "type": "structure",
+      "members": {
+        "events": { "shape": "FilteredLogEventList" }
+      }
+    },
+    "DescribeLogGroupsRequest": {
+      "type": "structure",
+      "members": {
+        "logGroupNamePrefix": { "shape": "String" }
+      }
+    },
+    "DescribeLogGroupsResponse": {
+      "type": "structure",
+      "members": {
+        "logGroups": { "shape": "LogGroupList" }
+      }
+    },
+    "FilteredLogEventList": { "type": "list", "member": { "shape": "FilteredLogEvent" } },
+    "FilteredLogEvent": {
+      "type": "structure",
+      "members": {
+        "logStreamName": { "shape": "String" },
+        "timestamp": { "shape": "Long" },
+        "message": { "shape": "String" }
+      }
+    },
+    "LogGroupList": { "type": "list", "member": { "shape": "LogGroup" } },
+    "LogGroup": {
+      "type": "structure",
+      "members": {
+        "logGroupName": { "shape": "String" }
+      }
+    },
+    "Long": { "type": "long" },
+    "String": { "type": "string" }
+  }
+}

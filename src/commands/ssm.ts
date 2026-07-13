@@ -23,6 +23,7 @@ import type { AwsContext } from "../context.js";
 import type { AwsRunOptions } from "../aws.js";
 import { awsJson } from "../aws.js";
 import { resolveKey } from "../resolve/key.js";
+import { fallThroughToEngine } from "../engine.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -152,11 +153,12 @@ export interface SsmRunOptions {
 
 export const SSM_HELP = `usage: aws-axi ssm <subcommand> [flags]
 
-subcommands:
+subcommands (enriched overlays):
   describe-parameters                List parameter metadata (default when omitted)
   get-parameter <name>               Get one parameter; value is redacted by default
   get-parameters <n1> [n2...]        Get multiple parameters by name
   get-parameters-by-path <path>      Get all parameters under a path prefix
+  (any other ssm subcommand falls through to the generic engine — run \`aws ssm help\` to list all)
 
 flags (all subcommands):
   --profile <name>       AWS profile (inherited from global --profile)
@@ -555,14 +557,10 @@ export async function ssmCommand(
     subcommand = firstArg;
     remainingArgs = args.slice(1);
   } else {
-    throw new AxiError(
-      `Unknown ssm subcommand: ${firstArg}`,
-      "USAGE_ERROR",
-      [
-        "Valid subcommands: get-parameter, get-parameters, get-parameters-by-path, describe-parameters",
-        "Run `aws-axi ssm --help` for full usage",
-      ],
-    );
+    // Not in the overlay's hot-path — delegate to the model-driven engine.
+    // The engine validates against the botocore ssm model and surfaces a clean
+    // USAGE_ERROR for ops that are genuinely unknown to AWS.
+    return fallThroughToEngine("ssm", firstArg, args.slice(1), context);
   }
 
   const result = await ssmRun({ subcommand, args: remainingArgs, context });

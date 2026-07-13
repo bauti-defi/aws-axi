@@ -242,6 +242,31 @@ export async function engineRun(
 }
 
 /**
+ * Shared seam: delegate an unrecognised overlay op to the model-driven engine.
+ *
+ * Called from each overlay command's unknown-op branch so the fall-through is
+ * uniform across ec2, iam, s3, kms, logs, lambda, ssm, and secretsmanager.
+ *
+ * The caller passes:
+ *   service   — AWS service name as the CLI knows it (e.g. "ec2", "logs")
+ *   operation — CLI kebab-case op exactly as typed by the user (e.g. "describe-regions")
+ *   args      — all args AFTER the operation, RAW (profile/region already in context)
+ *   context   — resolved AWS context from the CLI layer
+ *
+ * The engine validates the op against the botocore service model and returns a
+ * clean USAGE_ERROR for ops that are truly unknown to AWS — so the overlay no
+ * longer needs its own hardcoded allowlist for the long tail.
+ */
+export function fallThroughToEngine(
+  service: string,
+  operation: string,
+  args: readonly string[],
+  context: AwsContext | undefined,
+): Promise<Record<string, unknown>> {
+  return engineRun({ service, operation, args, context });
+}
+
+/**
  * Project raw AWS JSON output into an agent-friendly object.
  *
  * - Strips ResponseMetadata (envelope noise, not useful for agents).

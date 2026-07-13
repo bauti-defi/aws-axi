@@ -17,6 +17,7 @@ import type { AwsContext } from "../context.js";
 import type { AwsRunOptions } from "../aws.js";
 import { awsJson } from "../aws.js";
 import { loadAliasMap } from "../resolve/key.js";
+import { fallThroughToEngine } from "../engine.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -147,11 +148,12 @@ export interface KmsRunOptions {
 
 export const KMS_HELP = `usage: aws-axi kms <subcommand> [flags]
 
-subcommands:
+subcommands (enriched overlays):
   list-keys             List all KMS keys (default when omitted)
   list-aliases          List all key aliases
   describe-key <id>     Describe a key by id, ARN, or alias
   get-key-policy <id>   Get the default key policy
+  (any other kms subcommand falls through to the generic engine — run \`aws kms help\` to list all)
 
 flags (all subcommands):
   --profile <name>      AWS profile (inherited from global --profile)
@@ -517,14 +519,10 @@ export async function kmsCommand(
     subcommand = firstArg;
     remainingArgs = args.slice(1);
   } else {
-    throw new AxiError(
-      `Unknown kms subcommand: ${firstArg}`,
-      "USAGE_ERROR",
-      [
-        "Valid subcommands: list-keys, list-aliases, describe-key, get-key-policy",
-        "Run `aws-axi kms --help` for full usage",
-      ],
-    );
+    // Not in the overlay's hot-path — delegate to the model-driven engine.
+    // The engine validates against the botocore kms model and surfaces a clean
+    // USAGE_ERROR for ops that are genuinely unknown to AWS.
+    return fallThroughToEngine("kms", firstArg, args.slice(1), context);
   }
 
   const result = await kmsRun({ subcommand, args: remainingArgs, context });
