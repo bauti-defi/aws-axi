@@ -23,7 +23,7 @@ import { awsJson, awsRaw, awsExec } from "../aws.js";
 import type { AwsContext } from "../context.js";
 import { parseAwsError } from "../errors.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough } from "../overlay-args.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -76,6 +76,24 @@ function parseFlag(args: readonly string[], flag: string): string | undefined {
 
 function hasFlag(args: readonly string[], flag: string): boolean {
   return args.includes(flag);
+}
+
+/**
+ * Remove the first occurrence of each `positional` value from `args`.
+ *
+ * Used to strip already-identified positionals (source, destination, target)
+ * before calling `collectPassthroughFlags`. Once positionals are removed, every
+ * remaining bare token can only be a flag value — the heuristic is then safe and
+ * never accidentally eats a positional as a boolean flag's value.
+ */
+function stripPositionals(args: readonly string[], ...positionals: (string | undefined)[]): string[] {
+  const remaining = [...args];
+  for (const pos of positionals) {
+    if (pos === undefined) continue;
+    const idx = remaining.indexOf(pos);
+    if (idx !== -1) remaining.splice(idx, 1);
+  }
+  return remaining;
 }
 
 /**
@@ -180,6 +198,12 @@ export interface S3LsRunOptions {
   readonly startingToken?: string;
   /** Unknown flags to forward verbatim to the underlying aws invocation. */
   readonly passthrough?: readonly string[];
+  /**
+   * True when --query was present in the caller's args. When set, the overlay
+   * bypasses its curated projection (aws CLI applies JMESPath before we see the
+   * response; the shape is unknown).
+   */
+  readonly hasQuery?: boolean;
   readonly binary?: string;
   readonly context?: AwsContext;
 }
@@ -191,10 +215,19 @@ export interface S3LsRunOptions {
  * - With prefix → s3api list-objects-v2, capped at S3_PAGE_SIZE with honest
  *   truncation reporting and a --starting-token continuation hint.
  */
-export async function s3LsRun(options: S3LsRunOptions): Promise<S3LsResult> {
+export async function s3LsRun(
+  options: S3LsRunOptions,
+): Promise<S3LsResult | Record<string, unknown>> {
   // ── list all buckets ──────────────────────────────────────────────────────
   if (options.prefix === undefined) {
     const lsBucketsArgs = ["s3api", "list-buckets", ...(options.passthrough ?? [])];
+    if (options.hasQuery === true) {
+      // --query: aws CLI applies JMESPath; bypass curated projection.
+      return awsJson<Record<string, unknown>>(lsBucketsArgs, {
+        binary: options.binary,
+        context: options.context,
+      });
+    }
     const resp = await awsJson<ListBucketsResponse>(
       lsBucketsArgs,
       { binary: options.binary, context: options.context },
@@ -236,6 +269,14 @@ export async function s3LsRun(options: S3LsRunOptions): Promise<S3LsResult> {
   }
   if (options.passthrough !== undefined) {
     args.push(...options.passthrough);
+  }
+
+  if (options.hasQuery === true) {
+    // --query: aws CLI applies JMESPath; bypass curated projection.
+    return awsJson<Record<string, unknown>>(args, {
+      binary: options.binary,
+      context: options.context,
+    });
   }
 
   const resp = await awsJson<ListObjectsV2Response>(args, {
@@ -575,8 +616,12 @@ export async function s3Command(
     case "ls": {
       const prefix = rest.find((a) => a.startsWith("s3://"));
       const startingToken = parseFlag(rest, "--starting-token");
-      const passthrough = collectPassthroughFlags(rest, ["--starting-token"]);
-      const result = await s3LsRun({ prefix, startingToken, passthrough, context });
+      // Strip the s3:// URI positional before collecting passthrough so the
+      // heuristic cannot consume it as a boolean flag's value.
+      const argsForPassthrough = stripPositionals(rest, prefix);
+      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, ["--starting-token"]);
+      const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+      const result = await s3LsRun({ prefix, startingToken, passthrough, hasQuery, context });
       return result as unknown as Record<string, unknown>;
     }
 
@@ -588,11 +633,16 @@ export async function s3Command(
         throw new AxiError(
           "s3 cp requires <source> and <destination>",
           "USAGE_ERROR",
-          ["Usage: aws-axi s3 cp <source> <destination> [--dryrun]"],
+          ["Usage: aws-axi s3 cp <source> <destination> [flags]"],
         );
       }
       const dryRun = hasFlag(rest, "--dryrun");
-      const passthrough = collectPassthroughFlags(rest, ["--dryrun"]);
+      // Strip identified positionals first. Once bare positionals are absent,
+      // the heuristic safely identifies all remaining bare tokens as flag values.
+      // --dryrun is a boolean overlay flag (no value follows); pass in ownedBoolFlags.
+      const argsForPassthrough = stripPositionals(rest, source, destination);
+      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, [], ["--dryrun"]);
+      const { passthrough } = buildPassthrough(rawPassthrough);
       const result = await s3CpRun({ source, destination, dryRun, passthrough, context });
       return result as unknown as Record<string, unknown>;
     }
@@ -608,7 +658,10 @@ export async function s3Command(
         );
       }
       const dryRun = hasFlag(rest, "--dryrun");
-      const passthrough = collectPassthroughFlags(rest, ["--dryrun"]);
+      // Strip the target URI positional to prevent heuristic from eating it.
+      const argsForPassthrough = stripPositionals(rest, target);
+      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, [], ["--dryrun"]);
+      const { passthrough } = buildPassthrough(rawPassthrough);
       const result = await s3RmRun({ target, dryRun, passthrough, context });
       return result as unknown as Record<string, unknown>;
     }
@@ -623,7 +676,9 @@ export async function s3Command(
           ["Usage: aws-axi s3 head-object --bucket <name> --key <key>"],
         );
       }
-      const passthrough = collectPassthroughFlags(rest, ["--bucket", "--key"]);
+      // head-object maps to s3api head-object — all flags are named, no positionals.
+      const rawPassthrough = collectPassthroughFlags(rest, ["--bucket", "--key"]);
+      const { passthrough } = buildPassthrough(rawPassthrough);
       const result = await s3HeadObjectRun({ bucket, key, passthrough, context });
       return result as unknown as Record<string, unknown>;
     }
@@ -638,7 +693,8 @@ export async function s3Command(
         );
       }
       const region = parseFlag(rest, "--region");
-      const passthrough = collectPassthroughFlags(rest, ["--bucket", "--region"]);
+      const rawPassthrough = collectPassthroughFlags(rest, ["--bucket", "--region"]);
+      const { passthrough } = buildPassthrough(rawPassthrough);
       const result = await s3CreateBucketRun({ bucket, region, passthrough, context });
       return result as unknown as Record<string, unknown>;
     }

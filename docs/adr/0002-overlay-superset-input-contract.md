@@ -37,7 +37,7 @@ invocation. Two flag classes are handled specially:
 | Flag | Behavior |
 |---|---|
 | `--output <value>` / `--output=<value>` | **Stripped.** The exec seam (`awsJson`) always appends `--output json`; a duplicate `--output` from passthrough would conflict. |
-| `--query <expr>` / `--query=<expr>` | **Kept in passthrough, projection bypassed.** JMESPath is applied by the aws CLI before the response reaches the overlay; the overlay CANNOT safely project a JMESPath result of unknown shape. `hasQuery=true` tells the overlay to skip its curated projection and return the raw queried result as-is. |
+| `--query <expr>` / `--query=<expr>` | **Kept in passthrough, projection bypassed.** JMESPath is applied by the aws CLI before the response reaches the overlay; the overlay CANNOT safely project a JMESPath result of unknown shape. `hasQuery=true` tells the overlay's `*Run` helper to skip its curated projection. The CLI adapter (`logsCommand`, `s3Command`, etc.) must also bypass its record-builder wrappers when `hasQuery=true` — if the adapter re-wraps a raw result, all fields become null. |
 
 Positionals owned by the overlay (e.g. `<key-id>` for `kms describe-key`,
 `<group-name>` for `logs filter`) are never leaked into passthrough.
@@ -59,10 +59,21 @@ consulted to classify known flags as boolean or value-taking — preventing bool
 flags from accidentally consuming the next positional as their value. Flags not
 found in the model fall back to the heuristic (consume next non-`--` token).
 
-**S3 overlay** (`s3.ts`) uses a different pattern: each sub-operation adapter
-calls `collectPassthroughFlags` to gather a `passthrough?: readonly string[]`
-field, which is forwarded at the point where the `aws s3api` args are assembled.
-The same superset guarantee applies.
+**S3 overlay** (`s3.ts`) uses a different pattern. The adapter strips already-
+identified positionals (source, destination, target URI) from the args **before**
+calling `collectPassthroughFlags`. Once positionals are removed, every remaining
+bare token must be a flag value — making the arity heuristic safe by construction,
+even without a botocore model. Each sub-operation forwards the collected passthrough
+to the underlying `aws s3api` (for `ls`, `head-object`, `create-bucket`) or
+`aws s3` (for `cp`, `rm`) invocation.
+
+**Scope boundary for S3:** `s3 ls` and `s3 head-object` rewrite to `s3api`
+operations. High-level `aws s3` flags that have no `s3api` counterpart (e.g.
+`--recursive` on `s3 ls`) are forwarded verbatim but may cause the underlying
+`s3api` call to fail — this is the correct behavior (the error comes from the
+authoritative CLI). `s3 cp` and `s3 rm` use `aws s3` high-level commands, so
+`aws s3`-level flags (`--recursive`, `--sse`, `--storage-class`, `--exclude`,
+`--include`) are valid passthrough for those sub-commands.
 
 Both helpers are composed: `collectPassthroughFlags` produces the raw passthrough
 list; `buildPassthrough` strips `--output` and detects `--query`.
@@ -91,9 +102,12 @@ tests) get the same `--output` dedup guarantee as the CLI adapter path.
 ## Accepted tradeoffs
 
 - **Unknown boolean flags followed by a bare positional** may still consume that
-  positional as their value when the flag is not found in the botocore service
-  model. This is the residual heuristic fallback; flags known to the model are
-  classified correctly and do not exhibit this problem.
+  positional as their value in the heuristic path. Two complementary mechanisms
+  prevent this in practice: (1) model-based classification for service-model
+  overlays (IAM, KMS, SSM, logs, lambda, secrets) — boolean flags known to
+  botocore are classified correctly; (2) positional-stripping for S3 — positionals
+  are removed before `collectPassthroughFlags` runs, so no bare token is ever
+  adjacent to a passthrough flag.
 - **Passthrough flags are forwarded but not exhaustively validated.** The model
   is used only for boolean/value classification; flags absent from the model are
   forwarded using the heuristic. An invalid flag name in passthrough causes the

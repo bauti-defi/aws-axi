@@ -28,6 +28,7 @@ import { ec2Run } from "../src/commands/ec2.js";
 import { iamRun } from "../src/commands/iam.js";
 import { describeLogGroupsRun, filterRun } from "../src/commands/logs.js";
 import { kmsRun } from "../src/commands/kms.js";
+import { ssmRun } from "../src/commands/ssm.js";
 import { main } from "../src/cli.js";
 
 // ── Stub factory ────────────────────────────────────────────────────────────────
@@ -585,6 +586,48 @@ describe("kms overlay passthrough — positional + passthrough", () => {
   });
 });
 
+// ── Stub: exits 1 when a required arg is absent OR a guarded arg appears > once ─
+
+/**
+ * Stub that:
+ *  - Exits 1 if `requiredArg` is absent from child argv (arg was not forwarded).
+ *  - Exits 1 if `argMustAppearOnce` appears more than once (positional duplicated).
+ *  - Exits 0 otherwise.
+ */
+function createForwardAndDedupeGuardStub(spec: {
+  requiredArg: string;
+  argMustAppearOnce: string;
+  validStdout?: string;
+}): string {
+  const dir = mkdtempSync(join(tmpdir(), "aws-axi-fwddedup-"));
+  tempDirs.push(dir);
+  const p = join(dir, "aws");
+  const script = [
+    "#!/bin/sh",
+    "found=0",
+    "count=0",
+    'for arg in "$@"; do',
+    `  [ "$arg" = ${shellQuote(spec.requiredArg)} ] && found=1`,
+    `  [ "$arg" = ${shellQuote(spec.argMustAppearOnce)} ] && count=$((count + 1))`,
+    "done",
+    'if [ "$found" != "1" ]; then',
+    `  printf 'MISSING_FLAG: %s was not forwarded\\n' ${shellQuote(spec.requiredArg)} >&2`,
+    "  exit 1",
+    "fi",
+    'if [ "$count" -gt 1 ]; then',
+    `  printf 'DUPLICATE: %s appears %d times\\n' ${shellQuote(spec.argMustAppearOnce)} "$count" >&2`,
+    "  exit 1",
+    "fi",
+    spec.validStdout !== undefined ? `printf '%s' ${shellQuote(spec.validStdout)}` : "",
+    "exit 0",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  writeFileSync(p, script);
+  chmodSync(p, 0o755);
+  return p;
+}
+
 // ── Full CLI integration via captureMain ──────────────────────────────────────
 
 describe("ec2 overlay passthrough — full CLI integration", () => {
@@ -611,5 +654,198 @@ describe("ec2 overlay passthrough — full CLI integration", () => {
     // Enriched TOON projection
     expect(output).toContain("instances");
     expect(output).toContain("pt-test-instance");
+  });
+});
+
+// ── Blocker A: --query bypass must reach the CLI adapter layer, not just *Run ─
+//
+// The *Run helpers (tailRun, describeLogGroupsRun, etc.) bypass projection when
+// hasQuery=true, but the CLI adapter wraps their result in a record builder
+// (buildTailRecord, buildGroupsRecord) AFTER the call. That second projection
+// re-nulls every field. The fix must live in logsCommand / s3Command.
+//
+// Revert-proof: disable the `if (hasQuery)` bypass in logsCommand → these fail.
+
+describe("logs overlay passthrough — --query bypass at CLI adapter layer", () => {
+  // Fixed JSON the stub returns when --query is present: a raw array that JMESPath
+  // would produce. When the adapter re-projects it as TailResult the fields are
+  // all null/undefined; when it passes through correctly we see the raw value.
+  const RAW_QUERY_RESULT = JSON.stringify(["error: foo", "error: bar"]);
+
+  it("logs tail --query: bypasses projection, output is not re-projected as TailResult", async () => {
+    const binary = createArgGuardStub({
+      requiredArg: "--query",
+      validStdout: RAW_QUERY_RESULT,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["logs", "tail", "/aws/lambda/fn", "--query", "events[].message"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    // Must NOT be re-projected through buildTailRecord (which yields all-null fields).
+    expect(output).not.toContain("logGroup: null");
+    expect(output).not.toContain("events: null");
+    expect(output).not.toContain("window: null");
+  });
+
+  it("logs describe-log-groups --query: bypasses projection, not re-projected as LogGroupsResult", async () => {
+    const binary = createArgGuardStub({
+      requiredArg: "--query",
+      validStdout: JSON.stringify(["group-a", "group-b"]),
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["logs", "describe-log-groups", "--query", "logGroups[].logGroupName"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).not.toContain("logGroups: null");
+    expect(output).not.toContain("count: null");
+  });
+});
+
+// ── Blocker A (s3): --query bypass — forwarded to child and projection skipped ─
+//
+// s3 ls (and head-object) rewrite to s3api, so the response shape changes when
+// --query is active. Without a bypass, s3LsRun sees an empty Contents array and
+// returns { empty: true, hint: "No objects found…" } — a false positive.
+//
+// Revert-proof: remove the `if (options.hasQuery)` early return in s3LsRun → fails.
+
+describe("s3 overlay passthrough — --query bypass", () => {
+  it("s3 ls s3://b/ --query: --query forwarded, no false-positive empty result", async () => {
+    // The stub acts as aws s3api list-objects-v2 --query 'Contents[].Key'
+    // returning an array of key strings (what JMESPath would produce).
+    const binary = createArgGuardStub({
+      requiredArg: "--query",
+      validStdout: JSON.stringify(["file1.txt", "file2.txt"]),
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/", "--query", "Contents[].Key"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    // Must NOT be the false-positive empty projection.
+    expect(output).not.toContain("No objects found");
+    // --query was forwarded (arg guard stub succeeded).
+  });
+});
+
+// ── Blocker B: s3 positional ordering — heuristic must not eat positionals ────
+//
+// When a passthrough flag (e.g. --recursive) precedes the positional URI, the
+// heuristic consumed the URI as the flag's value and then duplicated it in the
+// child argv. The fix is to strip identified positionals before calling
+// collectPassthroughFlags so no bare token is ever consumed as a flag value.
+//
+// Revert-proof: remove positional stripping from s3Command → stub exits 1 on
+// duplicate URI or missing --recursive.
+
+describe("s3 overlay passthrough — positional ordering", () => {
+  it("s3 cp --recursive <src> <dst>: --recursive forwarded, source URI not duplicated", async () => {
+    // Stub fails if --recursive is absent OR if s3://src/dir/ appears more than once.
+    // Without the fix: passthrough = ["--recursive", "s3://src/dir/"] (heuristic ate the URI),
+    // then s3CpRun adds source again → URI appears twice → stub exits 1.
+    const binary = createForwardAndDedupeGuardStub({
+      requiredArg: "--recursive",
+      argMustAppearOnce: "s3://src/dir/",
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "cp", "--recursive", "s3://src/dir/", "/tmp/dir/"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).not.toContain("USAGE_ERROR");
+  });
+
+  it("s3 rm s3://b/prefix/ --recursive: --recursive forwarded, URI not duplicated", async () => {
+    const binary = createForwardAndDedupeGuardStub({
+      requiredArg: "--recursive",
+      argMustAppearOnce: "s3://b/prefix/",
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "rm", "s3://b/prefix/", "--recursive"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).not.toContain("USAGE_ERROR");
+  });
+
+  it("s3 cp /tmp/f.txt s3://b/f.txt --sse aws:kms: both sse flags forwarded", async () => {
+    // Both --sse and --sse-kms-key-id must reach the child process.
+    // If positional-eating had consumed /tmp/f.txt as --sse's value, --sse-kms-key-id
+    // would be absent and the stub would exit 1.
+    const binary = createArgGuardStub({
+      requiredArg: "--sse-kms-key-id",
+      validStdout: "",
+    });
+
+    const { exitCode } = await captureMain(
+      ["s3", "cp", "/tmp/f.txt", "s3://b/f.txt", "--sse", "aws:kms", "--sse-kms-key-id", "alias/k"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+});
+
+// ── SSM model-based boolean flag classification ───────────────────────────────
+//
+// WithDecryption and Recursive are boolean in the botocore SSM model. The
+// model-based path classifies them correctly and does not eat the next positional
+// as their value. Tests drive ssmRun directly via the binary seam.
+//
+// Revert-proof: remove the ModelContext from collectPassthroughFlags in ssm.ts
+// → heuristic eats /my/param → stub exits 1 (either missing --with-decryption
+// or duplicate /my/param).
+
+describe("ssm overlay passthrough — boolean flag classification via botocore model", () => {
+  it("get-parameter --with-decryption /my/param: flag forwarded, positional not eaten", async () => {
+    // Without model classification: heuristic treats --with-decryption as value-taking
+    // → consumes /my/param as its value → /my/param is ALSO in nameArg → duplicated
+    // in awsArgs as ["ssm", "get-parameter", "--name", "/my/param", "--with-decryption", "/my/param"]
+    // → real aws exits 252; our stub exits 1 for the duplicate.
+    const binary = createForwardAndDedupeGuardStub({
+      requiredArg: "--with-decryption",
+      argMustAppearOnce: "/my/param",
+      validStdout: JSON.stringify({
+        Parameter: { Name: "/my/param", Type: "SecureString", Value: "secret" },
+      }),
+    });
+
+    const result = await ssmRun({
+      subcommand: "get-parameter",
+      args: ["--with-decryption", "/my/param"],
+      binary,
+    });
+
+    expect(result).toHaveProperty("parameter");
+  });
+
+  it("get-parameters-by-path --recursive /my/app: --recursive forwarded, path not eaten", async () => {
+    const binary = createForwardAndDedupeGuardStub({
+      requiredArg: "--recursive",
+      argMustAppearOnce: "/my/app",
+      validStdout: JSON.stringify({
+        Parameters: [{ Name: "/my/app/key", Type: "String", Value: "val" }],
+      }),
+    });
+
+    const result = await ssmRun({
+      subcommand: "get-parameters-by-path",
+      args: ["--recursive", "/my/app"],
+      binary,
+    });
+
+    expect(result).toHaveProperty("parametersByPath");
   });
 });

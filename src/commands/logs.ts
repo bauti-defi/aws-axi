@@ -209,7 +209,7 @@ export interface TailResult {
  * Projects events to compact TOON: timestamp (ISO 8601), stream, message.
  * Surfaces the CLI pagination token when more results are available.
  */
-export async function tailRun(options: TailRunOptions): Promise<TailResult> {
+export async function tailRun(options: TailRunOptions): Promise<TailResult | Record<string, unknown>> {
   const now = Date.now();
   const sinceStr = options.since ?? DEFAULT_SINCE;
   const sinceMs = parseSince(sinceStr, now);
@@ -246,8 +246,8 @@ export async function tailRun(options: TailRunOptions): Promise<TailResult> {
   }
 
   if (options.hasQuery === true) {
-    // --query: aws CLI applies JMESPath; bypass overlay projection.
-    return awsJson<TailResult>(awsArgs, runOpts);
+    // --query: aws CLI applies JMESPath; response shape is unknown — bypass projection.
+    return awsJson<Record<string, unknown>>(awsArgs, runOpts);
   }
 
   const response = await awsJson<AwsFilterLogEventsResponse>(awsArgs, runOpts);
@@ -314,7 +314,7 @@ export interface FilterRunOptions {
  * Filter log events by a CloudWatch Logs filter pattern.
  * Delegates to tailRun with the pattern forwarded.
  */
-export async function filterRun(options: FilterRunOptions): Promise<TailResult> {
+export async function filterRun(options: FilterRunOptions): Promise<TailResult | Record<string, unknown>> {
   return tailRun({
     logGroupName: options.logGroupName,
     since: options.since,
@@ -372,7 +372,7 @@ export interface LogGroupsResult {
  */
 export async function describeLogGroupsRun(
   options: DescribeLogGroupsRunOptions,
-): Promise<LogGroupsResult> {
+): Promise<LogGroupsResult | Record<string, unknown>> {
   const limit = options.limit ?? DEFAULT_GROUPS_LIMIT;
 
   const runOpts: AwsRunOptions = {
@@ -396,8 +396,8 @@ export async function describeLogGroupsRun(
   }
 
   if (options.hasQuery === true) {
-    // --query: aws CLI applies JMESPath; bypass overlay projection.
-    return awsJson<LogGroupsResult>(awsArgs, runOpts);
+    // --query: aws CLI applies JMESPath; response shape is unknown — bypass projection.
+    return awsJson<Record<string, unknown>>(awsArgs, runOpts);
   }
 
   const response = await awsJson<AwsDescribeLogGroupsResponse>(awsArgs, runOpts);
@@ -496,16 +496,25 @@ export async function logsCommand(
 
   const rest = args.slice(1);
 
+  // When --query is present the *Run helper already returns the raw JMESPath
+  // result (shape unknown). Wrapping it in buildTailRecord / buildGroupsRecord
+  // would re-project all fields to null. Detect --query here at the adapter
+  // layer and bypass the record builders entirely.
+  const hasQuery = args.some((a) => a === "--query" || a.startsWith("--query="));
+
   if (subCommand === "tail") {
-    return buildTailRecord(await parseTailArgs(rest, context));
+    const raw = await parseTailArgs(rest, context);
+    return hasQuery ? (raw as Record<string, unknown>) : buildTailRecord(raw as TailResult);
   }
 
   if (subCommand === "filter") {
-    return buildTailRecord(await parseFilterArgs(rest, context));
+    const raw = await parseFilterArgs(rest, context);
+    return hasQuery ? (raw as Record<string, unknown>) : buildTailRecord(raw as TailResult);
   }
 
   if (subCommand === "describe-log-groups") {
-    return buildGroupsRecord(await parseDescribeLogGroupsArgs(rest, context));
+    const raw = await parseDescribeLogGroupsArgs(rest, context);
+    return hasQuery ? (raw as Record<string, unknown>) : buildGroupsRecord(raw as LogGroupsResult);
   }
 
   // Not in the overlay's hot-path — delegate to the model-driven engine.
@@ -618,7 +627,7 @@ export function _extractFilterArgs(args: readonly string[]): FilterArgs {
 async function parseTailArgs(
   args: string[],
   context: AwsContext | undefined,
-): Promise<TailResult> {
+): Promise<TailResult | Record<string, unknown>> {
   const { logGroupName, since, limit, streamName, pattern, nextToken } =
     _extractTailArgs(args);
   const passthrough = collectPassthroughFlags(
@@ -634,7 +643,7 @@ async function parseTailArgs(
 async function parseFilterArgs(
   args: string[],
   context: AwsContext | undefined,
-): Promise<TailResult> {
+): Promise<TailResult | Record<string, unknown>> {
   const { logGroupName, pattern, since, limit, nextToken } =
     _extractFilterArgs(args);
   const passthrough = collectPassthroughFlags(
@@ -650,7 +659,7 @@ async function parseFilterArgs(
 async function parseDescribeLogGroupsArgs(
   args: string[],
   context: AwsContext | undefined,
-): Promise<LogGroupsResult> {
+): Promise<LogGroupsResult | Record<string, unknown>> {
   const [prefix, r1] = pullFlag([...args], "--prefix");
   const [limitStr] = pullFlag(r1, "--limit");
   const passthrough = collectPassthroughFlags(args, ["--prefix", "--limit"], undefined, { service: "logs", operation: "describe-log-groups" });
