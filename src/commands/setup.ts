@@ -104,20 +104,25 @@ examples:
  *
  * `bin/aws-axi.ts` is committed as 100644 (no execute bit), so a bare
  * exec-path stored as the hook command fails for any agent that spawns it
- * directly (permission denied / EACCES). We prefix `bun run` so agents can
- * launch the home view regardless of executable permissions.
+ * directly (permission denied / EACCES). We prefix `bun --no-env-file run`
+ * so agents can:
+ *   1. Launch the home view regardless of executable permissions on the .ts file.
+ *   2. Suppress Bun's automatic .env auto-load (fix for issue #32) — without
+ *      --no-env-file, a cwd .env containing AWS_ENDPOINT_URL=http://localhost:4566
+ *      would silently retarget every aws call at LocalStack.
  *
  * Claude Code and Codex run hook commands via shell, so a multi-word string
  * works correctly. For OpenCode (Node spawn with shell:false), the custom
- * plugin generator below splits the command into ["bun", "run", execPath].
+ * plugin generator below splits the command into
+ * ["bun", "--no-env-file", "run", execPath].
  *
  * NOTE: revisit in packaging slice #15 — once built as a compiled standalone
  * binary or published npm package, the hook command becomes the binary name /
- * dist entrypoint and no longer needs the `bun run` prefix.
+ * dist entrypoint and no longer needs the `bun --no-env-file run` prefix.
  */
 function buildHookCommand(execPath: string): string {
   if (execPath.endsWith(".ts")) {
-    return `bun run ${execPath}`;
+    return `bun --no-env-file run ${execPath}`;
   }
   // Packaged form: the binary is directly executable (npm shim, bun compile, etc.)
   return execPath;
@@ -147,11 +152,12 @@ function buildOpenCodePluginSource(
   const exportName = "AxiAwsAxiAmbientContextPlugin";
   const ambientHeader = `## AXI ambient context: ${MARKER}`;
 
-  // Emit a spawn call that correctly handles multi-word invocations:
-  //   .ts:       spawn("bun", ["run", "/abs/path/bin/aws-axi.ts"], {shell:false})
+  // Emit a spawn call that correctly handles multi-word invocations AND
+  // suppresses Bun's automatic .env auto-load (issue #32):
+  //   .ts:       spawn("bun", ["--no-env-file", "run", "/abs/path/bin/aws-axi.ts"], {shell:false})
   //   packaged:  spawn("/abs/path/aws-axi", [], {shell:false})
   const spawnCall = execPath.endsWith(".ts")
-    ? `spawn("bun", ["run", ${JSON.stringify(execPath)}], {`
+    ? `spawn("bun", ["--no-env-file", "run", ${JSON.stringify(execPath)}], {`
     : `spawn(${JSON.stringify(execPath)}, [], {`;
 
   return `// ${managedMarker}
