@@ -24,29 +24,20 @@ jobs:
       - name: Type check
         run: bun run typecheck
 
+      - name: Build distribution
+        run: bun run build
+
       - name: Test
         run: bun test
 
       - name: Skill drift check
         run: bun run build:skill -- --check
 
-      - name: Build distribution
-        run: bun run build
+      - name: Smoke test — launcher version
+        run: ./dist/bin/aws-axi --version
 
-      - name: Smoke test — bun bin version
-        run: bun run dist/bin/aws-axi.js --version
-
-      - name: Smoke test — bun bin help
-        run: bun run dist/bin/aws-axi.js --help
-
-      - name: Smoke test — dist shebang is #!/usr/bin/env bun
-        run: |
-          shebang=$(head -1 dist/bin/aws-axi.js)
-          if [ "$shebang" != "#!/usr/bin/env bun" ]; then
-            echo "ERROR: expected '#!/usr/bin/env bun', got '${shebang}'"
-            exit 1
-          fi
-          echo "Shebang OK: ${shebang}"
+      - name: Smoke test — launcher help
+        run: ./dist/bin/aws-axi --help
 
       - name: Verify dist
         run: bun run verify:dist

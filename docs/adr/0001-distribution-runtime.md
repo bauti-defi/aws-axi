@@ -25,10 +25,15 @@ Release automation options:
 **Option (a): Bun-native build + option (x): manual local release.**
 
 `bun build ./bin/aws-axi.ts --outdir ./dist/bin --target bun --packages external`
-bundles the first-party source into a single `dist/bin/aws-axi.js` (runtime deps stay
-in `node_modules`, installed by the consumer via npm). The entry shebang is
-`#!/usr/bin/env -S bun --no-env-file`. Published to npm via `npm publish` run locally
-by a human.
+bundles the first-party source into a single `dist/bin/aws-axi.js` (the Bun module).
+The user-facing entry point is **`dist/bin/aws-axi`** — a POSIX sh launcher written by
+`scripts/write-launcher.ts` as part of the build step. Published to npm via `npm publish`
+run locally by a human.
+
+The `package.json` `bin.aws-axi` field points at the launcher, not the `.js` module.
+When npm/bun links the package globally, it symlinks `dist/bin/aws-axi` into the user's
+`bin/` directory. The launcher resolves that symlink at runtime, then execs Bun on the
+sibling `aws-axi.js` with `--no-env-file` (see Consequences below).
 
 Release workflow:
 1. Bump `version` in `package.json` by hand.
@@ -57,20 +62,27 @@ This mirrors DAMM-sdk's release pattern exactly.
 Consumers need Bun installed. This is the only runtime requirement. This is intentional
 and accepted — aws-axi is part of the AXI toolchain which universally assumes Bun.
 
-## Consequences — shebang is load-bearing (do not simplify)
+## Consequences — the launcher is load-bearing (do not remove `--no-env-file`)
 
-The shebang `#!/usr/bin/env -S bun --no-env-file` is **not cosmetic**. Bun
-auto-loads `.env` from the process cwd on startup (Node does not). Any repo that
-ships `AWS_ENDPOINT_URL=http://localhost:4566` in its `.env` (e.g. for LocalStack
-integration tests) will silently retarget every real-AWS call at localhost, producing
-a misleading "Could not connect to the endpoint URL" error — with no indication that
-a dotfile is responsible (see issue #32).
+The `dist/bin/aws-axi` launcher is **not cosmetic**. Bun auto-loads `.env` from the
+process cwd on startup (Node does not). Any repo that ships
+`AWS_ENDPOINT_URL=http://localhost:4566` in its `.env` (e.g. for LocalStack integration
+tests) will silently retarget every real-AWS call at localhost, producing a misleading
+"Could not connect to the endpoint URL" error — with no indication that a dotfile is
+responsible (see issue #32).
 
-`--no-env-file` suppresses the auto-load so aws-axi mirrors the `aws` CLI: only
-genuinely-exported shell environment variables and `~/.aws/*` config are honored.
-Reverting the shebang to plain `#!/usr/bin/env bun` reopens this footgun.
-The `scripts/verify-dist.ts` guard and the `test/no-dotenv.test.ts` shebang
-assertion both enforce this: CI will catch any regression.
+The launcher passes `--no-env-file` to Bun, suppressing the auto-load so the installed
+CLI mirrors the `aws` CLI: only genuinely-exported shell environment variables and
+`~/.aws/*` config are honored. Removing `--no-env-file` from the launcher reopens this
+footgun. `scripts/verify-dist.ts` and `test/no-dotenv.test.ts` both guard this: CI will
+catch any regression.
+
+**Why a POSIX sh launcher instead of `#!/usr/bin/env -S bun --no-env-file`:**
+`env -S` (which allows passing flags via the shebang) is unsupported on BusyBox.
+Alpine Linux 3.20+ ships BusyBox's `env`, making the `-S` form produce
+`/usr/bin/env: unrecognized option: S` and rendering the CLI completely unrunnable.
+A `#!/bin/sh` launcher works on macOS, glibc Linux, AND Alpine/BusyBox with no extra
+dependencies, so we chose it for universal portability.
 
 ## Alternative: bun compile (c)
 
@@ -91,10 +103,11 @@ function buildHookCommand(execPath: string): string {
 }
 ```
 
-After npm install, `process.argv[1]` is the npm shim (e.g., `/usr/local/bin/aws-axi`),
-which does not end with `.ts` → `buildHookCommand` returns it directly → hooks store
-`/usr/local/bin/aws-axi`, which IS executable and valid for Claude Code, Codex, and
-OpenCode. No changes to `setup.ts` are needed for the packaged case.
+After npm install, `process.argv[1]` is the path to `dist/bin/aws-axi.js` (the Bun
+module invoked by the launcher), which does not end with `.ts` → `buildHookCommand`
+returns it directly. However, what we want stored in hooks is the **launcher** path
+(so the hook also benefits from `--no-env-file`). This may require a follow-up to
+`setup.ts` to detect the `.js` form and substitute the sibling launcher path.
 
 ## Operator-only steps to complete this slice
 

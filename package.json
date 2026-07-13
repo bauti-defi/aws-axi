@@ -10,7 +10,7 @@
     "url": "https://github.com/bauti-defi/aws-axi.git"
   },
   "bin": {
-    "aws-axi": "./dist/bin/aws-axi.js"
+    "aws-axi": "./dist/bin/aws-axi"
   },
   "files": [
     "dist",
@@ -24,8 +24,8 @@
   "scripts": {
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "dev": "bun run bin/aws-axi.ts",
-    "build": "rm -rf ./dist && bun build ./bin/aws-axi.ts --outdir ./dist/bin --target bun --packages external --sourcemap=external && chmod +x ./dist/bin/aws-axi.js",
+    "dev": "bun --no-env-file bin/aws-axi.ts",
+    "build": "rm -rf ./dist && bun build ./bin/aws-axi.ts --outdir ./dist/bin --target bun --packages external --sourcemap=external && bun run scripts/write-launcher.ts",
     "build:skill": "bun run scripts/build-skill.ts",
     "check:pins": "bun run scripts/check-exact-pins.ts",
     "verify:dist": "bun run scripts/verify-dist.ts",

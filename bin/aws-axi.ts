@@ -1,4 +1,4 @@
-#!/usr/bin/env -S bun --no-env-file
+#!/usr/bin/env bun
 import { main } from "../src/cli.js";
 
 main();
