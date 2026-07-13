@@ -27,7 +27,8 @@ Release automation options:
 `bun build ./bin/aws-axi.ts --outdir ./dist/bin --target bun --packages external`
 bundles the first-party source into a single `dist/bin/aws-axi.js` (runtime deps stay
 in `node_modules`, installed by the consumer via npm). The entry shebang is
-`#!/usr/bin/env bun`. Published to npm via `npm publish` run locally by a human.
+`#!/usr/bin/env -S bun --no-env-file`. Published to npm via `npm publish` run locally
+by a human.
 
 Release workflow:
 1. Bump `version` in `package.json` by hand.
@@ -55,6 +56,21 @@ This mirrors DAMM-sdk's release pattern exactly.
 
 Consumers need Bun installed. This is the only runtime requirement. This is intentional
 and accepted — aws-axi is part of the AXI toolchain which universally assumes Bun.
+
+## Consequences — shebang is load-bearing (do not simplify)
+
+The shebang `#!/usr/bin/env -S bun --no-env-file` is **not cosmetic**. Bun
+auto-loads `.env` from the process cwd on startup (Node does not). Any repo that
+ships `AWS_ENDPOINT_URL=http://localhost:4566` in its `.env` (e.g. for LocalStack
+integration tests) will silently retarget every real-AWS call at localhost, producing
+a misleading "Could not connect to the endpoint URL" error — with no indication that
+a dotfile is responsible (see issue #32).
+
+`--no-env-file` suppresses the auto-load so aws-axi mirrors the `aws` CLI: only
+genuinely-exported shell environment variables and `~/.aws/*` config are honored.
+Reverting the shebang to plain `#!/usr/bin/env bun` reopens this footgun.
+The `scripts/verify-dist.ts` guard and the `test/no-dotenv.test.ts` shebang
+assertion both enforce this: CI will catch any regression.
 
 ## Alternative: bun compile (c)
 

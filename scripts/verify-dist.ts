@@ -4,7 +4,7 @@
  *
  * Checks:
  *   1. dist/bin/aws-axi.js exists
- *   2. Its first line is exactly "#!/usr/bin/env bun"
+ *   2. Its first line is exactly "#!/usr/bin/env -S bun --no-env-file"
  *   3. It has the owner-execute bit set
  *   4. Running it with --version prints the version from package.json
  *
@@ -51,8 +51,8 @@ if (existsSync(DIST_BIN)) {
   const contents = readFileSync(DIST_BIN, "utf-8");
   const firstLine = contents.split("\n")[0] ?? "";
 
-  // 2. Shebang is exactly #!/usr/bin/env bun
-  const expectedShebang = "#!/usr/bin/env bun";
+  // 2. Shebang is exactly #!/usr/bin/env -S bun --no-env-file
+  const expectedShebang = "#!/usr/bin/env -S bun --no-env-file";
   if (firstLine === expectedShebang) {
     pass(`shebang is "${expectedShebang}"`);
   } else {
