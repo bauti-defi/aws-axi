@@ -1,42 +1,186 @@
-# aws-axi
+<h1 align="center">aws-axi</h1>
 
-**An agent-ergonomic wrapper over the `aws` CLI.** `aws-axi` mirrors the AWS CLI 1:1 and
-re-presents it for autonomous agents — token-efficient [TOON](https://toonformat.dev/)
-output, capped pagination with honest totals, model-derived signatures instead of
-thousand-line help pages, structured errors, and next-step suggestions.
+<p align="center">
+  <a href="https://www.npmjs.com/package/aws-axi"><img alt="npm" src="https://img.shields.io/npm/v/aws-axi?style=flat-square" /></a>
+  <a href="https://github.com/bauti-defi/aws-axi/actions/workflows/ci.yml"><img alt="CI" src="https://img.shields.io/github/actions/workflow/status/bauti-defi/aws-axi/ci.yml?style=flat-square&label=ci" /></a>
+  <a href="https://github.com/bauti-defi/aws-axi/blob/main/LICENSE"><img alt="License" src="https://img.shields.io/npm/l/aws-axi?style=flat-square" /></a>
+  <a href="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue?style=flat-square"><img alt="Platform" src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blue?style=flat-square" /></a>
+</p>
 
-It is the AWS analogue of [`gh-axi`](https://github.com/kunchenguid/gh-axi), built on
-[`axi-sdk-js`](https://www.npmjs.com/package/axi-sdk-js) and the
-[AXI standard](https://github.com/kunchenguid/axi).
+AWS CLI for agents — designed with [AXI](https://github.com/kunchenguid/axi) (Agent eXperience Interface).
+
+Wraps the official `aws` cli with token-efficient [TOON](https://toonformat.dev/) output, capped pagination
+with honest totals, model-derived signatures instead of thousand-line help pages, structured errors, and
+next-step suggestions. Built for autonomous agents that interact with AWS via shell execution. The AWS
+analogue of [`gh-axi`](https://github.com/kunchenguid/gh-axi), built on
+[`axi-sdk-js`](https://www.npmjs.com/package/axi-sdk-js).
 
 ```
 aws-axi <service> <operation> [--flags]   # mirrors: aws <service> <operation> [--flags]
 ```
 
+> [!WARNING]
+> **aws-axi is young.** Hand-polished overlays cover only the hot-path services; everything else runs
+> through a generic engine that works but is less polished and may have bugs. **Secret values on the
+> engine path are not redacted** (only the `ssm`/`secretsmanager` overlays redact). Use it carefully, and
+> if it ever blocks you, fall back to raw `aws` for that call. **Found a bug or a gap? Please
+> [file an issue](https://github.com/bauti-defi/aws-axi/issues/new)** — see [Reporting issues](#reporting-issues).
+
 ## Why
 
-The `aws` CLI is built for humans at a terminal. For an LLM deciding the next command it is
-hostile: verbose JSON, **auto-pagination that dumps multi-MB blobs in one call**, help pages
-thousands of lines long, and errors buried in stderr. `aws-axi` keeps AWS's exact interface
-but changes the *output* and *ergonomics* so an agent can act in one turn.
+The `aws` CLI is built for humans at a terminal. For an LLM deciding the next command it is hostile:
+verbose JSON, **auto-pagination that dumps multi-MB blobs in one call**, help pages thousands of lines
+long, and errors buried in stderr. `aws-axi` keeps AWS's exact interface but changes the *output* and
+*ergonomics* so an agent can act in one turn.
 
 ## How
 
 Two layers over the real `aws` binary (we shell out to it — never reimplement AWS APIs):
 
 - **A model-driven generic engine.** `aws-axi` reads the same [botocore](https://github.com/boto/botocore)
-  service models the AWS CLI is generated from, so **all ~18,000 operations work on day one**
-  — with distilled signatures, required-param detection, honest pagination, and structured
-  errors, auto-tracking every `aws` release.
-- **Hand-polished overlays** for the highest-value, most foundational services (identity,
-  IAM, EC2, CloudWatch Logs, S3, KMS, …) — curated schemas, idempotent mutations, secret
-  redaction, and reference-resolution (show a security group's *name*, not `sg-…`).
+  service models the AWS CLI is generated from, so **every AWS operation works on day one** — with
+  distilled signatures, required-param detection, capped pagination, and structured errors, auto-tracking
+  each `aws` release.
+- **Hand-polished overlays** for the highest-value services — curated schemas, idempotent mutations,
+  secret redaction, and reference-resolution (show a security group's *name*, not `sg-…`). When an overlay
+  doesn't implement an operation, it falls through to the generic engine automatically.
 
-## Status
+## Quick Start
 
-🚧 **Early design / pre-implementation.** The design is in
-[`docs/specs/2026-07-11-aws-axi-design.md`](docs/specs/2026-07-11-aws-axi-design.md).
-Implementation is tracked in the issues.
+No install needed — invoke on demand with [`npx`](https://docs.npmjs.com/cli/commands/npx):
+
+```sh
+npx -y aws-axi whoami
+```
+
+Requirements:
+
+- The [`aws`](https://aws.amazon.com/cli/) CLI installed and configured (`aws sso login` or `aws configure`).
+  aws-axi shells out to it.
+- [Bun](https://bun.sh) (the CLI runs on the Bun runtime).
+
+For a global install and ambient session context:
+
+```sh
+bun add -g aws-axi        # or: npm install -g aws-axi
+aws-axi setup hooks       # optional SessionStart hooks for Claude Code / Codex / OpenCode
+aws-axi update --check    # check for a newer release; `aws-axi update` to upgrade
+```
+
+## Usage
+
+```bash
+aws-axi                         # dashboard — current identity + region, no args needed
+aws-axi whoami                  # full identity: account, ARN, region, credential source
+aws-axi ec2 describe-instances  # enriched overlay — instances with resolved names
+aws-axi ec2 describe-regions    # not an overlay op → falls through to the generic engine
+aws-axi s3 ls s3://my-bucket/prefix/
+aws-axi logs tail /aws/lambda/my-fn --since 1h
+aws-axi ssm get-parameter /my/app/db-password           # value redacted by default
+aws-axi ssm get-parameter /my/app/db-password --reveal  # opt in to the plaintext value
+aws-axi lambda invoke --function-name my-fn --payload '{"k":"v"}'
+aws-axi wait ec2 instance-running --instance-ids i-0123456789abcdef0
+aws-axi sqs list-queues         # no overlay → served entirely by the generic engine
+aws-axi <service> <op> --help   # per-command signature + examples
+```
+
+Global flags `--profile <name>` and `--region <region>` are accepted before any command. Every response
+ends with contextual `help:` next-step hints.
+
+## Capabilities
+
+**What is implemented today.** Anything not listed as an enriched overlay still *works* through the
+generic engine (correct, structured, capped) — it just isn't curated.
+
+| Service          | Command            | Enriched overlay operations                                                                  | Everything else                    |
+| ---------------- | ------------------ | -------------------------------------------------------------------------------------------- | ---------------------------------- |
+| STS              | `whoami`           | identity fused with profile, region, credential source                                       | —                                  |
+| EC2              | `ec2`              | `describe-vpcs`, `describe-subnets`, `describe-security-groups`, `describe-instances`         | → generic engine                   |
+| S3               | `s3`               | `ls`, `cp`, `rm`, `head-object`, `create-bucket` (idempotent)                                | → generic engine                   |
+| IAM              | `iam`              | `list-roles`, `get-role`, `list-policies`, `get-policy`, `list-attached-role-policies`       | → generic engine                   |
+| CloudWatch Logs  | `logs`             | `tail`, `filter`, `describe-log-groups`                                                       | → generic engine                   |
+| KMS              | `kms`              | `list-keys`, `list-aliases`, `describe-key`, `get-key-policy`                                 | → generic engine                   |
+| Lambda           | `lambda`           | `list-functions`, `get-function`, `get-function-configuration`, `invoke`                      | → generic engine                   |
+| SSM              | `ssm`              | `describe-parameters`, `get-parameter`, `get-parameters`, `get-parameters-by-path` (redacted) | → generic engine                   |
+| Secrets Manager  | `secretsmanager` (alias `secrets`) | `list-secrets`, `get-secret-value` (redacted), `describe-secret`             | → generic engine                   |
+| Waiters          | `wait`             | any botocore waiter, e.g. `wait ec2 instance-running`, `wait s3 bucket-exists`                | —                                  |
+| **Any other service** | *(service name)* | —                                                                                        | **fully served by the generic engine** |
+
+Plus: `setup hooks` (ambient SessionStart context) and the SDK built-in `update` / `update --check`.
+
+**Generic engine coverage.** `aws-axi <service> <operation>` works for any service/operation in your
+installed `aws` CLI's botocore models — required-param validation, capped pagination, and structured
+errors, but a generic projection (no reference-name enrichment, no idempotency niceties, **no secret
+redaction**).
+
+**Not implemented yet / known limitations:**
+
+- **No redaction on the engine path.** Only the `ssm` and `secretsmanager` overlays redact secret values.
+  Reading a secret via the raw engine (e.g. some other service's secret-bearing field) prints it in the clear.
+- **Mutations are mostly raw.** Idempotency / `--dryrun` niceties exist only for the S3 overlay
+  (`cp`, `rm`, `create-bucket`); other writes go through the engine unguarded.
+- **`logs tail` is a snapshot, not a live follow** (`aws logs tail --follow` has no equivalent).
+- **Overlays are read-heavy.** Most curated commands are describes/gets; write-path overlays are minimal.
+- **Runtime is Bun** (not Node) and there is no Windows build.
+
+## `aws` ↔ `aws-axi`
+
+The interface mirrors the AWS CLI 1:1 — same service and operation names — so most commands are identical
+apart from the `aws-axi` prefix. Where the ergonomics differ, here is the map both ways:
+
+| You'd run with `aws`                                   | With `aws-axi`                                         | What changed                                                                 |
+| ------------------------------------------------------ | ----------------------------------------------------- | --------------------------------------------------------------------------- |
+| `aws ec2 describe-instances --output json`             | `aws-axi ec2 describe-instances`                       | Output is always TOON; `--output` is ignored (stripped)                     |
+| `aws sts get-caller-identity`                          | `aws-axi whoami`                                       | Fused with profile, region, and credential source                          |
+| *(no equivalent)*                                      | `aws-axi`                                              | No-arg dashboard: current identity + region                                |
+| `aws s3 ls s3://bucket/`                               | `aws-axi s3 ls s3://bucket/`                           | Same; output capped + TOON                                                  |
+| `aws s3api list-buckets`                               | `aws-axi s3 ls`                                        | High-level `s3 ls` with no target lists buckets                            |
+| `aws logs tail <group> --since 1h`                     | `aws-axi logs tail <group> --since 1h`                | Same flag; snapshot (no `--follow`), capped with `--limit`                  |
+| `aws logs filter-log-events --log-group-name <g> --filter-pattern ERROR` | `aws-axi logs filter <g> ERROR`     | Positional group + pattern                                                  |
+| `aws ssm get-parameter --name <n> --with-decryption`   | `aws-axi ssm get-parameter <n> --reveal`              | Redacted by default; `--reveal` opts in (adds `--with-decryption`)         |
+| `aws secretsmanager get-secret-value --secret-id <id>` | `aws-axi secretsmanager get-secret-value <id> --reveal` | Redacted by default; `--reveal` opts in                                   |
+| `aws kms describe-key --key-id alias/foo`              | `aws-axi kms describe-key alias/foo`                   | Positional id; accepts id, ARN, or alias                                    |
+| `aws lambda invoke --function-name f --payload '<json>' --cli-binary-format raw-in-base64-out out.json` | `aws-axi lambda invoke --function-name f --payload '<json>'` | `--cli-binary-format` handled automatically; result returned inline |
+| `aws ec2 wait instance-running --instance-ids i-…`     | `aws-axi wait ec2 instance-running --instance-ids i-…`| `wait` is a top-level verb; waiter names stay kebab-case; adds a polling budget |
+| `aws <svc> <op> ...` (auto-paginates everything)       | `aws-axi <svc> <op> --max-items N --next-token <tok>` | Capped by default with an honest `count`; resume with the emitted token    |
+
+**Conventions that apply everywhere:**
+
+- **Output** — TOON, not JSON. Tabular result sets render as `key[N]{col,col}` blocks with a `count`.
+- **Pagination** — capped by default (`--max-items` / `--limit`, service-specific defaults). When more
+  exists, the result carries a `NextToken`; resume with `--next-token` (or `--starting-token` for `s3 ls`).
+- **Errors** — structured TOON on stderr (`error`, `code`, `help[]`) with exit codes: `252` usage,
+  `253` no credentials, `254` service/client error, `255` general (`0` for a `DryRunOperation`).
+- **Redaction** — `ssm` and `secretsmanager` overlays redact values unless `--reveal` is passed.
+- **Idempotency** — overlay mutations (e.g. `s3 create-bucket`) report what changed and are safe to re-run.
+
+## Reporting issues
+
+aws-axi is early and improving. If you hit a bug, wrong output, or a missing capability, please file an
+issue at [`bauti-defi/aws-axi`](https://github.com/bauti-defi/aws-axi/issues) — include the `aws-axi`
+command you ran, what you expected, what you got, and the equivalent raw `aws` command. If you use
+[`gh-axi`](https://github.com/kunchenguid/gh-axi):
+
+```sh
+gh-axi issue create --title "..." --label bug --body "..."
+```
+
+## Development
+
+```sh
+bun install
+bun run dev          # run the CLI directly (bun run bin/aws-axi.ts …)
+bun test             # run the test suite
+bun run typecheck    # tsc --noEmit
+bun run check:pins   # enforce exact-pinned dependencies
+bun run build        # bundle to dist/bin/aws-axi.js
+bun run build:skill  # regenerate skills/aws-axi/SKILL.md (CI fails if it drifts)
+bun run verify:dist  # pre-publish guard
+bun run release      # build → verify:dist → test → npm publish (bump version first)
+```
+
+The committed `skills/aws-axi/SKILL.md` is generated by `bun run build:skill`; CI fails if it drifts. The
+npm package ships `skills/aws-axi/`, so published releases include the installable Agent Skill.
 
 ## License
 
