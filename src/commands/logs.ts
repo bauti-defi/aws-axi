@@ -19,6 +19,7 @@
 import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import { awsJson, type AwsRunOptions } from "../aws.js";
+import { fallThroughToEngine } from "../engine.js";
 
 // ─── Defaults ─────────────────────────────────────────────────────────────────
 
@@ -381,10 +382,11 @@ export async function describeLogGroupsRun(
 export const LOGS_HELP = `usage: aws-axi logs <sub-command> [args] [flags]
 Read CloudWatch Logs events and log groups. Capped output with honest totals.
 
-sub-commands:
+sub-commands (enriched overlays):
   tail <log-group-name>                    Fetch recent events (default: last 15m)
   filter <log-group-name> <pattern>        Filter events by CloudWatch Logs filter pattern
   describe-log-groups                      List log groups
+  (any other logs sub-command falls through to the generic engine — run \`aws logs help\` to list all)
 
 flags (tail / filter):
   --since <duration>    Lookback window: 15m, 1h, 2h, 1d, or ISO timestamp (default: 15m)
@@ -447,14 +449,10 @@ export async function logsCommand(
     return buildGroupsRecord(await parseDescribeLogGroupsArgs(rest, context));
   }
 
-  throw new AxiError(
-    `Unknown logs sub-command: "${subCommand}"`,
-    "USAGE_ERROR",
-    [
-      "Available sub-commands: tail, filter, describe-log-groups",
-      "Run `aws-axi logs --help` to see usage",
-    ],
-  );
+  // Not in the overlay's hot-path — delegate to the model-driven engine.
+  // The engine validates against the botocore logs model and surfaces a clean
+  // USAGE_ERROR for ops that are genuinely unknown to AWS.
+  return fallThroughToEngine("logs", subCommand, args.slice(1), context);
 }
 
 // ─── Exported arg-parsing helpers (@internal) ─────────────────────────────────

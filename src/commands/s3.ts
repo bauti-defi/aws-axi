@@ -22,6 +22,7 @@ import { AxiError } from "axi-sdk-js";
 import { awsJson, awsRaw, awsExec } from "../aws.js";
 import type { AwsContext } from "../context.js";
 import { parseAwsError } from "../errors.js";
+import { fallThroughToEngine } from "../engine.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -498,8 +499,9 @@ export async function s3RmRun(options: S3RmRunOptions): Promise<S3RmResult> {
 // ---------------------------------------------------------------------------
 
 export const S3_HELP = `usage: aws-axi s3 <operation> [args] [flags]
-operations[5]:
+operations[5] (enriched overlays):
   ls, cp, rm, head-object, create-bucket
+  (any other s3 operation falls through to the generic engine — run \`aws s3 help\` to list all)
 flags[4]:
   --profile <name>, --region <region>, --dryrun (cp/rm), --starting-token <tok> (ls)
 examples:
@@ -596,11 +598,10 @@ export async function s3Command(
     }
 
     default: {
-      throw new AxiError(
-        `Unknown s3 operation: ${subcommand ?? "(none)"}`,
-        "USAGE_ERROR",
-        ["Run `aws-axi s3 --help` to see valid operations"],
-      );
+      // Not in the overlay's hot-path — delegate to the model-driven engine.
+      // The engine validates against the botocore s3 model and surfaces a clean
+      // USAGE_ERROR for ops that are genuinely unknown to AWS.
+      return fallThroughToEngine("s3", subcommand ?? "", args.slice(1), context);
     }
   }
 }

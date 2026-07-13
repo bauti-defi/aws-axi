@@ -1,0 +1,60 @@
+{
+  "version": "2.0",
+  "metadata": {
+    "apiVersion": "2016-11-15",
+    "serviceId": "EC2"
+  },
+  "operations": {
+    "DescribeRegions": {
+      "name": "DescribeRegions",
+      "http": { "method": "POST", "requestUri": "/" },
+      "input": { "shape": "DescribeRegionsRequest" },
+      "output": { "shape": "DescribeRegionsResult" }
+    },
+    "DescribeVpcs": {
+      "name": "DescribeVpcs",
+      "http": { "method": "POST", "requestUri": "/" },
+      "output": { "shape": "DescribeVpcsResult" }
+    }
+  },
+  "shapes": {
+    "DescribeRegionsRequest": {
+      "type": "structure",
+      "members": {
+        "AllRegions": { "shape": "Boolean" }
+      }
+    },
+    "DescribeRegionsResult": {
+      "type": "structure",
+      "members": {
+        "Regions": { "shape": "RegionList" }
+      }
+    },
+    "DescribeVpcsResult": {
+      "type": "structure",
+      "members": {
+        "Vpcs": { "shape": "VpcList" }
+      }
+    },
+    "Boolean": { "type": "boolean" },
+    "RegionList": { "type": "list", "member": { "shape": "Region" } },
+    "Region": {
+      "type": "structure",
+      "members": {
+        "RegionName": { "shape": "String" },
+        "Endpoint": { "shape": "String" }
+      }
+    },
+    "VpcList": { "type": "list", "member": { "shape": "Vpc" } },
+    "Vpc": {
+      "type": "structure",
+      "members": {
+        "VpcId": { "shape": "String" },
+        "CidrBlock": { "shape": "String" },
+        "State": { "shape": "String" },
+        "IsDefault": { "shape": "Boolean" }
+      }
+    },
+    "String": { "type": "string" }
+  }
+}

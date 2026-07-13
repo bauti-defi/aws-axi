@@ -25,6 +25,7 @@ import type { AwsContext } from "../context.js";
 import type { AwsRunOptions } from "../aws.js";
 import { awsJson } from "../aws.js";
 import { resolveKey } from "../resolve/key.js";
+import { fallThroughToEngine } from "../engine.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -141,10 +142,11 @@ export interface SecretsRunOptions {
 export const SECRETS_HELP = `usage: aws-axi secretsmanager <subcommand> [flags]
        aws-axi secrets <subcommand> [flags]    (alias)
 
-subcommands:
+subcommands (enriched overlays):
   list-secrets                   List all secrets with curated metadata (default)
   get-secret-value <id>          Get a secret; value is redacted by default
   describe-secret <id>           Describe a secret (metadata only; no value)
+  (any other secretsmanager subcommand falls through to the generic engine — run \`aws secretsmanager help\` to list all)
 
 flags (all subcommands):
   --profile <name>      AWS profile (inherited from global --profile)
@@ -494,14 +496,10 @@ export async function secretsCommand(
     subcommand = firstArg;
     remainingArgs = args.slice(1);
   } else {
-    throw new AxiError(
-      `Unknown secretsmanager subcommand: ${firstArg}`,
-      "USAGE_ERROR",
-      [
-        "Valid subcommands: list-secrets, get-secret-value, describe-secret",
-        "Run `aws-axi secretsmanager --help` for full usage",
-      ],
-    );
+    // Not in the overlay's hot-path — delegate to the model-driven engine.
+    // The engine validates against the botocore secretsmanager model and surfaces
+    // a clean USAGE_ERROR for ops that are genuinely unknown to AWS.
+    return fallThroughToEngine("secretsmanager", firstArg, args.slice(1), context);
   }
 
   const result = await secretsRun({ subcommand, args: remainingArgs, context });

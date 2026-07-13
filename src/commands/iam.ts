@@ -20,6 +20,7 @@
 import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import { awsJson } from "../aws.js";
+import { fallThroughToEngine } from "../engine.js";
 
 // ---------------------------------------------------------------------------
 // AWS raw response shapes (only fields we project or act on)
@@ -145,12 +146,13 @@ export interface IamRunOptions {
 export const IAM_HELP = `usage: aws-axi iam <operation> [args] [--profile <name>] [--region <region>]
 Operations mirror \`aws iam <operation>\` names 1:1.
 
-operations[5]:
+operations[5] (enriched overlays):
   list-roles                               list IAM roles (paginated, capped at 100)
   get-role <name>                          get a role by name
   list-policies [--scope Local|AWS|All]    list IAM policies (default scope: Local)
   get-policy <policy-arn>                  get a policy by ARN
   list-attached-role-policies <role-name>  list policies attached to a role
+  (any other iam operation falls through to the generic engine — run \`aws iam help\` to list all)
 
 flags:
   --profile <name>   AWS profile to use
@@ -495,14 +497,10 @@ export async function iamCommand(
   }
 
   if (!VALID_OPS.includes(opArg as IamOp)) {
-    throw new AxiError(
-      `Unknown iam operation: ${opArg}`,
-      "USAGE_ERROR",
-      [
-        `Valid operations: ${VALID_OPS.join(", ")}`,
-        "Run `aws-axi iam --help` for usage",
-      ],
-    );
+    // Not in the overlay's hot-path — delegate to the model-driven engine.
+    // The engine validates against the botocore iam model and surfaces a clean
+    // USAGE_ERROR for ops that are genuinely unknown to AWS.
+    return fallThroughToEngine("iam", opArg, args.slice(1), context);
   }
 
   return iamRun({
