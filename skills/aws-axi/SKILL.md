@@ -50,3 +50,4 @@ Run `npx -y aws-axi --help` for global flags, or `npx -y aws-axi <command> --hel
 - Global flags `--profile <name>` and `--region <region>` are accepted before any command.
 - Mutations are idempotent and report what changed; re-running a failed operation is safe.
 - Use `npx -y aws-axi whoami` as the first call in any session to confirm identity before making changes.
+- All enriched overlays implement a **superset input contract**: every flag the real `aws` CLI accepts is accepted here too. Unknown flags (e.g. `--filters`, `--path-prefix`, `--grant-tokens`) are forwarded verbatim to the underlying invocation. Use `--query <expr>` freely — JMESPath filtering passes through and bypasses the overlay's curated projection so you get the raw queried result.

@@ -50,10 +50,19 @@ Two shared helpers in `src/overlay-args.ts`:
 clean "remainder" after parsing their own flags. Strips `--output`, detects
 `--query`, returns `{passthrough, hasQuery}`.
 
-**`collectPassthroughFlags(args, ownedFlags, ownedBoolFlags?)`** — used by
-overlays (IAM, KMS, SSM, logs, lambda, secrets) that use `extractFlag`-style
+**`collectPassthroughFlags(args, ownedFlags, ownedBoolFlags?, context?)`** — used
+by overlays (IAM, KMS, SSM, logs, lambda, secrets) that use `extractFlag`-style
 parsing on the full args. Scans left-to-right: skips owned flags and their
-values, skips bare positionals, keeps all unknown flags (and their values).
+values, skips bare positionals, keeps all unknown flags (and their values). When
+`context` (`{service, operation}`) is provided, the botocore service model is
+consulted to classify known flags as boolean or value-taking — preventing boolean
+flags from accidentally consuming the next positional as their value. Flags not
+found in the model fall back to the heuristic (consume next non-`--` token).
+
+**S3 overlay** (`s3.ts`) uses a different pattern: each sub-operation adapter
+calls `collectPassthroughFlags` to gather a `passthrough?: readonly string[]`
+field, which is forwarded at the point where the `aws s3api` args are assembled.
+The same superset guarantee applies.
 
 Both helpers are composed: `collectPassthroughFlags` produces the raw passthrough
 list; `buildPassthrough` strips `--output` and detects `--query`.
@@ -81,13 +90,16 @@ tests) get the same `--output` dedup guarantee as the CLI adapter path.
 
 ## Accepted tradeoffs
 
-- **Unknown boolean flags followed by a bare positional** may consume that
-  positional as their value. This matches the existing limitation in
-  `extractPositionals` helpers across overlays. It is documented in the
-  `collectPassthroughFlags` JSDoc.
-- **Passthrough flags are not validated** against the botocore service model.
-  An invalid flag in passthrough will cause the underlying `aws` invocation to
-  fail with an error — this is the correct behavior (fail fast and loud).
+- **Unknown boolean flags followed by a bare positional** may still consume that
+  positional as their value when the flag is not found in the botocore service
+  model. This is the residual heuristic fallback; flags known to the model are
+  classified correctly and do not exhibit this problem.
+- **Passthrough flags are forwarded but not exhaustively validated.** The model
+  is used only for boolean/value classification; flags absent from the model are
+  forwarded using the heuristic. An invalid flag name in passthrough causes the
+  underlying `aws` invocation to fail with an error — the correct behavior (fail
+  fast and loud, from the authoritative CLI).
+
 - **Duplicate flags** (where the overlay adds a flag it also received via
   passthrough) are accepted; the `aws` CLI resolves them by using the last
   occurrence. This is intentional: server-side defaults set by the overlay can

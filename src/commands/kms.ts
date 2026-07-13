@@ -129,12 +129,13 @@ export interface KmsKeyPolicy {
   readonly policy: unknown;
 }
 
-/** Discriminated union returned by kmsRun. */
+/** Discriminated union returned by kmsRun. Raw Record when --query bypass is active. */
 export type KmsRunResult =
   | { readonly listKeys: KmsListKeysResult }
   | { readonly key: KmsKeyDetail }
   | { readonly listAliases: KmsListAliasesResult }
-  | { readonly keyPolicy: KmsKeyPolicy };
+  | { readonly keyPolicy: KmsKeyPolicy }
+  | Record<string, unknown>;
 
 export interface KmsRunOptions {
   readonly subcommand: string;
@@ -270,14 +271,14 @@ function toRunOpts(options: KmsRunOptions): AwsRunOptions {
 
 async function runListKeys(
   options: KmsRunOptions,
-): Promise<{ listKeys: KmsListKeysResult }> {
+): Promise<{ listKeys: KmsListKeysResult } | Record<string, unknown>> {
   const maxItems = extractMaxItems(options.args);
   const nextTokenArg = extractFlag(options.args, "--next-token");
   const runOpts = toRunOpts(options);
 
   // Forward unknown flags verbatim (superset contract).
-  const rawPassthrough = collectPassthroughFlags(options.args, ["--max-items", "--next-token"]);
-  const { passthrough } = buildPassthrough(rawPassthrough);
+  const rawPassthrough = collectPassthroughFlags(options.args, ["--max-items", "--next-token"], undefined, { service: "kms", operation: "list-keys" });
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   const awsArgs: string[] = [
     "kms",
@@ -289,6 +290,10 @@ async function runListKeys(
     awsArgs.push("--starting-token", nextTokenArg);
   }
   awsArgs.push(...passthrough);
+
+  if (hasQuery) {
+    return awsJson<Record<string, unknown>>(awsArgs, runOpts);
+  }
 
   // Fetch the key list and all aliases in parallel; alias map failure is
   // non-fatal (degrade gracefully to no-alias display).
@@ -331,7 +336,7 @@ async function runListKeys(
 
 async function runListAliases(
   options: KmsRunOptions,
-): Promise<{ listAliases: KmsListAliasesResult }> {
+): Promise<{ listAliases: KmsListAliasesResult } | Record<string, unknown>> {
   const maxItems = extractMaxItems(options.args);
   const nextTokenArg = extractFlag(options.args, "--next-token");
   const keyIdArg = extractFlag(options.args, "--key-id");
@@ -341,8 +346,10 @@ async function runListAliases(
   const rawPassthrough = collectPassthroughFlags(
     options.args,
     ["--max-items", "--next-token", "--key-id"],
+    undefined,
+    { service: "kms", operation: "list-aliases" },
   );
-  const { passthrough } = buildPassthrough(rawPassthrough);
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   const awsArgs: string[] = [
     "kms",
@@ -357,6 +364,10 @@ async function runListAliases(
     awsArgs.push("--starting-token", nextTokenArg);
   }
   awsArgs.push(...passthrough);
+
+  if (hasQuery) {
+    return awsJson<Record<string, unknown>>(awsArgs, runOpts);
+  }
 
   const response = await awsJson<RawListAliasesResponse>(awsArgs, runOpts);
   const aliases = response.Aliases ?? [];
@@ -395,7 +406,7 @@ async function runListAliases(
 
 async function runDescribeKey(
   options: KmsRunOptions,
-): Promise<{ key: KmsKeyDetail }> {
+): Promise<{ key: KmsKeyDetail } | Record<string, unknown>> {
   const positionals = extractPositionals(options.args);
   if (positionals.length === 0) {
     throw new AxiError(
@@ -413,8 +424,15 @@ async function runDescribeKey(
 
   // Forward unknown flags verbatim (superset contract). Bare positionals
   // (the key id) are skipped by collectPassthroughFlags automatically.
-  const rawPassthrough = collectPassthroughFlags(options.args, []);
-  const { passthrough } = buildPassthrough(rawPassthrough);
+  const rawPassthrough = collectPassthroughFlags(options.args, [], undefined, { service: "kms", operation: "describe-key" });
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+
+  if (hasQuery) {
+    return awsJson<Record<string, unknown>>(
+      ["kms", "describe-key", "--key-id", keyInput, ...passthrough],
+      runOpts,
+    );
+  }
 
   const describeResult = await awsJson<RawDescribeKeyResponse>(
     ["kms", "describe-key", "--key-id", keyInput, ...passthrough],
@@ -445,7 +463,7 @@ async function runDescribeKey(
 
 async function runGetKeyPolicy(
   options: KmsRunOptions,
-): Promise<{ keyPolicy: KmsKeyPolicy }> {
+): Promise<{ keyPolicy: KmsKeyPolicy } | Record<string, unknown>> {
   const positionals = extractPositionals(options.args);
   if (positionals.length === 0) {
     throw new AxiError(
@@ -460,8 +478,15 @@ async function runGetKeyPolicy(
   const runOpts = toRunOpts(options);
 
   // Forward unknown flags verbatim (superset contract).
-  const rawPassthrough = collectPassthroughFlags(options.args, ["--policy-name"]);
-  const { passthrough } = buildPassthrough(rawPassthrough);
+  const rawPassthrough = collectPassthroughFlags(options.args, ["--policy-name"], undefined, { service: "kms", operation: "get-key-policy" });
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+
+  if (hasQuery) {
+    return awsJson<Record<string, unknown>>(
+      ["kms", "get-key-policy", "--key-id", keyInput, "--policy-name", policyName, ...passthrough],
+      runOpts,
+    );
+  }
 
   const policyResult = await awsJson<RawGetKeyPolicyResponse>(
     [

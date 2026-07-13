@@ -277,7 +277,7 @@ async function runListRoles(
 ): Promise<Record<string, unknown>> {
   const { token } = extractNextToken(args);
   // Forward unknown flags verbatim (superset contract: overlay never restricts input).
-  const rawPassthrough = collectPassthroughFlags(args, ["--next-token"]);
+  const rawPassthrough = collectPassthroughFlags(args, ["--next-token"], undefined, { service: "iam", operation: "list-roles" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   const awsArgs = ["iam", "list-roles", "--max-items", DEFAULT_MAX_ITEMS];
@@ -332,7 +332,7 @@ async function runGetRole(
   }
 
   // Forward unknown flags from args after the positional (superset contract).
-  const rawPassthrough = collectPassthroughFlags(args.slice(1), []);
+  const rawPassthrough = collectPassthroughFlags(args.slice(1), [], undefined, { service: "iam", operation: "get-role" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   const awsArgs = ["iam", "get-role", "--role-name", roleName, ...passthrough];
@@ -355,7 +355,7 @@ async function runListPolicies(
   const { scope, remaining: afterScope } = extractScope(args);
   const { token } = extractNextToken(afterScope);
   // Forward unknown flags verbatim (superset contract).
-  const rawPassthrough = collectPassthroughFlags(args, ["--scope", "--next-token"]);
+  const rawPassthrough = collectPassthroughFlags(args, ["--scope", "--next-token"], undefined, { service: "iam", operation: "list-policies" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   const awsArgs = ["iam", "list-policies", "--max-items", DEFAULT_MAX_ITEMS];
@@ -417,7 +417,7 @@ async function runGetPolicy(
     );
   }
 
-  const rawPassthrough = collectPassthroughFlags(args.slice(1), []);
+  const rawPassthrough = collectPassthroughFlags(args.slice(1), [], undefined, { service: "iam", operation: "get-policy" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   const awsArgs = ["iam", "get-policy", "--policy-arn", policyArn, ...passthrough];
@@ -446,8 +446,8 @@ async function runListAttachedRolePolicies(
   }
 
   const { token } = extractNextToken(args.slice(1));
-  const rawPassthrough = collectPassthroughFlags(args.slice(1), ["--next-token"]);
-  const { passthrough } = buildPassthrough(rawPassthrough);
+  const rawPassthrough = collectPassthroughFlags(args.slice(1), ["--next-token"], undefined, { service: "iam", operation: "list-attached-role-policies" });
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   const awsArgs = [
     "iam",
@@ -459,6 +459,10 @@ async function runListAttachedRolePolicies(
   ];
   if (token !== undefined) awsArgs.push("--starting-token", token);
   awsArgs.push(...passthrough);
+
+  if (hasQuery) {
+    return awsJson<Record<string, unknown>>(awsArgs, { binary, context });
+  }
 
   const response = await awsJson<IamListAttachedRolePoliciesResponse>(awsArgs, {
     binary,

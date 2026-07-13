@@ -125,11 +125,12 @@ export interface SecretsDetailResult {
   readonly kmsKeyAlias: string | undefined;
 }
 
-/** Discriminated union returned by secretsRun. */
+/** Discriminated union returned by secretsRun. Raw Record when --query bypass is active. */
 export type SecretsRunResult =
   | { readonly secret: SecretsGetValueResult; readonly suggestion?: string }
   | { readonly secretList: SecretsListResult }
-  | { readonly secretDetail: SecretsDetailResult };
+  | { readonly secretDetail: SecretsDetailResult }
+  | Record<string, unknown>;
 
 export interface SecretsRunOptions {
   readonly subcommand: string;
@@ -290,7 +291,7 @@ async function resolveAliasMap(
 
 async function runGetSecretValue(
   options: SecretsRunOptions,
-): Promise<{ secret: SecretsGetValueResult; suggestion?: string }> {
+): Promise<{ secret: SecretsGetValueResult; suggestion?: string } | Record<string, unknown>> {
   const reveal = hasFlag(options.args, "--reveal");
   const positionals = extractPositionals(options.args);
   const secretId =
@@ -310,8 +311,15 @@ async function runGetSecretValue(
   const runOpts = toRunOpts(options);
 
   // Forward unknown flags verbatim (superset contract). --reveal is overlay-only.
-  const rawPassthrough = collectPassthroughFlags(options.args, ["--secret-id"], ["--reveal"]);
-  const { passthrough } = buildPassthrough(rawPassthrough);
+  const rawPassthrough = collectPassthroughFlags(options.args, ["--secret-id"], ["--reveal"], { service: "secretsmanager", operation: "get-secret-value" });
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+
+  if (hasQuery) {
+    return awsJson<Record<string, unknown>>(
+      ["secretsmanager", "get-secret-value", "--secret-id", secretId, ...passthrough],
+      toRunOpts(options),
+    );
+  }
 
   // Fetch the secret value and its metadata in parallel.
   // describe-secret provides KmsKeyId for alias enrichment.
@@ -353,13 +361,13 @@ async function runGetSecretValue(
 
 async function runListSecrets(
   options: SecretsRunOptions,
-): Promise<{ secretList: SecretsListResult }> {
+): Promise<{ secretList: SecretsListResult } | Record<string, unknown>> {
   const maxItems = extractMaxItems(options.args);
   const nextTokenArg = extractFlag(options.args, "--next-token");
 
   // Forward unknown flags verbatim (superset contract — e.g. --filters, --sort-order).
-  const rawPassthrough = collectPassthroughFlags(options.args, ["--max-items", "--next-token"]);
-  const { passthrough } = buildPassthrough(rawPassthrough);
+  const rawPassthrough = collectPassthroughFlags(options.args, ["--max-items", "--next-token"], undefined, { service: "secretsmanager", operation: "list-secrets" });
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   const awsArgs = [
     "secretsmanager",
@@ -371,6 +379,10 @@ async function runListSecrets(
     awsArgs.push("--starting-token", nextTokenArg);
   }
   awsArgs.push(...passthrough);
+
+  if (hasQuery) {
+    return awsJson<Record<string, unknown>>(awsArgs, toRunOpts(options));
+  }
 
   const response = await awsJson<RawListSecretsResponse>(awsArgs, toRunOpts(options));
   const secrets = response.SecretList ?? [];
@@ -416,7 +428,7 @@ async function runListSecrets(
 
 async function runDescribeSecret(
   options: SecretsRunOptions,
-): Promise<{ secretDetail: SecretsDetailResult }> {
+): Promise<{ secretDetail: SecretsDetailResult } | Record<string, unknown>> {
   const positionals = extractPositionals(options.args);
   const secretId =
     extractFlag(options.args, "--secret-id") ?? positionals[0];
@@ -433,8 +445,15 @@ async function runDescribeSecret(
   }
 
   // Forward unknown flags verbatim (superset contract).
-  const rawPassthrough = collectPassthroughFlags(options.args, ["--secret-id"]);
-  const { passthrough } = buildPassthrough(rawPassthrough);
+  const rawPassthrough = collectPassthroughFlags(options.args, ["--secret-id"], undefined, { service: "secretsmanager", operation: "describe-secret" });
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+
+  if (hasQuery) {
+    return awsJson<Record<string, unknown>>(
+      ["secretsmanager", "describe-secret", "--secret-id", secretId, ...passthrough],
+      toRunOpts(options),
+    );
+  }
 
   const response = await awsJson<RawDescribeSecretResponse>(
     ["secretsmanager", "describe-secret", "--secret-id", secretId, ...passthrough],

@@ -12,7 +12,7 @@
  *     positionals, strip --output (the exec seam always appends --output json),
  *     detect --query, and return passthrough + hasQuery.
  *
- *   collectPassthroughFlags(args, ownedFlags, ownedBoolFlags?)
+ *   collectPassthroughFlags(args, ownedFlags, ownedBoolFlags?, context?)
  *     Given the RAW overlay args (before any overlay parsing), strip the overlay's
  *     known flags and positionals, leaving only the flags that should be forwarded
  *     verbatim to the child aws invocation.
@@ -29,9 +29,25 @@
  *   present, hasQuery=true signals that the overlay must bypass its curated
  *   projection and return the raw queried result as-is. --query IS kept in
  *   passthrough so the child aws CLI applies JMESPath correctly.
+ *
+ * ModelContext contract (collectPassthroughFlags)
+ *   When context is provided, the botocore service model is used to classify
+ *   KNOWN flags correctly — boolean flags do not consume the next token as a
+ *   value, preventing positional-eating. Flags NOT found in the model are
+ *   forwarded anyway (superset contract); the heuristic is used as fallback.
+ *   When context is absent (or the model cannot be loaded), the function falls
+ *   back to the heuristic for all unknown flags: consume the next non-`--`
+ *   token as a flag value.
  */
 
 import { stripOutputFlag } from "./engine.js";
+import {
+  loadService,
+  resolveOperationName,
+  pascalToKebab,
+  type ServiceModel,
+} from "./model.js";
+
 export { stripOutputFlag };
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -47,6 +63,88 @@ export interface OverlayArgSplit {
    * Signals the overlay to bypass its curated projection and return raw output.
    */
   readonly hasQuery: boolean;
+}
+
+/**
+ * Service + operation context for model-driven flag classification.
+ * Used by collectPassthroughFlags to determine whether an unknown flag is
+ * boolean (no value follows) or takes a value.
+ */
+export interface ModelContext {
+  /** AWS service name as used by aws CLI (e.g. "ssm", "kms", "logs"). */
+  readonly service: string;
+  /** Operation name in kebab-case (e.g. "get-parameter", "list-keys"). */
+  readonly operation: string;
+}
+
+// ── Global AWS CLI flag sets ──────────────────────────────────────────────────
+//
+// These flags are defined by the aws CLI itself and are NOT in any service
+// botocore model. They apply to all operations and must be handled explicitly
+// so that collectPassthroughFlags does not misclassify them.
+
+/**
+ * Global aws CLI flags that take NO value — boolean in nature.
+ * Kept in passthrough verbatim; the next token is NOT consumed as a value.
+ */
+const GLOBAL_BOOL_FLAGS = new Set([
+  "--debug",
+  "--no-verify-ssl",
+  "--no-paginate",
+  "--no-sign-request",
+  "--no-cli-pager",
+  "--cli-auto-prompt",
+  "--no-cli-auto-prompt",
+  "--version",
+]);
+
+/**
+ * Global aws CLI flags that TAKE a value.
+ * Kept in passthrough verbatim; the next token IS consumed as the value.
+ *
+ * --output and --query have special overlay handling (--output is stripped;
+ * --query sets hasQuery) but are included here so the model-driven path
+ * never throws USAGE_ERROR for them.
+ */
+const GLOBAL_VALUE_FLAGS = new Set([
+  "--output",      // stripped by stripOutputFlag / buildPassthrough
+  "--query",       // kept; sets hasQuery in buildPassthrough
+  "--endpoint-url",
+  "--ca-bundle",
+  "--cli-read-timeout",
+  "--cli-connect-timeout",
+  "--cli-binary-format",
+  "--color",
+  "--profile",     // normally stripped by context.ts; whitelisted for safety
+  "--region",      // normally stripped by context.ts; whitelisted for safety
+]);
+
+// ── Internal helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Determine whether a flag (in "--kebab-case" form) is boolean in the given
+ * operation's botocore model.
+ *
+ * Uses `pascalToKebab` to match each param's PascalCase name against the
+ * flag's kebab form — correctly handles acronyms (e.g. KMSKeyId → kms-key-id).
+ *
+ * @returns `true`      if the flag is a boolean parameter
+ *          `false`     if it takes a value
+ *          `undefined` if the flag is not found in the operation's input params
+ */
+function isModelBooleanFlag(
+  flagName: string,
+  model: ServiceModel,
+  opKey: string,
+): boolean | undefined {
+  const op = model.operations.get(opKey);
+  if (op === undefined) return undefined;
+  const kebabParam = flagName.slice(2); // strip "--"
+  const param = op.signature.inputParams.find(
+    (p) => pascalToKebab(p.name) === kebabParam,
+  );
+  if (param === undefined) return undefined;
+  return param.type === "boolean";
 }
 
 // ── buildPassthrough ─────────────────────────────────────────────────────────
@@ -83,27 +181,32 @@ export function buildPassthrough(remaining: readonly string[]): OverlayArgSplit 
  *   - If the token is an overlay-owned flag:
  *       skip it (and its value token, unless it is a boolean/no-value flag).
  *   - If the token starts with `--` and is NOT owned:
- *       keep it in passthrough.
- *       If the next token does NOT start with `--`, treat it as the flag's
- *       value and keep that too (consume it so it is not misread as a positional).
+ *       keep it in passthrough. Determine whether a value follows:
+ *         1. Global boolean flags → no value consumed.
+ *         2. Global value flags → consume next non-`--` token.
+ *         3. Model lookup (when context provided) → use ShapeType when found.
+ *            boolean → no value; other → consume next non-`--` token.
+ *            Flag not in model → fall through to heuristic (step 4).
+ *         4. No context / model unavailable → heuristic: consume next
+ *            non-`--` token.
  *   - If the token does NOT start with `--` (bare positional):
  *       skip it — it is owned by the overlay.
- *
- * Limitation: unknown boolean flags (flags without a value, e.g. `--dry-run`)
- * followed immediately by a bare positional will consume that positional as their
- * value. This matches the same limitation already present in the overlays'
- * own `extractPositionals` helpers and is documented here for future reference.
  *
  * @param args           Raw args to scan (may include positionals + owned flags).
  * @param ownedFlagNames Flags the overlay parses with a value (e.g. "--max-items").
  * @param ownedBoolFlags Flags the overlay parses WITHOUT a following value token
  *                       (e.g. "--reveal", "--recursive"). These are skipped but
  *                       their next token is NOT consumed.
+ * @param context        Optional service + operation context for model-based
+ *                       boolean flag classification. Flags found in the model
+ *                       are classified correctly; flags not found fall back to
+ *                       the heuristic. No errors are thrown for unknown flags.
  */
 export function collectPassthroughFlags(
   args: readonly string[],
   ownedFlagNames: ReadonlySet<string> | readonly string[],
   ownedBoolFlags?: ReadonlySet<string> | readonly string[],
+  context?: ModelContext,
 ): string[] {
   const owned =
     ownedFlagNames instanceof Set
@@ -116,6 +219,19 @@ export function collectPassthroughFlags(
       : ownedBoolFlags instanceof Set
         ? ownedBoolFlags
         : new Set<string>(ownedBoolFlags);
+
+  // Pre-load the botocore model once when context is provided.
+  // If loading fails, fall through to heuristic for all flags (graceful degradation).
+  let serviceModel: ServiceModel | undefined;
+  let resolvedOpKey: string | undefined;
+  if (context !== undefined) {
+    try {
+      serviceModel = loadService(context.service);
+      resolvedOpKey = resolveOperationName(serviceModel, context.operation) ?? undefined;
+    } catch {
+      serviceModel = undefined;
+    }
+  }
 
   const out: string[] = [];
 
@@ -144,22 +260,68 @@ export function collectPassthroughFlags(
       continue;
     }
 
-    // Unknown (passthrough) flag: keep it.
+    // ── Unknown (passthrough) flag ────────────────────────────────────────────
     out.push(arg);
 
-    if (eqIdx === -1) {
-      // Two-arg form: look ahead for a value token.
+    if (eqIdx !== -1) {
+      // --flag=value form: value is embedded. Nothing else to consume.
+      continue;
+    }
+
+    // Two-arg form: determine whether a value token follows.
+
+    // Priority 1: global boolean flags — no value.
+    if (GLOBAL_BOOL_FLAGS.has(flagName)) {
+      continue;
+    }
+
+    // Priority 2: global value flags — consume next non-`--` token.
+    if (GLOBAL_VALUE_FLAGS.has(flagName)) {
       if (i + 1 < args.length) {
         const next = args[i + 1] ?? "";
         if (!next.startsWith("--")) {
-          // Next token is the flag's value — consume and keep it.
           i++;
           out.push(next);
         }
-        // else: next is another flag → this unknown flag has no value (boolean-like).
+      }
+      continue;
+    }
+
+    // Priority 3: service model lookup.
+    // The model tells us whether a KNOWN flag is boolean (no value) or takes a
+    // value — preventing boolean flags from eating the next positional. Flags
+    // not found in the model are NOT an error: the model may be incomplete, and
+    // the superset contract requires forwarding unknown flags verbatim. Fall
+    // through to the heuristic (Priority 4) in that case.
+    if (serviceModel !== undefined && resolvedOpKey !== undefined) {
+      const isBool = isModelBooleanFlag(flagName, serviceModel, resolvedOpKey);
+
+      if (isBool !== undefined) {
+        if (!isBool) {
+          // Value flag — consume the next non-`--` token.
+          if (i + 1 < args.length) {
+            const next = args[i + 1] ?? "";
+            if (!next.startsWith("--")) {
+              i++;
+              out.push(next);
+            }
+          }
+        }
+        // Boolean: next token is NOT a value; do not consume.
+        continue;
+      }
+      // isBool === undefined: flag not in model — fall through to heuristic.
+    }
+
+    // Priority 4: no model context or model unavailable — use heuristic.
+    // Consume the next non-`--` token as the flag's value.
+    if (i + 1 < args.length) {
+      const next = args[i + 1] ?? "";
+      if (!next.startsWith("--")) {
+        i++;
+        out.push(next);
       }
     }
-    // --flag=value form: value is embedded in `arg`, nothing extra to consume.
   }
 
   return out;

@@ -174,6 +174,11 @@ export interface TailRunOptions {
    * --output is stripped; --query is kept for JMESPath passthrough.
    */
   readonly passthrough?: readonly string[];
+  /**
+   * When true, --query was present in the CLI args. tailRun bypasses its
+   * curated projection and returns the raw aws CLI response directly.
+   */
+  readonly hasQuery?: boolean;
   readonly context?: AwsContext;
   readonly binary?: string;
 }
@@ -240,6 +245,11 @@ export async function tailRun(options: TailRunOptions): Promise<TailResult> {
     awsArgs.push(...options.passthrough);
   }
 
+  if (options.hasQuery === true) {
+    // --query: aws CLI applies JMESPath; bypass overlay projection.
+    return awsJson<TailResult>(awsArgs, runOpts);
+  }
+
   const response = await awsJson<AwsFilterLogEventsResponse>(awsArgs, runOpts);
 
   const events: LogEvent[] = response.events.map((e) => ({
@@ -291,6 +301,11 @@ export interface FilterRunOptions {
    * (superset contract).
    */
   readonly passthrough?: readonly string[];
+  /**
+   * When true, --query was present in the CLI args. filterRun (via tailRun)
+   * bypasses its curated projection and returns the raw aws CLI response.
+   */
+  readonly hasQuery?: boolean;
   readonly context?: AwsContext;
   readonly binary?: string;
 }
@@ -307,6 +322,7 @@ export async function filterRun(options: FilterRunOptions): Promise<TailResult> 
     pattern: options.pattern,
     nextToken: options.nextToken,
     passthrough: options.passthrough,
+    hasQuery: options.hasQuery,
     context: options.context,
     binary: options.binary,
   });
@@ -324,6 +340,11 @@ export interface DescribeLogGroupsRunOptions {
    * (superset contract: e.g. --log-group-name-prefix, --include-linked-accounts).
    */
   readonly passthrough?: readonly string[];
+  /**
+   * When true, --query was present in the CLI args. describeLogGroupsRun bypasses
+   * its curated projection and returns the raw aws CLI response directly.
+   */
+  readonly hasQuery?: boolean;
   readonly context?: AwsContext;
   readonly binary?: string;
 }
@@ -372,6 +393,11 @@ export async function describeLogGroupsRun(
   // Superset contract: forward unknown flags verbatim.
   if (options.passthrough !== undefined && options.passthrough.length > 0) {
     awsArgs.push(...options.passthrough);
+  }
+
+  if (options.hasQuery === true) {
+    // --query: aws CLI applies JMESPath; bypass overlay projection.
+    return awsJson<LogGroupsResult>(awsArgs, runOpts);
   }
 
   const response = await awsJson<AwsDescribeLogGroupsResponse>(awsArgs, runOpts);
@@ -598,9 +624,11 @@ async function parseTailArgs(
   const passthrough = collectPassthroughFlags(
     args,
     ["--since", "--limit", "--stream", "--pattern", "--next-token"],
+    undefined,
+    { service: "logs", operation: "filter-log-events" },
   );
-  const { passthrough: fwd } = buildPassthrough(passthrough);
-  return tailRun({ logGroupName, since, limit, streamName, pattern, nextToken, passthrough: fwd, context });
+  const { passthrough: fwd, hasQuery } = buildPassthrough(passthrough);
+  return tailRun({ logGroupName, since, limit, streamName, pattern, nextToken, passthrough: fwd, hasQuery, context });
 }
 
 async function parseFilterArgs(
@@ -612,9 +640,11 @@ async function parseFilterArgs(
   const passthrough = collectPassthroughFlags(
     args,
     ["--since", "--limit", "--next-token"],
+    undefined,
+    { service: "logs", operation: "filter-log-events" },
   );
-  const { passthrough: fwd } = buildPassthrough(passthrough);
-  return filterRun({ logGroupName, pattern, since, limit, nextToken, passthrough: fwd, context });
+  const { passthrough: fwd, hasQuery } = buildPassthrough(passthrough);
+  return filterRun({ logGroupName, pattern, since, limit, nextToken, passthrough: fwd, hasQuery, context });
 }
 
 async function parseDescribeLogGroupsArgs(
@@ -623,9 +653,9 @@ async function parseDescribeLogGroupsArgs(
 ): Promise<LogGroupsResult> {
   const [prefix, r1] = pullFlag([...args], "--prefix");
   const [limitStr] = pullFlag(r1, "--limit");
-  const passthrough = collectPassthroughFlags(args, ["--prefix", "--limit"]);
-  const { passthrough: fwd } = buildPassthrough(passthrough);
-  return describeLogGroupsRun({ prefix, limit: parseLimit(limitStr), passthrough: fwd, context });
+  const passthrough = collectPassthroughFlags(args, ["--prefix", "--limit"], undefined, { service: "logs", operation: "describe-log-groups" });
+  const { passthrough: fwd, hasQuery } = buildPassthrough(passthrough);
+  return describeLogGroupsRun({ prefix, limit: parseLimit(limitStr), passthrough: fwd, hasQuery, context });
 }
 
 // ─── Record builders (widen typed results to Record<string, unknown>) ─────────

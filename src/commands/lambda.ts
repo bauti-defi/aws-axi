@@ -162,11 +162,12 @@ export interface LambdaInvokeResult {
   readonly logTail?: string;
 }
 
-/** Discriminated union returned by lambdaRun. */
+/** Discriminated union returned by lambdaRun. Raw Record when --query bypass is active. */
 export type LambdaRunResult =
   | { readonly functions: LambdaListResult }
   | { readonly function: LambdaFunctionSummary }
-  | { readonly invocation: LambdaInvokeResult };
+  | { readonly invocation: LambdaInvokeResult }
+  | Record<string, unknown>;
 
 export interface LambdaRunOptions {
   readonly subcommand: string;
@@ -394,20 +395,24 @@ async function resolveVpcConfig(
 
 async function runListFunctions(
   options: LambdaRunOptions,
-): Promise<{ functions: LambdaListResult }> {
+): Promise<{ functions: LambdaListResult } | Record<string, unknown>> {
   const maxItems = extractMaxItems(options.args);
   const nextTokenArg = extractFlag(options.args, "--next-token");
   const runOpts = toRunOpts(options);
 
   // Forward unknown flags verbatim (superset contract).
-  const rawPassthrough = collectPassthroughFlags(options.args, ["--max-items", "--next-token"]);
-  const { passthrough } = buildPassthrough(rawPassthrough);
+  const rawPassthrough = collectPassthroughFlags(options.args, ["--max-items", "--next-token"], undefined, { service: "lambda", operation: "list-functions" });
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   const awsArgs: string[] = ["lambda", "list-functions", "--max-items", String(maxItems)];
   if (nextTokenArg !== undefined) {
     awsArgs.push("--starting-token", nextTokenArg);
   }
   awsArgs.push(...passthrough);
+
+  if (hasQuery) {
+    return awsJson<Record<string, unknown>>(awsArgs, runOpts);
+  }
 
   const response = await awsJson<RawListFunctionsResponse>(awsArgs, runOpts);
   const fns = response.Functions ?? [];
@@ -439,7 +444,7 @@ async function runListFunctions(
 
 async function runGetFunction(
   options: LambdaRunOptions,
-): Promise<{ function: LambdaFunctionSummary }> {
+): Promise<{ function: LambdaFunctionSummary } | Record<string, unknown>> {
   const positionals = extractPositionals(options.args);
   if (positionals.length === 0) {
     throw new AxiError(
@@ -453,8 +458,15 @@ async function runGetFunction(
   const runOpts = toRunOpts(options);
 
   // Forward unknown flags verbatim (superset contract — e.g. --qualifier).
-  const rawPassthrough = collectPassthroughFlags(options.args, []);
-  const { passthrough } = buildPassthrough(rawPassthrough);
+  const rawPassthrough = collectPassthroughFlags(options.args, [], undefined, { service: "lambda", operation: "get-function" });
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+
+  if (hasQuery) {
+    return awsJson<Record<string, unknown>>(
+      ["lambda", "get-function", "--function-name", fnName, ...passthrough],
+      runOpts,
+    );
+  }
 
   const response = await awsJson<RawGetFunctionResponse>(
     ["lambda", "get-function", "--function-name", fnName, ...passthrough],
@@ -467,7 +479,7 @@ async function runGetFunction(
 
 async function runGetFunctionConfiguration(
   options: LambdaRunOptions,
-): Promise<{ function: LambdaFunctionSummary }> {
+): Promise<{ function: LambdaFunctionSummary } | Record<string, unknown>> {
   const positionals = extractPositionals(options.args);
   if (positionals.length === 0) {
     throw new AxiError(
@@ -481,8 +493,15 @@ async function runGetFunctionConfiguration(
   const runOpts = toRunOpts(options);
 
   // Forward unknown flags verbatim (superset contract — e.g. --qualifier).
-  const rawPassthrough = collectPassthroughFlags(options.args, []);
-  const { passthrough } = buildPassthrough(rawPassthrough);
+  const rawPassthrough = collectPassthroughFlags(options.args, [], undefined, { service: "lambda", operation: "get-function-configuration" });
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+
+  if (hasQuery) {
+    return awsJson<Record<string, unknown>>(
+      ["lambda", "get-function-configuration", "--function-name", fnName, ...passthrough],
+      runOpts,
+    );
+  }
 
   const rawConfig = await awsJson<RawLambdaFunction>(
     ["lambda", "get-function-configuration", "--function-name", fnName, ...passthrough],
@@ -543,9 +562,13 @@ async function runInvoke(
 
   // Forward unknown flags verbatim (superset contract).
   // Note: the outfile positional must come AFTER passthrough flags below.
+  // invoke uses awsRaw (not awsJson), so --query flows through to aws CLI
+  // stdout but the overlay does not bypass its structured result for invoke.
   const rawPassthrough = collectPassthroughFlags(
     options.args,
     ["--function-name", "--payload", "--invocation-type", "--log-type", "--cli-binary-format"],
+    undefined,
+    { service: "lambda", operation: "invoke" },
   );
   const { passthrough } = buildPassthrough(rawPassthrough);
   invokeArgs.push(...passthrough);
