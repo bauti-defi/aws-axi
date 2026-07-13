@@ -334,6 +334,11 @@ export interface S3HeadObjectRunOptions {
   readonly key: string;
   /** Unknown flags to forward verbatim (e.g. --version-id). */
   readonly passthrough?: readonly string[];
+  /**
+   * When true the caller passed --query; the aws CLI applies JMESPath and the
+   * response shape is unknown. Skip curated projection and return the raw result.
+   */
+  readonly hasQuery?: boolean;
   readonly binary?: string;
   readonly context?: AwsContext;
 }
@@ -341,16 +346,25 @@ export interface S3HeadObjectRunOptions {
 /**
  * Fetch S3 object metadata via `aws s3api head-object`.
  * Projects the raw response down to the load-bearing fields.
+ * When hasQuery is true the overlay bypasses projection so JMESPath output
+ * flows through unmodified.
  */
 export async function s3HeadObjectRun(
   options: S3HeadObjectRunOptions,
-): Promise<S3HeadObjectResult> {
+): Promise<S3HeadObjectResult | Record<string, unknown>> {
   const headArgs = [
     "s3api", "head-object",
     "--bucket", options.bucket,
     "--key", options.key,
     ...(options.passthrough ?? []),
   ];
+
+  if (options.hasQuery) {
+    // --query present: aws CLI applies JMESPath before we see the response.
+    // The result shape is unknown — skip curated projection and return raw.
+    return awsJson<Record<string, unknown>>(headArgs, { binary: options.binary, context: options.context });
+  }
+
   const resp = await awsJson<HeadObjectResponse>(headArgs, { binary: options.binary, context: options.context });
 
   return {
@@ -382,6 +396,11 @@ export interface S3CreateBucketRunOptions {
   readonly region?: string;
   /** Unknown flags to forward verbatim to the underlying aws invocation. */
   readonly passthrough?: readonly string[];
+  /**
+   * When true the caller passed --query; skip synthesized result and return
+   * the raw aws CLI output so JMESPath projection flows through unmodified.
+   */
+  readonly hasQuery?: boolean;
   readonly binary?: string;
   readonly context?: AwsContext;
 }
@@ -396,7 +415,7 @@ export interface S3CreateBucketRunOptions {
  */
 export async function s3CreateBucketRun(
   options: S3CreateBucketRunOptions,
-): Promise<S3CreateBucketResult> {
+): Promise<S3CreateBucketResult | Record<string, unknown>> {
   const args: string[] = ["s3api", "create-bucket", "--bucket", options.bucket];
 
   // Resolve the effective region in priority order:
@@ -440,6 +459,13 @@ export async function s3CreateBucketRun(
 
   if (options.passthrough !== undefined) {
     args.push(...options.passthrough);
+  }
+
+  if (options.hasQuery) {
+    // --query present: aws CLI applies JMESPath before we see the response.
+    // Switch to awsJson so --output json is appended and result is parsed;
+    // skip the synthesized S3CreateBucketResult projection.
+    return awsJson<Record<string, unknown>>(args, { binary: options.binary, context: options.context });
   }
 
   const result = await awsRaw(args, {
@@ -642,7 +668,10 @@ export async function s3Command(
       // --dryrun is a boolean overlay flag (no value follows); pass in ownedBoolFlags.
       const argsForPassthrough = stripPositionals(rest, source, destination);
       const rawPassthrough = collectPassthroughFlags(argsForPassthrough, [], ["--dryrun"]);
-      const { passthrough } = buildPassthrough(rawPassthrough);
+      // s3 cp uses awsExec (text output) — --query is forwarded verbatim but
+      // there is no overlay projection to bypass, so hasQuery is intentionally unused.
+      const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+      void hasQuery;
       const result = await s3CpRun({ source, destination, dryRun, passthrough, context });
       return result as unknown as Record<string, unknown>;
     }
@@ -661,7 +690,10 @@ export async function s3Command(
       // Strip the target URI positional to prevent heuristic from eating it.
       const argsForPassthrough = stripPositionals(rest, target);
       const rawPassthrough = collectPassthroughFlags(argsForPassthrough, [], ["--dryrun"]);
-      const { passthrough } = buildPassthrough(rawPassthrough);
+      // s3 rm uses awsExec (text output) — --query is forwarded verbatim but
+      // there is no overlay projection to bypass, so hasQuery is intentionally unused.
+      const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+      void hasQuery;
       const result = await s3RmRun({ target, dryRun, passthrough, context });
       return result as unknown as Record<string, unknown>;
     }
@@ -678,8 +710,8 @@ export async function s3Command(
       }
       // head-object maps to s3api head-object — all flags are named, no positionals.
       const rawPassthrough = collectPassthroughFlags(rest, ["--bucket", "--key"]);
-      const { passthrough } = buildPassthrough(rawPassthrough);
-      const result = await s3HeadObjectRun({ bucket, key, passthrough, context });
+      const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+      const result = await s3HeadObjectRun({ bucket, key, passthrough, hasQuery, context });
       return result as unknown as Record<string, unknown>;
     }
 
@@ -694,8 +726,8 @@ export async function s3Command(
       }
       const region = parseFlag(rest, "--region");
       const rawPassthrough = collectPassthroughFlags(rest, ["--bucket", "--region"]);
-      const { passthrough } = buildPassthrough(rawPassthrough);
-      const result = await s3CreateBucketRun({ bucket, region, passthrough, context });
+      const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+      const result = await s3CreateBucketRun({ bucket, region, passthrough, hasQuery, context });
       return result as unknown as Record<string, unknown>;
     }
 

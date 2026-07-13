@@ -562,15 +562,17 @@ async function runInvoke(
 
   // Forward unknown flags verbatim (superset contract).
   // Note: the outfile positional must come AFTER passthrough flags below.
-  // invoke uses awsRaw (not awsJson), so --query flows through to aws CLI
-  // stdout but the overlay does not bypass its structured result for invoke.
+  // invoke uses awsRaw (not awsJson) with outfile semantics — the payload is
+  // written to a temp file, not returned as JSON. --query is forwarded verbatim
+  // but there is no overlay projection to bypass, so hasQuery is intentionally unused.
   const rawPassthrough = collectPassthroughFlags(
     options.args,
     ["--function-name", "--payload", "--invocation-type", "--log-type", "--cli-binary-format"],
     undefined,
     { service: "lambda", operation: "invoke" },
   );
-  const { passthrough } = buildPassthrough(rawPassthrough);
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+  void hasQuery;
   invokeArgs.push(...passthrough);
 
   // Create a temp file for the response payload

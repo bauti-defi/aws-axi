@@ -849,3 +849,117 @@ describe("ssm overlay passthrough — boolean flag classification via botocore m
     expect(result).toHaveProperty("parametersByPath");
   });
 });
+
+// ── captureMain --query bypass tests: ssm / kms / lambda / secrets / s3 head-object ─
+//
+// Each test drives the full CLI adapter via captureMain with --query present.
+// The stub returns a pre-filtered JMESPath result (a bare string or array)
+// that would NOT appear in the output if the overlay re-projected it.
+//
+// Revert-proof:
+//   - For ssm/lambda/secrets: disable the `if (hasQuery)` block → the overlay tries
+//     to map the stub's bare string as the AWS response type → `undefined` fields
+//     everywhere → output lacks the marker value, test fails.
+//   - For kms: same as ssm; additionally the secondary alias call degrades gracefully,
+//     but the primary projection returns an empty key list, not the marker.
+//   - For s3 head-object: disable the bypass → overlay maps the stub's bare string as
+//     HeadObjectResponse → all fields undefined → output lacks the marker, test fails.
+
+describe("--query bypass at captureMain level — ssm/kms/lambda/secrets/s3-head-object", () => {
+  it("ssm get-parameter --query bypasses overlay projection, marker appears in output", async () => {
+    const MARKER = "ssm-query-bypass-ok";
+    const binary = createArgGuardStub({
+      requiredArg: "--query",
+      validStdout: JSON.stringify(MARKER),
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["ssm", "get-parameter", "--name", "/test/param", "--query", "Parameter.Value"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    // Must exit cleanly and must not re-project the raw JMESPath result through
+    // SSM's typed projection (which would null out all fields and lose the marker).
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain(MARKER);
+  });
+
+  it("kms list-keys --query bypasses overlay projection, marker appears in output", async () => {
+    const MARKER = "kms-key-id-bypass-ok";
+    // The primary list-keys call has --query; the secondary list-aliases call (only
+    // reached if the bypass is absent) does not — so we provide a fallback that
+    // returns an empty Aliases list, ensuring the secondary call doesn't hard-fail.
+    const binary = createArgGuardStub({
+      requiredArg: "--query",
+      validStdout: JSON.stringify(MARKER),
+      fallbackStdout: JSON.stringify({ Aliases: [] }),
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["kms", "list-keys", "--query", "Keys[0].KeyId"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    // With bypass active: marker is the raw JMESPath result that flows through.
+    // Without bypass: overlay projects the bare string as RawListKeysResponse,
+    // gets Keys=undefined, returns the "No KMS keys found" message — not the marker.
+    expect(output).toContain(MARKER);
+    expect(output).not.toContain("No KMS keys found");
+  });
+
+  it("lambda list-functions --query bypasses overlay projection, marker appears in output", async () => {
+    const MARKER = "lambda-fn-bypass-ok";
+    const binary = createArgGuardStub({
+      requiredArg: "--query",
+      validStdout: JSON.stringify(MARKER),
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["lambda", "list-functions", "--query", "Functions[0].FunctionName"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain(MARKER);
+  });
+
+  it("secretsmanager get-secret-value --query bypasses overlay projection, marker appears in output", async () => {
+    const MARKER = "secret-bypass-ok";
+    // The primary get-secret-value call has --query. Without bypass a secondary
+    // describe-secret call would fire (no --query, so stub exits 1), but that
+    // secondary call is .catch'd, so only the projection failure exposes bypass absence.
+    const binary = createArgGuardStub({
+      requiredArg: "--query",
+      validStdout: JSON.stringify(MARKER),
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["secretsmanager", "get-secret-value", "--secret-id", "my-secret", "--query", "SecretString"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    // Without bypass: overlay maps the bare string as RawGetSecretValueResponse,
+    // SecretString is undefined → secretValue is REDACTED (not the marker).
+    expect(output).toContain(MARKER);
+  });
+
+  it("s3 head-object --query bypasses overlay projection, marker appears in output", async () => {
+    const MARKER = "s3-head-bypass-ok";
+    const binary = createArgGuardStub({
+      requiredArg: "--query",
+      validStdout: JSON.stringify(MARKER),
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "head-object", "--bucket", "my-bucket", "--key", "my/key.txt", "--query", "ContentType"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    // Without bypass: overlay maps the bare string as HeadObjectResponse,
+    // ContentType is undefined → contentType is null in output, not the marker.
+    expect(output).toContain(MARKER);
+  });
+});
