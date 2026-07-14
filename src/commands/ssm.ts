@@ -26,7 +26,7 @@ import type { AwsRunOptions } from "../aws.js";
 import { awsJson } from "../aws.js";
 import { resolveKey } from "../resolve/key.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrue, flagIsTrueStrict, hasFlag } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrue, flagIsTrueStrict, hasFlag, extractPositionals } from "../overlay-args.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -357,57 +357,19 @@ examples:
 // ─── Arg-parsing helpers ──────────────────────────────────────────────────────
 
 /**
- * Boolean flags that take no separate value token in the default (bare) case.
- * Without this list, extractPositionals would incorrectly consume the first
- * positional after a boolean flag as that flag's value.
+ * Boolean flags for the SSM overlay.
  *
- * These flags also support the two-arg form with a recognised boolean literal
- * (e.g. `--reveal false`).  When the next token IS a recognised bool literal,
- * it is consumed as the flag's value (not pushed to result).  This must be
- * consistent with what `flagIsTrueStrict` / `flagIsTrue` do.
+ * These flags take no separate value token in the default (bare) case but
+ * accept a recognised boolean literal in two-arg form (e.g. `--reveal false`).
+ * Passed to the shared `extractPositionals` from `overlay-args.ts`.
  */
-const BOOLEAN_FLAGS = new Set([
+const SSM_BOOL_FLAGS = new Set([
   "--reveal",
   "--with-decryption",
   "--no-with-decryption",
   "--recursive",
   "--no-recursive",
 ]);
-
-/** Recognised boolean literals accepted in two-arg flag form (case-insensitive). */
-const BOOL_LITERALS = new Set(["true", "false", "1", "0", "yes", "no"]);
-
-function extractPositionals(args: readonly string[]): string[] {
-  const result: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] ?? "";
-    if (arg.startsWith("--") && arg.includes("=")) {
-      // --flag=value form: value embedded, no separate token
-      continue;
-    }
-    if (arg.startsWith("--")) {
-      if (BOOLEAN_FLAGS.has(arg)) {
-        // Two-arg form: if the next token is a recognised boolean literal,
-        // consume it as the flag's value (consistent with flagIsTrueStrict).
-        // Otherwise, no value token follows; skip only this token.
-        const next = args[i + 1];
-        if (
-          next !== undefined &&
-          !next.startsWith("--") &&
-          BOOL_LITERALS.has(next.toLowerCase())
-        ) {
-          i++; // consume the boolean value token
-        }
-        continue;
-      }
-      // Value flag — skip this AND the following value token
-      i++;
-    } else if (arg !== "") {
-      result.push(arg);
-    }
-  }
-  return result;
-}
 
 function extractMaxItems(args: readonly string[]): number {
   const raw = extractFlag(args, "--max-items");
@@ -818,7 +780,7 @@ async function runGetParameter(
   // flagIsTrueStrict: fail-safe for confidentiality — unrecognised value → redact.
   // hasFlag was value-blind: --reveal=false returned true and leaked the parameter value.
   const reveal = flagIsTrueStrict(options.args, "--reveal");
-  const positionals = extractPositionals(options.args);
+  const positionals = extractPositionals(options.args, SSM_BOOL_FLAGS);
   const nameArg =
     extractFlag(options.args, "--name") ?? positionals[0];
 
@@ -862,7 +824,7 @@ async function runGetParameters(
   // flagIsTrueStrict: fail-safe for confidentiality — unrecognised value → redact.
   // hasFlag was value-blind: --reveal=false returned true and leaked the parameter value.
   const reveal = flagIsTrueStrict(options.args, "--reveal");
-  const positionals = extractPositionals(options.args);
+  const positionals = extractPositionals(options.args, SSM_BOOL_FLAGS);
 
   // --names flag value (single space-separated string from CLI) or positionals
   const namesFlag = extractFlag(options.args, "--names");
@@ -916,7 +878,7 @@ async function runGetParametersByPath(
   // flagIsTrueStrict: fail-safe for confidentiality — unrecognised value → redact.
   // hasFlag was value-blind: --reveal=false returned true and leaked the parameter value.
   const reveal = flagIsTrueStrict(options.args, "--reveal");
-  const positionals = extractPositionals(options.args);
+  const positionals = extractPositionals(options.args, SSM_BOOL_FLAGS);
   const pathArg =
     extractFlag(options.args, "--path") ?? positionals[0];
 

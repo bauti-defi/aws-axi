@@ -23,7 +23,7 @@ import { awsJson, awsRaw, awsExec } from "../aws.js";
 import type { AwsContext } from "../context.js";
 import { parseAwsError } from "../errors.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrue, hasFlag } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrue, hasFlag, extractPositionals } from "../overlay-args.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -31,6 +31,19 @@ import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrue, has
 
 /** Maximum objects returned per s3 ls page. */
 export const S3_PAGE_SIZE = 20;
+
+/**
+ * Boolean flags for the s3 overlay's write paths (cp, rm).
+ *
+ * These flags take no separate value token in the default (bare) case but
+ * accept a recognised boolean literal in two-arg form (e.g. `--dryrun false`).
+ * Passed to `extractPositionals` so that boolean literals are not mistaken for
+ * S3 URI / path positionals when the flag appears before the positionals.
+ *
+ * ADR-0002: real `aws s3 cp --dryrun false` hard-errors, but aws-axi accepts
+ * it as a superset extension and honours `false` as the flag's value.
+ */
+const S3_BOOL_FLAGS = new Set(["--dryrun", "--recursive"]);
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -823,7 +836,15 @@ export async function s3Command(
     }
 
     case "cp": {
-      const positionals = rest.filter((a) => !a.startsWith("-"));
+      // extractPositionals (shared, boolean-aware) replaces the naive
+      // `rest.filter(a => !a.startsWith("-"))`.  The naive filter treated
+      // boolean literals like "false" / "0" / "no" as positionals when they
+      // appeared as the value token of a boolean flag in two-arg form:
+      //   --dryrun false s3://src ./dst  → source="false", dest="s3://src"
+      // This is a DOWNLOAD→UPLOAD-OVERWRITE inversion on the write path.
+      // S3_BOOL_FLAGS names the flags that take no separate token by default
+      // but consume a recognised boolean literal as their two-arg value.
+      const positionals = extractPositionals(rest, S3_BOOL_FLAGS);
       const source = positionals[0];
       const destination = positionals[1];
       if (source === undefined || destination === undefined) {
@@ -851,7 +872,10 @@ export async function s3Command(
     }
 
     case "rm": {
-      const positionals = rest.filter((a) => !a.startsWith("-"));
+      // extractPositionals (shared, boolean-aware) — same rationale as "cp" above.
+      // Without this fix, `--dryrun false s3://bucket/key` treats "false" as the
+      // target URI, silently dropping the real target entirely.
+      const positionals = extractPositionals(rest, S3_BOOL_FLAGS);
       const target = positionals[0];
       if (target === undefined) {
         throw new AxiError(

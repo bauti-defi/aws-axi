@@ -351,6 +351,81 @@ export function flagIsTrueStrict(args: readonly string[], flag: string): boolean
   return false;
 }
 
+// ── extractPositionals ────────────────────────────────────────────────────────
+
+/**
+ * Recognised boolean literals for two-arg flag forms (case-insensitive).
+ * Exactly mirrors the literal set used by `flagIsTrue` and `flagIsTrueStrict`.
+ */
+const BOOL_LITERALS = new Set(["true", "false", "1", "0", "yes", "no"]);
+
+/**
+ * Extract bare positionals from argv, skipping all flag tokens and their values.
+ *
+ * This is the boolean-aware replacement for the naive
+ * `args.filter(a => !a.startsWith("-"))` pattern, which incorrectly treats
+ * recognised boolean literals (e.g. `false`, `0`, `no`) as positionals when
+ * they appear as the value token of a boolean flag in two-arg form
+ * (`--dryrun false`), silently shifting every positional that follows.
+ *
+ * Algorithm (left-to-right scan):
+ *   --flag=value form  → skip (value embedded in one token)
+ *   --flag in booleanFlags:
+ *       next token is a recognised boolean literal → consume both (skip flag + value)
+ *       next token is absent or not a bool literal → skip flag only
+ *   any other --flag   → value flag: skip it AND the following token
+ *   bare token (no --)  → positional: push to result
+ *
+ * The "any other --flag" value-flag rule is the reason the `--exclude` bug
+ * (reviewer follow-up) falls out of this fix for free: `--exclude *.log`
+ * skips both tokens, leaving `*.log` out of the positional result.
+ *
+ * @param args         Raw argv to scan.
+ * @param booleanFlags Set of flags that take NO separate value token in the
+ *                     default (bare) case but MAY consume a recognised boolean
+ *                     literal as a two-arg value.  Must be consistent with
+ *                     `flagIsTrue`/`flagIsTrueStrict` for the same argv.
+ *
+ * Replaces the identical private copies in `secrets.ts` and `ssm.ts` (the
+ * duplication that caused the `s3.ts` call-site to be missed in round-2).
+ */
+export function extractPositionals(
+  args: readonly string[],
+  booleanFlags: ReadonlySet<string>,
+): string[] {
+  const result: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] ?? "";
+    if (arg.startsWith("--") && arg.includes("=")) {
+      // --flag=value form: value is embedded; nothing else to consume.
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      if (booleanFlags.has(arg)) {
+        // Boolean flag in the caller's set: may optionally carry a recognised
+        // literal as a separate value token.
+        const next = args[i + 1];
+        if (
+          next !== undefined &&
+          !next.startsWith("--") &&
+          BOOL_LITERALS.has(next.toLowerCase())
+        ) {
+          i++; // consume the bool value — it is NOT a positional
+        }
+        // The flag itself is not a positional; continue regardless.
+        continue;
+      }
+      // Unknown / value flag: skip this token and the next (the value).
+      i++;
+      continue;
+    }
+    if (arg !== "") {
+      result.push(arg);
+    }
+  }
+  return result;
+}
+
 // ── extractFlag ──────────────────────────────────────────────────────────────
 
 /**
