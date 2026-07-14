@@ -22,7 +22,7 @@ import { writeFileSync, chmodSync, rmSync, mkdtempSync, readFileSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AxiError } from "axi-sdk-js";
-import { lambdaRun, lambdaCommand } from "../src/commands/lambda.js";
+import { lambdaRun, lambdaCommand, LAMBDA_HELP } from "../src/commands/lambda.js";
 import { main } from "../src/cli.js";
 
 // ─── Shared fixture data ──────────────────────────────────────────────────────
@@ -982,5 +982,92 @@ describe("lambda invoke --query bypass — captureMain", () => {
     expect(output).not.toContain("statusCode: null");
     // The JMESPath result (200) must appear in the output.
     expect(output).toContain("200");
+  });
+
+  // ── invoke --query: non-JSON stdout is guarded (residual 2) ─────────────────
+  //
+  // The hasQuery bypass calls JSON.parse on metadataResult.stdout. Every other
+  // bypass site goes through awsJson's wrapped parse; the curated parse just
+  // below is wrapped too. An unguarded parse leaks a raw SyntaxError instead
+  // of the curated "Unexpected aws lambda invoke output: …" AxiError.
+  //
+  // The real aws CLI cannot produce non-JSON stdout on a zero-exit invoke, so
+  // this path is unreachable in practice (hence 🟡 from the reviewer) — but
+  // error paths are exactly where "unreachable" turns out to be reachable.
+  //
+  // Revert-proof: remove the try-catch guard → test goes RED (output contains
+  // "JSON Parse error", not our curated message).
+
+  it("invoke --query with non-JSON stdout: curated AxiError, not raw SyntaxError", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-lambda-badjson-"));
+    tempDirs.push(dir);
+    const scriptPath = join(dir, "aws");
+
+    // Stub: exits 0 but prints non-JSON when --query is present.
+    const script = [
+      "#!/bin/sh",
+      'case "$1" in',
+      "  lambda)",
+      '    case "$2" in',
+      "      invoke)",
+      // Walk args to find outfile and hasquery flag
+      "        prev=''",
+      "        outfile=''",
+      "        hasquery=0",
+      "        for arg in \"$@\"; do",
+      "          if [ \"$arg\" = \"--output\" ]; then outfile=\"$prev\"; break; fi",
+      "          if [ \"$arg\" = \"--query\" ]; then hasquery=1; fi",
+      "          prev=\"$arg\"",
+      "        done",
+      `        if [ -n "$outfile" ]; then printf '%s' ${shellQuote(INVOKE_PAYLOAD_OK)} > "$outfile"; fi`,
+      // When --query present: emit non-JSON (simulates edge case that bypasses curated parse)
+      "        if [ \"$hasquery\" = \"1\" ]; then",
+      "          printf '%s' 'not-valid-json-at-all'",
+      "        else",
+      `          printf '%s' ${shellQuote(INVOKE_METADATA_OK)}`,
+      "        fi",
+      "        exit 0;;",
+      "      *)",
+      '        printf "Unexpected lambda sub-op: %s\\n" "$2" >&2',
+      "        exit 254;;",
+      "    esac;;",
+      "  *)",
+      '    printf "Unexpected service: %s\\n" "$1" >&2',
+      "    exit 254;;",
+      "esac",
+    ].join("\n");
+
+    writeFileSync(scriptPath, script);
+    chmodSync(scriptPath, 0o755);
+
+    const { output, exitCode } = await captureMain(
+      ["lambda", "invoke", "--function-name", FN_NAME, "--query", "StatusCode"],
+      { PATH: `${dir}:${process.env["PATH"] ?? ""}` },
+    );
+
+    // Must exit non-zero (UNKNOWN error = exit 255)
+    expect(exitCode).toBe(255);
+    // Must surface our curated message, not a raw SyntaxError
+    expect(output).toContain("Unexpected aws lambda invoke output");
+    // Must NOT leak the raw JS parse error
+    expect(output).not.toContain("JSON Parse error");
+    expect(output).not.toContain("SyntaxError");
+  });
+});
+
+// ─── LAMBDA_HELP: invoke --query payload-loss warning ────────────────────────
+//
+// When --query is used, the AWS CLI strips the response payload from the
+// metadata stdout (JMESPath applies only to metadata). aws-axi discards the
+// temp outfile in `finally`, so the payload is silently lost. An agent that
+// needs the response body would re-invoke — which is dangerous for non-
+// idempotent functions.
+//
+// The help text must document this plainly so an agent cannot walk into the
+// double-invoke footgun.
+
+describe("LAMBDA_HELP — invoke --query payload-loss warning", () => {
+  it("documents that --query applies to metadata only and payload is not retained", () => {
+    expect(LAMBDA_HELP).toContain("payload is not retained");
   });
 });

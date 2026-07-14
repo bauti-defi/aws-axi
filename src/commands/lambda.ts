@@ -208,6 +208,9 @@ flags (invoke):
   --payload <json>            Raw JSON input payload (CLI v2: passes raw-in-base64-out automatically)
   --invocation-type <type>    RequestResponse|Event|DryRun (default: RequestResponse)
   --log-type <type>           None|Tail — Tail returns last 4 KB of logs
+  note: --query applies to invocation metadata (StatusCode, ExecutedVersion,
+        FunctionError) only — the response payload is not retained. Invoke
+        without --query to receive the response payload.
 
 examples:
   aws-axi lambda
@@ -599,7 +602,14 @@ async function runInvoke(
     // response; stdout contains the projected result (unknown shape). Attempting
     // to project it again through our curated schema would null every field.
     if (hasQuery) {
-      return JSON.parse(metadataResult.stdout.trim()) as Record<string, unknown>;
+      try {
+        return JSON.parse(metadataResult.stdout.trim()) as Record<string, unknown>;
+      } catch {
+        throw new AxiError(
+          `Unexpected aws lambda invoke output: ${metadataResult.stdout.slice(0, 200)}`,
+          "UNKNOWN",
+        );
+      }
     }
 
     // Parse invocation metadata from stdout
