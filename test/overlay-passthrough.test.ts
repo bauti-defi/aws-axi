@@ -1857,3 +1857,275 @@ describe("ec2 --query cap bypass — --max-items NOT forwarded when --query acti
     expect(exitCode).toBeUndefined();
   });
 });
+
+// ── Re-cap guard: --query + explicit cap → cap IS forwarded ──────────────────
+//
+// ADR-0002 "re-cap" half: when --query is present AND the caller explicitly
+// supplies a cap flag (--max-items N on most overlays; --limit N on logs),
+// that explicit cap MUST still reach the child process — botocore honors it
+// as a hard limit on the total auto-paged result.
+//
+// Mutation proof: deleting `|| explicitMaxItems` from kms.ts:runListKeys,
+// kms.ts:runListAliases, and lambda.ts:runListFunctions turns those three
+// tests RED (the others prove similar mutations in their own overlays).
+//
+// Guard-stub approach: the stub exits 1 if `--max-items` is ABSENT from argv.
+//   RED  (mutated): explicit cap removed from code → --max-items absent from
+//     child argv → stub exits 1 → exitCode non-zero → expect(exitCode).toBeUndefined() FAILS.
+//   GREEN (correct): cap still pushed → --max-items present → stub exits 0 → PASSES.
+//
+// Note on IAM: iam does not own --max-items (it flows via passthrough, not an
+// explicit push), so the re-cap is structurally different — the guard test for
+// iam is a regression gate against future changes that might own the flag
+// without forwarding it.
+
+describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", () => {
+  // ── KMS ×2 ────────────────────────────────────────────────────────────────
+
+  it("kms list-keys --query --max-items 5: --max-items forwarded to child", async () => {
+    // list-keys returns early when hasQuery=true (no secondary list-aliases call),
+    // so the guard stub is only invoked once.
+    //
+    // Mutation: delete `|| explicitMaxItems` in kms.ts runListKeys:
+    //   `!hasQuery || false` → cap skipped → stub exits 1 → RED.
+    const binary = createArgGuardStub({
+      requiredArg: "--max-items",
+      validStdout: JSON.stringify(["key-id-1"]),
+    });
+
+    const { exitCode } = await captureMain(
+      ["kms", "list-keys", "--query", "Keys[].KeyId", "--max-items", "5"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("kms list-aliases --query --max-items 5: --max-items forwarded to child", async () => {
+    // Mutation: delete `|| explicitMaxItems` in kms.ts runListAliases → RED.
+    const binary = createArgGuardStub({
+      requiredArg: "--max-items",
+      validStdout: JSON.stringify(["alias/my-key"]),
+    });
+
+    const { exitCode } = await captureMain(
+      [
+        "kms",
+        "list-aliases",
+        "--query",
+        "Aliases[].AliasName",
+        "--max-items",
+        "5",
+      ],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+
+  // ── Lambda ────────────────────────────────────────────────────────────────
+
+  it("lambda list-functions --query --max-items 5: --max-items forwarded to child", async () => {
+    // Mutation: delete `|| explicitMaxItems` in lambda.ts runListFunctions → RED.
+    const binary = createArgGuardStub({
+      requiredArg: "--max-items",
+      validStdout: JSON.stringify(["fn-a"]),
+    });
+
+    const { exitCode } = await captureMain(
+      [
+        "lambda",
+        "list-functions",
+        "--query",
+        "Functions[].FunctionName",
+        "--max-items",
+        "5",
+      ],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+
+  // ── Secrets ───────────────────────────────────────────────────────────────
+
+  it("secretsmanager list-secrets --query --max-items 5: --max-items forwarded to child", async () => {
+    const binary = createArgGuardStub({
+      requiredArg: "--max-items",
+      validStdout: JSON.stringify(["secret-a"]),
+    });
+
+    const { exitCode } = await captureMain(
+      [
+        "secretsmanager",
+        "list-secrets",
+        "--query",
+        "SecretList[].Name",
+        "--max-items",
+        "5",
+      ],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+
+  // ── SSM ×2 ────────────────────────────────────────────────────────────────
+
+  it("ssm get-parameters-by-path --query --max-items 5: --max-items forwarded to child", async () => {
+    const binary = createArgGuardStub({
+      requiredArg: "--max-items",
+      validStdout: JSON.stringify(["/my/app/key"]),
+    });
+
+    const { exitCode } = await captureMain(
+      [
+        "ssm",
+        "get-parameters-by-path",
+        "--path",
+        "/my/app",
+        "--query",
+        "Parameters[].Name",
+        "--max-items",
+        "5",
+      ],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("ssm describe-parameters --query --max-items 5: --max-items forwarded to child", async () => {
+    const binary = createArgGuardStub({
+      requiredArg: "--max-items",
+      validStdout: JSON.stringify(["/my/app/key"]),
+    });
+
+    const { exitCode } = await captureMain(
+      [
+        "ssm",
+        "describe-parameters",
+        "--query",
+        "Parameters[].Name",
+        "--max-items",
+        "5",
+      ],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+
+  // ── EC2 ───────────────────────────────────────────────────────────────────
+
+  it("ec2 describe-vpcs --query --max-items 5: --max-items forwarded to child", async () => {
+    const binary = createArgGuardStub({
+      requiredArg: "--max-items",
+      validStdout: JSON.stringify(["vpc-abc123"]),
+    });
+
+    const { exitCode } = await captureMain(
+      ["ec2", "describe-vpcs", "--query", "Vpcs[].VpcId", "--max-items", "5"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+
+  // ── IAM ───────────────────────────────────────────────────────────────────
+
+  it("iam list-roles --query --max-items 5: --max-items forwarded via passthrough", async () => {
+    // IAM does not own --max-items (no extractFlag call) — it flows verbatim via
+    // passthrough. Guard verifies it still reaches the child.
+    const binary = createArgGuardStub({
+      requiredArg: "--max-items",
+      validStdout: JSON.stringify(["role-a"]),
+    });
+
+    const { exitCode } = await captureMain(
+      ["iam", "list-roles", "--query", "Roles[].RoleName", "--max-items", "5"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+
+  // ── Logs ×2 (includes Blocker 1: --limit=<n> equals form) ────────────────
+  //
+  // logs uses --limit (not --max-items) as the user-facing cap flag; tailRun
+  // and describeLogGroupsRun translate it to --max-items for the child call.
+  //
+  // Blocker 1 fix: pullFlag now handles the --limit=3 equals form.
+  //   Before fix: --limit=3 not parsed → options.limit=undefined
+  //     → guard `!hasQuery || undefined` = false → --max-items not pushed
+  //     → stub exits 1 → exitCode non-zero → test RED.
+  //   After fix: --limit=3 parsed as limit=3
+  //     → guard `!hasQuery || 3!==undefined` = true → --max-items 3 pushed
+  //     → stub exits 0 → test GREEN.
+
+  it("logs tail --query --limit 3 (space form): --max-items 3 forwarded to child", async () => {
+    const binary = createArgGuardStub({
+      requiredArg: "--max-items",
+      validStdout: JSON.stringify({ events: [] }),
+    });
+
+    const { exitCode } = await captureMain(
+      [
+        "logs",
+        "tail",
+        "/test/log-group",
+        "--query",
+        "events[0].message",
+        "--limit",
+        "3",
+      ],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("logs tail --query --limit=3 (equals form, Blocker 1): --max-items 3 forwarded to child", async () => {
+    // RED  (before pullFlag fix): --limit=3 not parsed → options.limit=undefined
+    //   → guard false → --max-items not pushed → stub exits 1 → FAILS.
+    // GREEN (after pullFlag fix): --limit=3 → limit=3 → --max-items 3 pushed → PASSES.
+    const binary = createArgGuardStub({
+      requiredArg: "--max-items",
+      validStdout: JSON.stringify({ events: [] }),
+    });
+
+    const { exitCode } = await captureMain(
+      [
+        "logs",
+        "tail",
+        "/test/log-group",
+        "--query",
+        "events[0].message",
+        "--limit=3",
+      ],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("logs describe-log-groups --query --limit=3 (equals form): --max-items 3 forwarded to child", async () => {
+    const binary = createArgGuardStub({
+      requiredArg: "--max-items",
+      validStdout: JSON.stringify({ logGroups: [] }),
+    });
+
+    const { exitCode } = await captureMain(
+      [
+        "logs",
+        "describe-log-groups",
+        "--query",
+        "logGroups[].logGroupName",
+        "--limit=3",
+      ],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+});

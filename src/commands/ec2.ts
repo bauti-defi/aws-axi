@@ -195,7 +195,9 @@ passthrough flags:
 
   --query <jmespath>   JMESPath expression applied by aws CLI; the overlay's curated
                        projection is bypassed when --query is present and the raw
-                       queried result is returned instead.
+                       queried result is returned instead. Output is unbounded
+                       (botocore auto-pages all results; default cap suppressed).
+                       To bound output, pass --max-items N.
   --output <format>    Stripped (output is always TOON; --output has no effect).
 
 global flags:

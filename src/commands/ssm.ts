@@ -305,7 +305,9 @@ flags (get-command-invocation):
   --command-id <id>      SSM CommandId to query
   --instance-id <id>     Target instance ID
   --wait                 Poll to terminal state before returning (default: single call)
-  --query <expr>         JMESPath; bypasses overlay projection, returns raw result
+  --query <expr>         JMESPath; bypasses overlay projection, returns raw result.
+                         Output is unbounded (botocore auto-pages all results; default
+                         cap suppressed). To bound output, pass --max-items N.
 
 flags (overlay-specific, all subcommands):
   --profile <name>       AWS profile (inherited from global --profile)

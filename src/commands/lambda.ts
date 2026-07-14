@@ -196,7 +196,9 @@ subcommands (enriched overlays):
 flags (overlay-specific):
   --profile <name>            AWS profile (inherited from global --profile)
   --region <region>           AWS region  (inherited from global --region)
-  --query <expr>              JMESPath; bypasses overlay projection, returns raw result
+  --query <expr>              JMESPath; bypasses overlay projection, returns raw result.
+                              Output is unbounded (botocore auto-pages all results;
+                              default cap suppressed). To bound output, pass --max-items N.
   --output                    stripped (aws-axi always uses --output json internally)
 
 flags (list-functions):

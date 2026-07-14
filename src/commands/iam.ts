@@ -163,7 +163,9 @@ flags (overlay-specific):
   --profile <name>   AWS profile to use
   --region <region>  AWS region to use
   --next-token <tok> resume a truncated list (pass nextToken from prior result)
-  --query <expr>     JMESPath expression; bypasses overlay projection, returns raw result
+  --query <expr>     JMESPath expression; bypasses overlay projection, returns raw result.
+                     Output is unbounded (botocore auto-pages all results; default cap
+                     suppressed). To bound output, pass --max-items N.
   --output           stripped (aws-axi always uses --output json internally)
 
 examples:

@@ -141,17 +141,36 @@ function toISO(epochMs: number): string {
  * Pull a named flag and its value from an args array, returning the value and
  * a new array with both the flag and its value removed.
  *
+ * Accepts both forms:
+ *   --flag value   (space-separated)
+ *   --flag=value   (equals-separated)
+ *
  * Returns `[undefined, originalCopy]` when the flag is absent.
+ *
+ * Mirrors `extractFlag` in kms.ts so every flag form that agents commonly use
+ * is handled correctly.
  */
 function pullFlag(
   args: readonly string[],
   flag: string,
 ): [string | undefined, string[]] {
-  const idx = args.indexOf(flag);
-  if (idx === -1) return [undefined, [...args]];
-  const value = args[idx + 1];
-  const remaining = [...args.slice(0, idx), ...args.slice(idx + 2)];
-  return [value, remaining];
+  const eqPrefix = `${flag}=`;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] ?? "";
+    // --flag value (space-separated form)
+    if (arg === flag && i + 1 < args.length) {
+      const value = args[i + 1];
+      const remaining = [...args.slice(0, i), ...args.slice(i + 2)];
+      return [value, remaining];
+    }
+    // --flag=value (equals-separated form)
+    if (arg.startsWith(eqPrefix)) {
+      const value = arg.slice(eqPrefix.length);
+      const remaining = [...args.slice(0, i), ...args.slice(i + 1)];
+      return [value, remaining];
+    }
+  }
+  return [undefined, [...args]];
 }
 
 // ─── tail ─────────────────────────────────────────────────────────────────────
@@ -456,7 +475,9 @@ flags (tail / filter):
   --stream <name>       Restrict to a specific log stream (tail only)
   --pattern <p>         CloudWatch Logs filter pattern (tail only; filter takes it positionally)
   --next-token <tok>    Resume from a previous --next-token value
-  --query <expr>        JMESPath; bypasses overlay projection, returns raw result
+  --query <expr>        JMESPath; bypasses overlay projection, returns raw result.
+                        Output is unbounded (botocore auto-pages all results; default
+                        cap suppressed). To bound output, pass --limit N.
   --output              stripped (aws-axi always uses --output json internally)
 
 flags (describe-log-groups):

@@ -95,6 +95,6 @@ Run \`npx -y aws-axi --help\` for global flags, or \`npx -y aws-axi <command> --
 - Mutations are idempotent and report what changed; re-running a failed operation is safe.
 - Use \`npx -y aws-axi whoami\` as the first call in any session to confirm identity before making changes.
 - **Overlay superset contract**: enriched overlays accept all flags the real \`aws\` CLI accepts — overlays change the *output*, never restrict the *input*. Unknown flags (\`--filters\`, \`--path-prefix\`, \`--grant-tokens\`, etc.) are forwarded verbatim. One exception: \`--output\` is stripped (aws-axi forces \`--output json\` internally and reformats as TOON; passing \`--output text\` has no effect).
-- **\`--query\` bypass**: \`--query\` is forwarded to the underlying \`aws\` call; when present, aws-axi returns the raw JMESPath result instead of the curated TOON projection.
+- **\`--query\` bypass**: \`--query\` is forwarded to the underlying \`aws\` call; when present, aws-axi returns the raw JMESPath result instead of the curated TOON projection. Output is **unbounded** — botocore auto-pages all results (the default cap is suppressed). To bound output size when using \`--query\`, pass \`--max-items N\` (or \`--limit N\` on \`logs\`).
 `;
 }
