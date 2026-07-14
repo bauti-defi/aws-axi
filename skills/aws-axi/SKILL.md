@@ -52,4 +52,3 @@ Run `npx -y aws-axi --help` for global flags, or `npx -y aws-axi <command> --hel
 - Use `npx -y aws-axi whoami` as the first call in any session to confirm identity before making changes.
 - **Overlay superset contract**: enriched overlays accept all flags the real `aws` CLI accepts — overlays change the *output*, never restrict the *input*. Unknown flags (`--filters`, `--path-prefix`, `--grant-tokens`, etc.) are forwarded verbatim. One exception: `--output` is stripped (aws-axi forces `--output json` internally and reformats as TOON; passing `--output text` has no effect).
 - **`--query` bypass**: `--query` is forwarded to the underlying `aws` call; when present, aws-axi returns the raw JMESPath result instead of the curated TOON projection.
-- HAND-EDITED: this line was added directly to SKILL.md — the --check drift assertion must catch this.
