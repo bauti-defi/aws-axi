@@ -96,8 +96,11 @@ generic engine (correct, structured, capped) — it just isn't curated.
 real `aws` CLI's. Any flag the underlying `aws` operation accepts is forwarded verbatim to the child
 `aws` invocation. The overlay changes the *output*, never restricts the *input*. Two flags are handled
 specially: `--output` is stripped (the exec seam always appends `--output json`); `--query` is
-forwarded but bypasses the overlay's curated projection, returning the raw JMESPath result as-is.
-Two deliberate named exceptions exist for `s3 ls` (see below).
+forwarded verbatim, bypasses the overlay's curated projection (result shape is unknown), and
+suppresses the overlay's default `--max-items` cap (JMESPath projects `NextToken` away, so
+botocore auto-pages to the complete result without a cap). An explicit `--max-items` you supply
+yourself is still honored. These two bypass behaviors apply to **all** enriched overlays and the
+generic engine. Two deliberate named exceptions exist for `s3 ls` (see below).
 
 > **S3 `ls` flag handling.** `s3 ls` rewrites to `s3api` internally. Dispositions per flag × path:
 >
@@ -196,7 +199,8 @@ apart from the `aws-axi` prefix. Where the ergonomics differ, here is the map bo
   `.env`, use `bun --no-env-file bin/aws-axi.ts` to get the same isolation.)
 - **Overlay superset** — any flag the underlying `aws` operation accepts is forwarded verbatim. Overlays
   change the output, never restrict the input. Exception: `--output` is stripped (always `json` internally);
-  `--query` is forwarded but bypasses the overlay's curated projection, returning the raw JMESPath result.
+  `--query` is forwarded verbatim, bypasses the overlay's curated projection, and suppresses the
+  default `--max-items` cap (botocore auto-pages to completion; explicit `--max-items` still wins).
 
 ## Reporting issues
 

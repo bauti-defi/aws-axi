@@ -195,7 +195,9 @@ passthrough flags:
 
   --query <jmespath>   JMESPath expression applied by aws CLI; the overlay's curated
                        projection is bypassed when --query is present and the raw
-                       queried result is returned instead.
+                       queried result is returned instead. Output is unbounded
+                       (botocore auto-pages all results; default cap suppressed).
+                       To bound output, pass --max-items N.
   --output <format>    Stripped (output is always TOON; --output has no effect).
 
 global flags:
@@ -608,16 +610,23 @@ export async function ec2Run(
   // --query bypass: JMESPath is applied by the aws CLI before we see the JSON,
   // so the response shape is unknown and the overlay CANNOT safely project it.
   // Forward everything to aws and return the raw queried result.
+  //
+  // ADR-0002 cap bypass: when --query is active and the caller did NOT supply
+  // an explicit --max-items, skip the overlay's default cap. JMESPath projects
+  // NextToken away; the default cap would cause silent truncation with no signal.
+  // Without --max-items, botocore auto-pages to completion. An explicit
+  // --max-items from the caller (normalizedOptions.maxItems !== undefined) is
+  // always honored — last-wins semantics stay in place.
   if (normalizedOptions.hasQuery === true) {
-    const awsArgs = [
-      "ec2",
-      op,
-      ...buildPaginationArgs({
-        maxItems: normalizedOptions.maxItems ?? DEFAULT_MAX_ITEMS,
-        nextToken: normalizedOptions.nextToken,
-      }),
-      ...(normalizedOptions.passthrough ?? []),
-    ];
+    const awsArgs: string[] = ["ec2", op];
+    // Only inject --max-items when the user explicitly provided it.
+    if (normalizedOptions.maxItems !== undefined) {
+      awsArgs.push("--max-items", String(normalizedOptions.maxItems));
+    }
+    if (normalizedOptions.nextToken !== undefined) {
+      awsArgs.push("--starting-token", normalizedOptions.nextToken);
+    }
+    awsArgs.push(...(normalizedOptions.passthrough ?? []));
     return awsJson<Record<string, unknown>>(awsArgs, {
       binary: normalizedOptions.binary,
       context: normalizedOptions.context,

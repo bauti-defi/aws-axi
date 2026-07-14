@@ -100,6 +100,20 @@ function hasMaxItemsFlag(args: readonly string[]): boolean {
 }
 
 /**
+ * Return true if --query is present in args.
+ *
+ * --query contract (ADR-0002): JMESPath is applied by the aws CLI before the
+ * response reaches the engine. The result shape is unknown and may be an
+ * array — the engine MUST skip its cap and its curated projection when --query
+ * is active. Without --max-items, botocore auto-pages to completion (same
+ * semantics as real `aws`); the caller keeps an explicit re-cap by supplying
+ * their own --max-items (last-wins).
+ */
+function hasQueryFlag(args: readonly string[]): boolean {
+  return args.some((a) => a === "--query" || a.startsWith("--query="));
+}
+
+/**
  * Format the distilled signature for a USAGE_ERROR message.
  * Gives the agent a compact view of what the operation expects.
  */
@@ -209,7 +223,15 @@ export async function engineRun(
   const paginator = getPaginator(model, pascalKey);
   const awsArgs: string[] = [service, operation, ...cleanedArgs];
 
-  if (paginator !== undefined && !hasMaxItemsFlag(cleanedArgs)) {
+  // --query bypass (ADR-0002): when --query is active, JMESPath is applied by
+  // the aws CLI before the response reaches us. The result shape is unknown
+  // (may be an array), so we skip the overlay's default cap AND its curated
+  // projection. Without --max-items, botocore auto-pages the complete result.
+  // The caller retains an explicit re-cap via --max-items N (last-wins):
+  // hasMaxItemsFlag gates on the user-supplied value already present in
+  // cleanedArgs, so an explicit --max-items + --query combination is honored.
+  const queryActive = hasQueryFlag(cleanedArgs);
+  if (paginator !== undefined && !hasMaxItemsFlag(cleanedArgs) && !queryActive) {
     awsArgs.push("--max-items", String(maxItemsCap));
   }
 
@@ -238,6 +260,12 @@ export async function engineRun(
   }
 
   // ── 6. Project output ──────────────────────────────────────────────────────
+  // --query bypass: JMESPath was applied by the aws CLI; skip curated
+  // projection. The result shape is unknown and may be an array — returning
+  // raw is the only safe option (mirrors the per-overlay hasQuery pattern).
+  if (queryActive) {
+    return raw;
+  }
   return projectOutput(raw, paginator, service, operation);
 }
 

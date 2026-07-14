@@ -196,7 +196,9 @@ subcommands (enriched overlays):
 flags (overlay-specific):
   --profile <name>            AWS profile (inherited from global --profile)
   --region <region>           AWS region  (inherited from global --region)
-  --query <expr>              JMESPath; bypasses overlay projection, returns raw result
+  --query <expr>              JMESPath; bypasses overlay projection, returns raw result.
+                              Output is unbounded (botocore auto-pages all results;
+                              default cap suppressed). To bound output, pass --max-items N.
   --output                    stripped (aws-axi always uses --output json internally)
 
 flags (list-functions):
@@ -399,6 +401,9 @@ async function resolveVpcConfig(
 async function runListFunctions(
   options: LambdaRunOptions,
 ): Promise<{ functions: LambdaListResult } | Record<string, unknown>> {
+  // Track whether --max-items was explicitly provided before extractMaxItems
+  // returns the default — needed for the --query bypass check below.
+  const explicitMaxItems = extractFlag(options.args, "--max-items") !== undefined;
   const maxItems = extractMaxItems(options.args);
   const nextTokenArg = extractFlag(options.args, "--next-token");
   const runOpts = toRunOpts(options);
@@ -407,7 +412,12 @@ async function runListFunctions(
   const rawPassthrough = collectPassthroughFlags(options.args, ["--max-items", "--next-token"], undefined, { service: "lambda", operation: "list-functions" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
-  const awsArgs: string[] = ["lambda", "list-functions", "--max-items", String(maxItems)];
+  // --query bypass (ADR-0002): skip the overlay's default cap when --query is
+  // active and no explicit --max-items was given. Explicit --max-items is honored.
+  const awsArgs: string[] = ["lambda", "list-functions"];
+  if (!hasQuery || explicitMaxItems) {
+    awsArgs.push("--max-items", String(maxItems));
+  }
   if (nextTokenArg !== undefined) {
     awsArgs.push("--starting-token", nextTokenArg);
   }

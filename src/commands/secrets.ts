@@ -158,7 +158,9 @@ flags (overlay-specific):
   --profile <name>      AWS profile (inherited from global --profile)
   --region <region>     AWS region  (inherited from global --region)
   --reveal              Show actual secret value (get-secret-value only)
-  --query <expr>        JMESPath; bypasses overlay projection, returns raw result
+  --query <expr>        JMESPath; bypasses overlay projection, returns raw result.
+                        Output is unbounded (botocore auto-pages all results; default
+                        cap suppressed). To bound output, pass --max-items N.
   --output              stripped (aws-axi always uses --output json internally)
 
 flags (list-secrets):
@@ -362,6 +364,9 @@ async function runGetSecretValue(
 async function runListSecrets(
   options: SecretsRunOptions,
 ): Promise<{ secretList: SecretsListResult } | Record<string, unknown>> {
+  // Track whether --max-items was explicitly provided before extractMaxItems
+  // returns the default — needed for the --query bypass check below.
+  const explicitMaxItems = extractFlag(options.args, "--max-items") !== undefined;
   const maxItems = extractMaxItems(options.args);
   const nextTokenArg = extractFlag(options.args, "--next-token");
 
@@ -369,12 +374,12 @@ async function runListSecrets(
   const rawPassthrough = collectPassthroughFlags(options.args, ["--max-items", "--next-token"], undefined, { service: "secretsmanager", operation: "list-secrets" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
-  const awsArgs = [
-    "secretsmanager",
-    "list-secrets",
-    "--max-items",
-    String(maxItems),
-  ];
+  // --query bypass (ADR-0002): skip the overlay's default cap when --query is
+  // active and no explicit --max-items was given. Explicit --max-items is honored.
+  const awsArgs: string[] = ["secretsmanager", "list-secrets"];
+  if (!hasQuery || explicitMaxItems) {
+    awsArgs.push("--max-items", String(maxItems));
+  }
   if (nextTokenArg !== undefined) {
     awsArgs.push("--starting-token", nextTokenArg);
   }

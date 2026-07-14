@@ -305,13 +305,16 @@ flags (get-command-invocation):
   --command-id <id>      SSM CommandId to query
   --instance-id <id>     Target instance ID
   --wait                 Poll to terminal state before returning (default: single call)
-  --query <expr>         JMESPath; bypasses overlay projection, returns raw result
 
 flags (overlay-specific, all subcommands):
   --profile <name>       AWS profile (inherited from global --profile)
   --region <region>      AWS region  (inherited from global --region)
   --reveal               Show actual parameter values (default: redacted; alias for --with-decryption)
   --output               stripped (aws-axi always uses --output json internally)
+  --query <expr>         JMESPath; bypasses overlay projection, returns raw result.
+                         Output is unbounded (botocore auto-pages all results; default
+                         cap suppressed — applies to describe-parameters and
+                         get-parameters-by-path). To bound output, pass --max-items N.
 
 flags (list operations):
   --max-items <n>        Cap results per page (default: ${MAX_ITEMS_DEFAULT})
@@ -919,6 +922,9 @@ async function runGetParametersByPath(
     );
   }
 
+  // Track whether --max-items was explicitly provided before extractMaxItems
+  // returns the default — needed for the --query bypass check below.
+  const explicitMaxItems = extractFlag(options.args, "--max-items") !== undefined;
   const maxItems = extractMaxItems(options.args);
   const nextTokenArg = extractFlag(options.args, "--next-token");
 
@@ -931,14 +937,12 @@ async function runGetParametersByPath(
   );
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
-  const awsArgs = [
-    "ssm",
-    "get-parameters-by-path",
-    "--path",
-    pathArg,
-    "--max-items",
-    String(maxItems),
-  ];
+  // --query bypass (ADR-0002): skip the overlay's default cap when --query is
+  // active and no explicit --max-items was given. Explicit --max-items is honored.
+  const awsArgs: string[] = ["ssm", "get-parameters-by-path", "--path", pathArg];
+  if (!hasQuery || explicitMaxItems) {
+    awsArgs.push("--max-items", String(maxItems));
+  }
   if (reveal) {
     awsArgs.push("--with-decryption");
   }
@@ -982,6 +986,9 @@ async function runGetParametersByPath(
 async function runDescribeParameters(
   options: SsmRunOptions,
 ): Promise<{ parametersMeta: SsmDescribeParametersResult } | Record<string, unknown>> {
+  // Track whether --max-items was explicitly provided before extractMaxItems
+  // returns the default — needed for the --query bypass check below.
+  const explicitMaxItems = extractFlag(options.args, "--max-items") !== undefined;
   const maxItems = extractMaxItems(options.args);
   const nextTokenArg = extractFlag(options.args, "--next-token");
 
@@ -989,7 +996,12 @@ async function runDescribeParameters(
   const rawPassthrough = collectPassthroughFlags(options.args, ["--max-items", "--next-token"], undefined, { service: "ssm", operation: "describe-parameters" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
-  const awsArgs = ["ssm", "describe-parameters", "--max-items", String(maxItems)];
+  // --query bypass (ADR-0002): skip the overlay's default cap when --query is
+  // active and no explicit --max-items was given. Explicit --max-items is honored.
+  const awsArgs: string[] = ["ssm", "describe-parameters"];
+  if (!hasQuery || explicitMaxItems) {
+    awsArgs.push("--max-items", String(maxItems));
+  }
   if (nextTokenArg !== undefined) {
     awsArgs.push("--starting-token", nextTokenArg);
   }
