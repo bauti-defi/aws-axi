@@ -67,13 +67,27 @@ even without a botocore model. Each sub-operation forwards the collected passthr
 to the underlying `aws s3api` (for `ls`, `head-object`, `create-bucket`) or
 `aws s3` (for `cp`, `rm`) invocation.
 
-**Scope boundary for S3:** `s3 ls` and `s3 head-object` rewrite to `s3api`
-operations. High-level `aws s3` flags that have no `s3api` counterpart (e.g.
-`--recursive` on `s3 ls`) are forwarded verbatim but may cause the underlying
-`s3api` call to fail — this is the correct behavior (the error comes from the
-authoritative CLI). `s3 cp` and `s3 rm` use `aws s3` high-level commands, so
+**S3 flag contract:** `s3 cp` and `s3 rm` use `aws s3` high-level commands, so
 `aws s3`-level flags (`--recursive`, `--sse`, `--storage-class`, `--exclude`,
 `--include`) are valid passthrough for those sub-commands.
+
+`s3 ls` and `s3 head-object` rewrite to `s3api` operations. Each `aws s3`-level
+flag is handled explicitly so it is never blindly forwarded into a child that
+will reject it:
+
+| Flag | Sub-cmd | Disposition |
+|---|---|---|
+| `--recursive` | `s3 ls` | **Absorbed** (owned bool flag). `list-objects-v2` already returns all objects by default — no `--delimiter` means recursive by construction. |
+| `--human-readable` | `s3 ls` | **USAGE_ERROR**. Display-only flag, no `s3api` equivalent. Clean overlay-level error with a hint. |
+| `--summarize` | `s3 ls` | **USAGE_ERROR**. Display-only flag, no `s3api` equivalent. Hint: use `--query 'length(Contents)'`. |
+| `--page-size` | `s3 ls` | **Forwarded verbatim**. Valid `s3api list-objects-v2` flag. |
+| `--request-payer` | `s3 ls` | **Forwarded verbatim**. Valid `s3api list-objects-v2` flag. |
+| `--recursive` | `s3 head-object` | **USAGE_ERROR**. `head-object` fetches metadata for a single key; recursion is not applicable. |
+
+This closes the scope boundary that was disclosed in PR #36 (issue #38). The
+superset invariant now holds for all `s3 ls` and `s3 head-object` inputs: any
+command the real CLI accepts either passes through, translates faithfully, or
+fails with a clean USAGE_ERROR — never an opaque child exit 252.
 
 Both helpers are composed: `collectPassthroughFlags` produces the raw passthrough
 list; `buildPassthrough` strips `--output` and detects `--query`.

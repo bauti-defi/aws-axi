@@ -963,3 +963,204 @@ describe("--query bypass at captureMain level — ssm/kms/lambda/secrets/s3-head
     expect(output).toContain(MARKER);
   });
 });
+
+// ── s3 ls flag translation — issue #38 ───────────────────────────────────────
+//
+// s3 ls rewrites to s3api list-objects-v2. Before the fix, aws s3-level flags
+// (--recursive, --human-readable, --summarize) were forwarded verbatim into the
+// s3api child, which rejected them with an opaque exit 252.
+//
+// The fix:
+//   - --recursive: absorbed as an overlay-owned boolean (list-objects-v2 already
+//     returns all objects; no delimiter = recursive by default). NOT forwarded.
+//   - --human-readable: intercepted with a clean USAGE_ERROR.
+//   - --summarize: intercepted with a clean USAGE_ERROR.
+//   - --page-size: valid s3api flag; forwarded verbatim (already works, verified
+//     still works after the fix so we don't regress).
+//
+// Revert-proof: revert the fix (remove --recursive from ownedBoolFlags, remove
+// --human-readable / --summarize USAGE_ERROR guards) → tests below go RED.
+
+/**
+ * Stub that FAILS (exits 1) if `rejectedArg` appears anywhere in its argv.
+ * Exits 0 with validStdout otherwise.
+ */
+function createRejectArgStub(spec: {
+  rejectedArg: string;
+  validStdout: string;
+}): string {
+  const dir = mkdtempSync(join(tmpdir(), "aws-axi-reject-"));
+  tempDirs.push(dir);
+  const p = join(dir, "aws");
+  const script = [
+    "#!/bin/sh",
+    "for arg in \"$@\"; do",
+    `  if [ "$arg" = ${shellQuote(spec.rejectedArg)} ]; then`,
+    `    printf 'REJECTED: %s must NOT be forwarded to s3api\\n' ${shellQuote(spec.rejectedArg)} >&2`,
+    "    exit 252",
+    "  fi",
+    "done",
+    `printf '%s' ${shellQuote(spec.validStdout)}`,
+    "exit 0",
+  ].join("\n");
+  writeFileSync(p, script);
+  chmodSync(p, 0o755);
+  return p;
+}
+
+/** Minimal list-objects-v2 response with one object. */
+const ONE_OBJECT_RESPONSE = JSON.stringify({
+  Contents: [
+    {
+      Key: "file.txt",
+      Size: 1024,
+      LastModified: "2024-01-01T00:00:00+00:00",
+      ETag: '"abc"',
+      StorageClass: "STANDARD",
+    },
+  ],
+  KeyCount: 1,
+  MaxKeys: 20,
+  IsTruncated: false,
+  Name: "bucket",
+  Prefix: "",
+});
+
+describe("s3 ls flag translation — #38", () => {
+  // ── --recursive: must be absorbed, never forwarded to s3api ──────────────
+  //
+  // Revert-proof: remove ["--recursive"] from ownedBoolFlags in the "ls" case
+  // of s3Command → --recursive reaches the stub → stub exits 252 → test fails.
+
+  it("s3 ls s3://b/ --recursive: --recursive is NOT forwarded to s3api child", async () => {
+    // Stub exits 252 if --recursive appears anywhere in its argv.
+    // Before fix: collectPassthroughFlags includes --recursive in passthrough
+    //             → forwarded → stub exits 252 → test fails.
+    // After fix:  --recursive is an owned bool flag, stripped before passthrough
+    //             → stub exits 0 → test passes.
+    const binary = createRejectArgStub({
+      rejectedArg: "--recursive",
+      validStdout: ONE_OBJECT_RESPONSE,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/", "--recursive"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).not.toContain("REJECTED");
+    expect(output).not.toContain("USAGE_ERROR");
+    // Overlay still returns enriched output
+    expect(output).toContain("objects");
+  });
+
+  it("s3 ls s3://b/ --recursive: returns enriched object listing (no spurious empty)", async () => {
+    // Regression guard: --recursive must not consume the s3:// URI as its value
+    // (positional-stripping prevents this). Also confirms the overlay projection
+    // still runs and produces the curated shape.
+    const binary = createStub({
+      stdout: ONE_OBJECT_RESPONSE,
+      exitCode: 0,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/", "--recursive"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).not.toContain("No objects found");
+    expect(output).toContain("file.txt");
+  });
+
+  // ── --human-readable: USAGE_ERROR (display-only flag, no s3api equivalent) ─
+  //
+  // Revert-proof: remove the --human-readable USAGE_ERROR guard in s3Command →
+  // --human-readable is forwarded to s3api list-objects-v2 → s3api exits 252
+  // with an opaque "Unknown options: --human-readable" → test expects a clean
+  // USAGE_ERROR from the overlay, not an opaque error from the child.
+
+  it("s3 ls --human-readable: overlay emits clean USAGE_ERROR (not an opaque s3api error)", async () => {
+    // The stub should never be called — the USAGE_ERROR is raised before we reach the child.
+    // We still provide a stub that fails loudly if called, to catch any regression where
+    // the check is moved after the child call.
+    const binary = createStub({ exitCode: 252, stderr: "Unknown options: --human-readable" });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/", "--human-readable"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    // Must have a non-zero exit code (USAGE_ERROR = 252)
+    expect(exitCode).toBeDefined();
+    // Output must contain a clear, overlay-generated error message — not the raw aws blob
+    expect(output).toContain("--human-readable");
+    // Must NOT be the opaque "Unknown options:" from s3api raw output
+    expect(output).not.toContain("Unknown options");
+  });
+
+  // ── --summarize: USAGE_ERROR (display-only flag, no s3api equivalent) ──────
+  //
+  // Revert-proof: same as --human-readable above.
+
+  it("s3 ls --summarize: overlay emits clean USAGE_ERROR (not an opaque s3api error)", async () => {
+    const binary = createStub({ exitCode: 252, stderr: "Unknown options: --summarize" });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/", "--summarize"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeDefined();
+    expect(output).toContain("--summarize");
+    expect(output).not.toContain("Unknown options");
+  });
+
+  // ── --page-size: valid s3api flag, must be forwarded verbatim ──────────────
+  //
+  // Verify that --page-size still reaches the child after the fix (i.e. our
+  // changes don't accidentally absorb it).
+
+  it("s3 ls s3://b/ --page-size 5: --page-size IS forwarded to s3api child", async () => {
+    const binary = createArgGuardStub({
+      requiredArg: "--page-size",
+      validStdout: ONE_OBJECT_RESPONSE,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/", "--page-size", "5"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).not.toContain("USAGE_ERROR");
+  });
+});
+
+// ── s3 head-object flag guard — issue #38 ────────────────────────────────────
+//
+// head-object maps to s3api head-object. If a user mistakenly passes an aws
+// s3 display flag (--recursive, --human-readable) to head-object, it must
+// produce a clean USAGE_ERROR rather than forwarding to s3api and dying with
+// an opaque "Unknown options" message.
+//
+// Revert-proof: remove the --recursive USAGE_ERROR guard in the "head-object"
+// case of s3Command → --recursive is forwarded to s3api head-object → stub
+// returns the opaque s3api error; test expects a clean overlay USAGE_ERROR.
+
+describe("s3 head-object flag guard — #38", () => {
+  it("s3 head-object --recursive: overlay emits clean USAGE_ERROR", async () => {
+    const binary = createStub({ exitCode: 252, stderr: "Unknown options: --recursive" });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "head-object", "--bucket", "b", "--key", "k", "--recursive"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeDefined();
+    expect(output).toContain("--recursive");
+    // Must be the overlay's own clean message, not the raw s3api "Unknown options" dump
+    expect(output).not.toContain("Unknown options");
+  });
+});

@@ -640,12 +640,39 @@ export async function s3Command(
 
   switch (subcommand) {
     case "ls": {
+      // Intercept aws s3-level display flags that have no s3api list-objects-v2
+      // equivalent. Forwarding them verbatim causes the s3api child to exit 252
+      // with an opaque "Unknown options" message — a worse experience than a
+      // clean overlay-level USAGE_ERROR.
+      if (hasFlag(rest, "--human-readable")) {
+        throw new AxiError(
+          "--human-readable is a display-only aws s3 ls flag with no s3api equivalent; aws-axi formats sizes in bytes automatically",
+          "USAGE_ERROR",
+          ["Remove --human-readable — aws-axi reports ContentLength as a plain integer"],
+        );
+      }
+      if (hasFlag(rest, "--summarize")) {
+        throw new AxiError(
+          "--summarize is a display-only aws s3 ls flag with no s3api equivalent",
+          "USAGE_ERROR",
+          [
+            "Remove --summarize",
+            "To count objects: aws-axi s3 ls s3://bucket/ --query 'length(Contents)'",
+          ],
+        );
+      }
+
       const prefix = rest.find((a) => a.startsWith("s3://"));
       const startingToken = parseFlag(rest, "--starting-token");
       // Strip the s3:// URI positional before collecting passthrough so the
       // heuristic cannot consume it as a boolean flag's value.
       const argsForPassthrough = stripPositionals(rest, prefix);
-      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, ["--starting-token"]);
+      // --recursive is an aws s3-level flag meaning "list all objects without a
+      // delimiter prefix grouping". list-objects-v2 already returns all objects
+      // by default (no --delimiter added), so --recursive is a semantic no-op
+      // here. Absorb it as an owned bool flag so it is never forwarded to s3api,
+      // which does not accept it and would exit 252.
+      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, ["--starting-token"], ["--recursive"]);
       const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
       const result = await s3LsRun({ prefix, startingToken, passthrough, hasQuery, context });
       return result as unknown as Record<string, unknown>;
@@ -706,6 +733,16 @@ export async function s3Command(
           "s3 head-object requires --bucket and --key",
           "USAGE_ERROR",
           ["Usage: aws-axi s3 head-object --bucket <name> --key <key>"],
+        );
+      }
+      // Intercept aws s3-level flags that have no s3api head-object equivalent.
+      // head-object fetches metadata for a single key; --recursive and display
+      // flags from the high-level aws s3 commands do not apply here.
+      if (hasFlag(rest, "--recursive")) {
+        throw new AxiError(
+          "--recursive is not valid for s3 head-object (head-object fetches metadata for a single key, not a prefix)",
+          "USAGE_ERROR",
+          ["Remove --recursive — head-object requires --bucket and --key for a single object"],
         );
       }
       // head-object maps to s3api head-object — all flags are named, no positionals.

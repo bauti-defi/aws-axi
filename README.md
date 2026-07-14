@@ -93,11 +93,19 @@ ends with contextual `help:` next-step hints.
 generic engine (correct, structured, capped) — it just isn't curated.
 
 **Overlay superset invariant.** Every enriched overlay's input contract is a strict *superset* of the
-real `aws` CLI's. Any flag the underlying `aws` operation accepts — `--filters`, `--path-prefix`,
-`--grant-tokens`, `--recursive`, etc. — is forwarded verbatim to the child `aws` invocation. The
-overlay changes the *output*, never restricts the *input*. Two flags are handled specially:
-`--output` is stripped (the exec seam always appends `--output json`); `--query` is forwarded but
-bypasses the overlay's curated projection, returning the raw JMESPath result as-is.
+real `aws` CLI's. Any flag the underlying `aws` operation accepts is forwarded verbatim to the child
+`aws` invocation. The overlay changes the *output*, never restricts the *input*. Two flags are handled
+specially: `--output` is stripped (the exec seam always appends `--output json`); `--query` is
+forwarded but bypasses the overlay's curated projection, returning the raw JMESPath result as-is.
+
+> **S3 `ls` flag note.** `s3 ls` rewrites to the `s3api list-objects-v2` API internally. Each
+> `aws s3 ls` flag is handled explicitly:
+> `--recursive` is **absorbed** (`list-objects-v2` already lists all objects without a delimiter, so
+> this flag is a semantic no-op — not forwarded to `s3api`, which does not accept it);
+> `--page-size` and `--request-payer` are **forwarded verbatim** (valid `s3api` flags);
+> `--human-readable` and `--summarize` produce a clean **USAGE_ERROR** (display-only flags with no
+> `s3api` equivalent). `s3 cp` and `s3 rm` use the high-level `aws s3` commands, so `--recursive`,
+> `--exclude`, `--include`, `--sse`, and `--storage-class` are valid passthrough for those.
 
 | Service          | Command            | Enriched overlay operations                                                                  | Everything else                    |
 | ---------------- | ------------------ | -------------------------------------------------------------------------------------------- | ---------------------------------- |
@@ -143,6 +151,9 @@ apart from the `aws-axi` prefix. Where the ergonomics differ, here is the map bo
 | `aws sts get-caller-identity`                          | `aws-axi whoami`                                       | Fused with profile, region, and credential source                          |
 | *(no equivalent)*                                      | `aws-axi`                                              | No-arg dashboard: current identity + region                                |
 | `aws s3 ls s3://bucket/`                               | `aws-axi s3 ls s3://bucket/`                           | Same; output capped + TOON                                                  |
+| `aws s3 ls s3://bucket/ --recursive`                   | `aws-axi s3 ls s3://bucket/ --recursive`               | `--recursive` absorbed (already lists all objects); valid, no error         |
+| `aws s3 ls s3://bucket/ --page-size 5`                 | `aws-axi s3 ls s3://bucket/ --page-size 5`             | `--page-size` forwarded verbatim to `s3api list-objects-v2`                |
+| `aws s3 ls s3://bucket/ --human-readable`              | `aws-axi s3 ls s3://bucket/` (drop the flag)           | `--human-readable` → clean USAGE_ERROR; aws-axi formats sizes automatically |
 | `aws s3api list-buckets`                               | `aws-axi s3 ls`                                        | High-level `s3 ls` with no target lists buckets                            |
 | `aws logs tail <group> --since 1h`                     | `aws-axi logs tail <group> --since 1h`                | Same flag; snapshot (no `--follow`), capped with `--limit`                  |
 | `aws logs filter-log-events --log-group-name <g> --filter-pattern ERROR` | `aws-axi logs filter <g> ERROR`     | Positional group + pattern                                                  |
