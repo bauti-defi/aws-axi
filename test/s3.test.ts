@@ -15,6 +15,7 @@ import {
   s3CreateBucketRun,
   s3CpRun,
   s3RmRun,
+  s3Command,
   S3_PAGE_SIZE,
 } from "../src/commands/s3.js";
 import { AxiError } from "axi-sdk-js";
@@ -561,5 +562,163 @@ describe("s3RmRun", () => {
     });
 
     expect(result.dryRun).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// s3Command — equals-form regression tests (ADR-0002 compliance)
+//
+// These tests prove that the equals form (--flag=value) is correctly parsed
+// at the s3Command dispatch layer.  The old private parseFlag/hasFlag in s3.ts
+// used indexOf/includes (exact-token match only), which made equals-form inputs
+// either silently drop the flag or hard-reject valid input.
+//
+// RED for the old code:
+//   head-object --bucket=b --key=k  → USAGE_ERROR ("requires --bucket and --key")
+//   create-bucket --bucket=b        → USAGE_ERROR ("requires --bucket")
+//   ls --starting-token=TOK         → token silently dropped; GET / returned
+//   ls --bucket-name-prefix=foo     → prefix silently dropped; all buckets returned
+//
+// GREEN after this fix: extractFlag (overlay-args) handles both forms.
+// ---------------------------------------------------------------------------
+
+describe("s3Command — equals-form flag parsing (ADR-0002 compliance)", () => {
+  // ── head-object --bucket=b --key=k ─────────────────────────────────────────
+  it("head-object with --bucket=b --key=k is not hard-rejected (equals form)", async () => {
+    // Stub returns a valid head-object response so s3HeadObjectRun does not fail.
+    const stub = createStub({ stdout: HEAD_OBJECT_RESPONSE, exitCode: 0 });
+
+    // RED if extractFlag is not used: old parseFlag(indexOf) returns undefined
+    // for "--bucket" when args contains "--bucket=b" → USAGE_ERROR thrown before
+    // the aws call even happens.
+    const result = await s3Command(["head-object", "--bucket=b", "--key=k"], undefined, stub);
+
+    // Verify the projected fields are present — proves the full round-trip ran.
+    expect(result["contentType"]).toBe("application/json");
+    expect(result["contentLength"]).toBe(2048);
+  });
+
+  it("head-object two-arg and equals-form return identical results", async () => {
+    // Both invocations call the same stub binary with --bucket b --key k.
+    // The difference is only in how the command adapter parses its own args.
+    const stubA = createStub({ stdout: HEAD_OBJECT_RESPONSE, exitCode: 0 });
+    const stubB = createStub({ stdout: HEAD_OBJECT_RESPONSE, exitCode: 0 });
+
+    const resultA = await s3Command(
+      ["head-object", "--bucket", "b", "--key", "k"],
+      undefined,
+      stubA,
+    );
+    const resultB = await s3Command(
+      ["head-object", "--bucket=b", "--key=k"],
+      undefined,
+      stubB,
+    );
+
+    // Both projections must agree on every field.
+    expect(resultA).toStrictEqual(resultB);
+  });
+
+  // ── create-bucket --bucket=b ────────────────────────────────────────────────
+  it("create-bucket with --bucket=b and explicit --region=us-east-1 is not hard-rejected", async () => {
+    // Stub returns success for create-bucket.
+    const stub = createStub({
+      stdout: JSON.stringify({ Location: "/equals-form-bucket" }),
+      exitCode: 0,
+    });
+
+    // RED if extractFlag is not used: old parseFlag returns undefined for --bucket →
+    // USAGE_ERROR thrown. With extractFlag, "equals-form-bucket" is correctly extracted.
+    const result = await s3Command(
+      ["create-bucket", "--bucket=equals-form-bucket", "--region=us-east-1"],
+      undefined,
+      stub,
+    );
+
+    expect(result["created"]).toBe(true);
+    expect(result["bucket"]).toBe("equals-form-bucket");
+  });
+
+  // ── ls --starting-token=TOK ─────────────────────────────────────────────────
+  it("ls --starting-token=TOK forwards the token to the aws call (equals form)", async () => {
+    // Stub exits non-zero if --starting-token is NOT present in the argv it receives.
+    // This proves the token is correctly extracted from the equals form and forwarded.
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-cmd-st-"));
+    tempDirs.push(dir);
+    const p = join(dir, "aws");
+    const bucketPayload = JSON.stringify({
+      Buckets: [{ Name: "b", CreationDate: "2024-01-01T00:00:00+00:00" }],
+    });
+    writeFileSync(p, [
+      "#!/bin/sh",
+      `if echo "$@" | grep -q 'starting-token'; then`,
+      `  printf '${bucketPayload}'`,
+      "  exit 0",
+      "fi",
+      "printf 'token-not-forwarded' >&2",
+      "exit 1",
+    ].join("\n"));
+    chmodSync(p, 0o755);
+
+    // RED for old code: parseFlag(indexOf) doesn't find "--starting-token" in
+    // ["--starting-token=TOK"] → startingToken is undefined → s3LsRun omits
+    // --starting-token from the aws call → stub exits 1.
+    const result = await s3Command(
+      ["ls", "--starting-token=TOK"],
+      undefined,
+      p,
+    );
+
+    expect(result["buckets"]).toHaveLength(1);
+  });
+
+  // ── ls --bucket-name-prefix=foo ─────────────────────────────────────────────
+  it("ls --bucket-name-prefix=foo translates to --prefix foo in the aws call (equals form)", async () => {
+    // Stub exits non-zero if --prefix is NOT present — proves translation ran.
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-cmd-bnp-"));
+    tempDirs.push(dir);
+    const p = join(dir, "aws");
+    const bucketPayload = JSON.stringify({
+      Buckets: [{ Name: "foo-bucket", CreationDate: "2024-01-01T00:00:00+00:00" }],
+    });
+    writeFileSync(p, [
+      "#!/bin/sh",
+      // The aws call will contain: s3api list-buckets --max-items 20 --prefix foo
+      `if echo "$@" | grep -q -- '--prefix'; then`,
+      `  printf '${bucketPayload}'`,
+      "  exit 0",
+      "fi",
+      "printf 'prefix-not-forwarded' >&2",
+      "exit 1",
+    ].join("\n"));
+    chmodSync(p, 0o755);
+
+    // RED for old code: parseFlag(indexOf) returns undefined for "--bucket-name-prefix"
+    // → bucketNamePrefix is undefined → no --prefix injected → stub exits 1.
+    const result = await s3Command(
+      ["ls", "--bucket-name-prefix=foo"],
+      undefined,
+      p,
+    );
+
+    expect(result["buckets"]).toHaveLength(1);
+  });
+
+  // ── ls s3://b/ --bucket-name-prefix=foo ─────────────────────────────────────
+  it("ls s3://b/ --bucket-name-prefix=foo raises curated USAGE_ERROR (equals form)", async () => {
+    // --bucket-name-prefix is invalid on the object-listing (prefix) path.
+    // OLD code: hasFlag(includes) returns false for "--bucket-name-prefix=foo"
+    // → guard bypassed → opaque aws 252 dump instead of a curated message.
+    // NEW code: hasFlag (overlay-args) catches the equals form → USAGE_ERROR.
+    //
+    // No stub binary needed — the guard fires before any aws call.
+    let thrown: unknown;
+    try {
+      await s3Command(["ls", "s3://b/", "--bucket-name-prefix=foo"], undefined);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(AxiError);
+    expect((thrown as AxiError).code).toBe("USAGE_ERROR");
   });
 });

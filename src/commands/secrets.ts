@@ -26,7 +26,7 @@ import type { AwsRunOptions } from "../aws.js";
 import { awsJson } from "../aws.js";
 import { resolveKey } from "../resolve/key.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough, extractFlag } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, extractFlag, hasFlag } from "../overlay-args.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -181,10 +181,6 @@ examples:
 `;
 
 // ─── Arg-parsing helpers ──────────────────────────────────────────────────────
-
-function hasFlag(args: readonly string[], flag: string): boolean {
-  return args.some((a) => a === flag || a.startsWith(`${flag}=`));
-}
 
 /**
  * Boolean flags that take no separate value token.

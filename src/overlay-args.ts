@@ -147,12 +147,81 @@ function isModelBooleanFlag(
   return param.type === "boolean";
 }
 
+// ── locateFlag ───────────────────────────────────────────────────────────────
+
+/**
+ * Locate the first occurrence of a named flag in argv, returning its value and
+ * the range of tokens it occupies.
+ *
+ * Accepts both forms agents commonly use:
+ *   --flag value   → span 2 (flag token + separate value token)
+ *   --flag=value   → span 1 (single combined token)
+ *
+ * Returns the first match (first-wins on repeated flags).
+ * Returns `undefined` when the flag is absent OR when it is the final token
+ * with no following value in two-arg form.
+ *
+ * Contract notes:
+ *   - Does NOT mutate the input array.
+ *   - Does NOT reject values that start with `-` (e.g. --limit=-1 is valid).
+ *   - Does NOT check whether the next token is itself a flag in two-arg form;
+ *     `--flag --other` returns `{ value: "--other", span: 2 }`.
+ *   - The `=` suffix in the prefix check (`${flag}=`) prevents false matches
+ *     against flags that share a prefix (e.g. --limit vs --limit-type).
+ *
+ * This is the single-scan foundation used by both `extractFlag` (read-only)
+ * and `pullFlag` in logs.ts (extract-and-remove), ensuring a single parsing
+ * contract underlies all value-extraction needs.
+ */
+export function locateFlag(
+  args: readonly string[],
+  flag: string,
+): { readonly value: string; readonly start: number; readonly span: 1 | 2 } | undefined {
+  const eqPrefix = `${flag}=`;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] ?? "";
+    // Two-arg form: --flag value
+    if (arg === flag && i + 1 < args.length) {
+      return { value: args[i + 1] as string, start: i, span: 2 };
+    }
+    // Equals form: --flag=value (or --flag= for empty value)
+    if (arg.startsWith(eqPrefix)) {
+      return { value: arg.slice(eqPrefix.length), start: i, span: 1 };
+    }
+  }
+  return undefined;
+}
+
+// ── hasFlag ───────────────────────────────────────────────────────────────────
+
+/**
+ * Return true if a named flag is present anywhere in argv.
+ *
+ * Accepts both forms:
+ *   --flag          (boolean / presence-only use)
+ *   --flag=value    (equals form — still counts as present)
+ *   --flag value    (two-arg form — the flag token itself is present)
+ *
+ * The `=` suffix in the prefix check prevents false matches against flags that
+ * share a name prefix (e.g. --recursive vs --recursive-list-item, unlikely but
+ * safe by construction).
+ *
+ * This is the shared implementation that replaces the three private copies in
+ * secrets.ts / ssm.ts (correct form) and s3.ts (broken `includes`-only form).
+ */
+export function hasFlag(args: readonly string[], flag: string): boolean {
+  const eqPrefix = `${flag}=`;
+  return args.some((a) => a === flag || a.startsWith(eqPrefix));
+}
+
 // ── extractFlag ──────────────────────────────────────────────────────────────
 
 /**
- * Extract the value of a named flag from argv.
+ * Extract the value of a named flag from argv (read-only).
  *
- * Accepts both forms agents commonly use:
+ * Delegates to `locateFlag` — same parsing contract, returns the value only.
+ *
+ * Accepts both forms:
  *   --flag value   (space-separated)
  *   --flag=value   (equals-separated, including --flag= for an empty value)
  *
@@ -160,36 +229,16 @@ function isModelBooleanFlag(
  * Returns `undefined` when the flag is absent OR when it is the final token
  * with no following value in two-arg form.
  *
- * Contract notes:
- *   - Does NOT mutate the input array (read-only extraction).
- *   - Does NOT reject values that start with `-` (e.g. --limit=-1 returns "-1").
- *   - Does NOT check whether the next token is itself a flag in the two-arg form;
- *     `--flag --other` returns "--other". Callers that care must validate the value.
- *   - The `=` suffix in the prefix check (`${flag}=`) prevents false matches
- *     against flags that share a prefix (e.g. --limit vs --limit-type).
- *
- * This is the shared implementation that replaces the four identical private
- * `extractFlag` copies in kms.ts / lambda.ts / secrets.ts / ssm.ts (issue #51).
- * The logs.ts `pullFlag` implements a superset contract (extract + remove) and
- * stays private in that module.
+ * This is the shared implementation that replaced the four identical private
+ * `extractFlag` copies in kms.ts / lambda.ts / secrets.ts / ssm.ts (PR #51).
+ * The logs.ts `pullFlag` uses `locateFlag` directly for its extract-and-remove
+ * contract (it must also return the remaining array with consumed tokens removed).
  */
 export function extractFlag(
   args: readonly string[],
   flag: string,
 ): string | undefined {
-  const eqPrefix = `${flag}=`;
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] ?? "";
-    // Two-arg form: --flag value
-    if (arg === flag && i + 1 < args.length) {
-      return args[i + 1];
-    }
-    // Equals form: --flag=value (or --flag= for empty value)
-    if (arg.startsWith(eqPrefix)) {
-      return arg.slice(eqPrefix.length);
-    }
-  }
-  return undefined;
+  return locateFlag(args, flag)?.value;
 }
 
 // ── buildPassthrough ─────────────────────────────────────────────────────────

@@ -23,7 +23,7 @@ import { awsJson, awsRaw, awsExec } from "../aws.js";
 import type { AwsContext } from "../context.js";
 import { parseAwsError } from "../errors.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, extractFlag, hasFlag } from "../overlay-args.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -66,16 +66,6 @@ async function resolveConfigRegion(opts: {
     }
   }
   return undefined;
-}
-
-function parseFlag(args: readonly string[], flag: string): string | undefined {
-  const i = args.indexOf(flag);
-  if (i === -1 || i + 1 >= args.length) return undefined;
-  return args[i + 1];
-}
-
-function hasFlag(args: readonly string[], flag: string): boolean {
-  return args.includes(flag);
 }
 
 /**
@@ -724,6 +714,7 @@ examples:
 export async function s3Command(
   args: string[],
   context: AwsContext | undefined,
+  binary?: string,
 ): Promise<Record<string, unknown>> {
   const subcommand = args[0];
   const rest = args.slice(1);
@@ -755,7 +746,7 @@ export async function s3Command(
       }
 
       const prefix = rest.find((a) => a.startsWith("s3://"));
-      const startingToken = parseFlag(rest, "--starting-token");
+      const startingToken = extractFlag(rest, "--starting-token");
 
       if (prefix === undefined) {
         // ── No-URI path → s3api list-buckets ──────────────────────────────────
@@ -778,7 +769,7 @@ export async function s3Command(
         // --bucket-name-prefix (aws s3 ls flag) → --prefix (list-buckets parameter).
         // The aws s3 ls flag name differs from the underlying s3api parameter name;
         // forwarding it verbatim causes list-buckets to exit 252 "Unknown options".
-        const bucketNamePrefix = parseFlag(rest, "--bucket-name-prefix");
+        const bucketNamePrefix = extractFlag(rest, "--bucket-name-prefix");
 
         const argsForPassthrough = stripPositionals(rest);
         // --bucket-region is a valid list-buckets filter; forward it via passthrough.
@@ -792,7 +783,7 @@ export async function s3Command(
           ? [...rawPassthrough, "--prefix", bucketNamePrefix]
           : rawPassthrough;
         const { passthrough, hasQuery } = buildPassthrough(translatedPassthrough);
-        const result = await s3LsRun({ startingToken, passthrough, hasQuery, context });
+        const result = await s3LsRun({ startingToken, passthrough, hasQuery, context, binary });
         return result as unknown as Record<string, unknown>;
       }
 
@@ -824,7 +815,7 @@ export async function s3Command(
       // never forwarded to s3api list-objects-v2, which does not accept it.
       const rawPassthrough = collectPassthroughFlags(argsForPassthrough, ["--starting-token"], ["--recursive"]);
       const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
-      const result = await s3LsRun({ prefix, startingToken, recursive, passthrough, hasQuery, context });
+      const result = await s3LsRun({ prefix, startingToken, recursive, passthrough, hasQuery, context, binary });
       return result as unknown as Record<string, unknown>;
     }
 
@@ -849,7 +840,7 @@ export async function s3Command(
       // there is no overlay projection to bypass, so hasQuery is intentionally unused.
       const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
       void hasQuery;
-      const result = await s3CpRun({ source, destination, dryRun, passthrough, context });
+      const result = await s3CpRun({ source, destination, dryRun, passthrough, context, binary });
       return result as unknown as Record<string, unknown>;
     }
 
@@ -871,13 +862,13 @@ export async function s3Command(
       // there is no overlay projection to bypass, so hasQuery is intentionally unused.
       const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
       void hasQuery;
-      const result = await s3RmRun({ target, dryRun, passthrough, context });
+      const result = await s3RmRun({ target, dryRun, passthrough, context, binary });
       return result as unknown as Record<string, unknown>;
     }
 
     case "head-object": {
-      const bucket = parseFlag(rest, "--bucket");
-      const key = parseFlag(rest, "--key");
+      const bucket = extractFlag(rest, "--bucket");
+      const key = extractFlag(rest, "--key");
       if (bucket === undefined || key === undefined) {
         throw new AxiError(
           "s3 head-object requires --bucket and --key",
@@ -898,12 +889,12 @@ export async function s3Command(
       // head-object maps to s3api head-object — all flags are named, no positionals.
       const rawPassthrough = collectPassthroughFlags(rest, ["--bucket", "--key"]);
       const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
-      const result = await s3HeadObjectRun({ bucket, key, passthrough, hasQuery, context });
+      const result = await s3HeadObjectRun({ bucket, key, passthrough, hasQuery, context, binary });
       return result as unknown as Record<string, unknown>;
     }
 
     case "create-bucket": {
-      const bucket = parseFlag(rest, "--bucket");
+      const bucket = extractFlag(rest, "--bucket");
       if (bucket === undefined) {
         throw new AxiError(
           "s3 create-bucket requires --bucket",
@@ -911,10 +902,10 @@ export async function s3Command(
           ["Usage: aws-axi s3 create-bucket --bucket <name> [--region <region>]"],
         );
       }
-      const region = parseFlag(rest, "--region");
+      const region = extractFlag(rest, "--region");
       const rawPassthrough = collectPassthroughFlags(rest, ["--bucket", "--region"]);
       const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
-      const result = await s3CreateBucketRun({ bucket, region, passthrough, hasQuery, context });
+      const result = await s3CreateBucketRun({ bucket, region, passthrough, hasQuery, context, binary });
       return result as unknown as Record<string, unknown>;
     }
 

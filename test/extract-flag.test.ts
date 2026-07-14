@@ -1,25 +1,45 @@
 /**
- * Characterization tests for the shared `extractFlag` implementation (issue #51).
+ * Characterization and regression tests for the shared argv-flag parsers
+ * exported from overlay-args.ts (issues #51, closes #51).
  *
- * ── Background ────────────────────────────────────────────────────────────────
+ * ── Complete parser inventory (verified by grep, 2026-07-14) ─────────────────
  *
- * Before this refactor, six independent argv helpers implemented the same
- * "pull --flag value or --flag=value out of argv" contract:
+ * Value extractors (return a string or splice + return string):
+ *   1. locateFlag   overlay-args.ts     — foundation; returns { value, start, span }
+ *   2. extractFlag  overlay-args.ts     — delegates to locateFlag; returns value only
+ *   3. pullFlag     logs.ts (private)   — delegates to locateFlag; returns [value, remaining]
+ *   4. parseMaxItems ec2.ts (private)   — extract-and-remove with int validation
+ *   5. parseNextToken ec2.ts (private)  — extract-and-remove; has empty-value guard asymmetry
+ *   6. extractNextToken iam.ts (private) — extract-and-remove; both forms
+ *   7. extractScope  iam.ts (private)   — extract-and-remove; both forms
  *
- *   1. extractFlag  src/commands/kms.ts:207
- *   2. extractFlag  src/commands/lambda.ts:236
- *   3. extractFlag  src/commands/secrets.ts:185
- *   4. extractFlag  src/commands/ssm.ts:359
- *   5. pullFlag     src/commands/logs.ts:153   — same value algorithm; ALSO removes consumed tokens
- *   6. Engine scan  src/engine.ts (isParamPresent / hasMaxItemsFlag / hasQueryFlag)
- *                                               — PRESENCE only, not a value extractor
+ * Presence checkers (return boolean):
+ *   8.  hasFlag         overlay-args.ts  — shared; correct form (a === flag || a.startsWith(flag=))
+ *   9.  isParamPresent  engine.ts        — PascalCase input; different entry contract
+ *   10. hasMaxItemsFlag engine.ts        — hardcoded flag; presence only
+ *   11. hasQueryFlag    engine.ts        — hardcoded flag; presence only
  *
- * Items 1–4 are byte-for-byte identical (verified by grep before this PR).
- * Item 5 shares the value-extraction algorithm but returns [value, filteredArray]
- * instead of value — a different contract, kept private in logs.ts.
- * Item 6 implements presence detection, not value extraction; it cannot be
- * unified with extractFlag without changing semantics (--flag at end returns
- * true for isParamPresent but undefined for extractFlag). It stays separate.
+ * Total: 11 distinct implementations after this PR's consolidation.
+ *
+ * Items 1–3 share the same core parsing contract (via locateFlag).
+ * Items 4–7 are correct (handle both forms) but use independent loops — DRY
+ * debt deferred: parseMaxItems has inline int validation, parseNextToken has
+ * an asymmetric empty-value guard (`arg.length > "--next-token=".length`) that
+ * differs from locateFlag semantics; iam's parsers are single-module and not
+ * cross-duplicated.
+ * Items 9–11 are presence-only and engine-internal; their entry contracts differ
+ * from hasFlag (PascalCase conversion, hardcoded flag names).
+ *
+ * Deleted in this PR:
+ *   - extractFlag copies in kms.ts / lambda.ts / secrets.ts / ssm.ts (PR #55 base)
+ *   - parseFlag in s3.ts (BUGGY: indexOf-only → equals form silently dropped)
+ *   - hasFlag  in s3.ts (BUGGY: includes-only → equals form silently dropped)
+ *   - hasFlag  in secrets.ts (correct form; now unified under overlay-args)
+ *   - hasFlag  in ssm.ts    (correct form; now unified under overlay-args)
+ *
+ * Call sites (grep-verified):
+ *   extractFlag: 39 total — kms(7) + lambda(7) + secrets(5) + ssm(13) + s3(6) + logs(1 via pullFlag)
+ *   hasFlag:     17 total — s3(11) + ssm(5) + secrets(1)
  *
  * ── Also deliberate non-consolidations ───────────────────────────────────────
  *
@@ -34,51 +54,41 @@
  *
  * ── Characterization table (parser × edge-case matrix) ────────────────────────
  *
- * All 4 extractFlag implementations (kms/lambda/secrets/ssm) produce IDENTICAL
- * results on every edge case below. pullFlag (logs) agrees on VALUE but also
- * removes consumed tokens. isParamPresent (engine) differs only on the final-token
- * edge case (returns true where extractFlag returns undefined).
+ * Edge case                          | extractFlag | pullFlag (value) | isParamPresent
+ * -----------------------------------|-------------|------------------|----------------
+ * --flag=value                       | "value"     | "value"          | true
+ * --flag value                       | "value"     | "value"          | true
+ * --flag=                            | ""          | ""               | true
+ * --flag=-1                          | "-1"        | "-1"             | true
+ * --flag -1                          | "-1"        | "-1"             | true
+ * --flag (final token)               | undefined   | undefined        | true  ← diff
+ * --flag a --flag b                  | "a"         | "a"              | true  (first-wins)
+ * --flag --other                     | "--other"   | "--other"        | true
+ * --limit when --limit-type=val      | undefined   | undefined        | false
+ * Mutates argv?                      | no          | yes (splice)     | no
  *
- * Edge case            | extractFlag×4 | pullFlag (value) | isParamPresent
- * ---------------------|---------------|------------------|----------------
- * --flag=value         | "value"       | "value"          | true
- * --flag value         | "value"       | "value"          | true
- * --flag=              | ""            | ""               | true
- * --flag=-1            | "-1"          | "-1"             | true
- * --flag -1            | "-1"          | "-1"             | true
- * --flag (final)       | undefined     | undefined        | true  ← diff
- * --flag a --flag b    | "a"           | "a"              | true  (first-wins)
- * --flag --other       | "--other"     | "--other"        | true
- * --limit when --limit-type=val present | undefined | undefined | false
- * Mutates argv?        | no            | yes              | no
+ * extractFlag vs isParamPresent on "--flag" (final): isParamPresent returns
+ * true (flag IS present), extractFlag returns undefined (no value follows).
+ * NOT a consolidation opportunity — different contracts. No call-site changes.
  *
- * Disagreements between the six parsers:
- *   extractFlag vs isParamPresent on "--flag" (final): isParamPresent returns
- *   true (flag IS present), extractFlag returns undefined (no value follows).
- *   This is NOT a consolidation opportunity — they serve different contracts.
- *   No call-site behavior changes.
+ * ── Revert-proof table (semantic mutations → catching tests) ─────────────────
  *
- * stripContextArgs vs extractFlag on "--flag=" (empty):
- *   stripContextArgs REJECTS it (length guard); extractFlag returns "".
- *   They serve different contracts; no consolidation.
- *
- * All four extractFlag duplicates AGREE on every edge case. Zero behavior
- * changes at any of the 30 call sites in kms/lambda/secrets/ssm.
- *
- * ── Revert-proof methodology ──────────────────────────────────────────────────
- *
- * RED: Remove `extractFlag` from overlay-args.ts → named import below fails at
- *      runtime → every test in this file goes RED.
- * GREEN: Export `extractFlag` from overlay-args.ts with the documented contract
- *        → all tests pass.
- *
- * Additional per-case revert proof: each test documents what specific WRONG
- * behavior would appear if the implementation regressed (e.g., if the = form
- * were not handled, tests checking --flag=value would return undefined, not "value").
+ * # | Mutation applied                                  | Suite result | Caught by
+ * --|---------------------------------------------------|-------------|----------------------------------------------
+ * M1| Remove the equals-form (--flag=value) branch     | RED 10 fail | "equals form" ×5, agreement matrix,
+ *   |   from extractFlag/locateFlag                     |             | _extractTailArgs (--since=1h),
+ *   |                                                   |             | _extractFilterArgs (--limit=5),
+ *   |                                                   |             | kmsRun --max-items=N, kmsRun --policy-name=custom
+ * M2| Last-wins instead of first-wins on repeated flags | RED  3 fail | first-wins (equals form), first-wins
+ *   |                                                   |             | (two-arg form), agreement matrix
+ * M3| --flag at end-of-argv returns "" instead of       | RED  2 fail | "returns undefined when flag is the final
+ *   |   undefined                                       |             | token", agreement matrix
+ * M4| Break prefix guard (--limit matches --limit-type) | RED  2 fail | "does NOT false-match a flag that is a
+ *   |                                                   |             | prefix of another", agreement matrix
  */
 
 import { describe, it, expect } from "bun:test";
-import { extractFlag } from "../src/overlay-args.js";
+import { extractFlag, locateFlag, hasFlag } from "../src/overlay-args.js";
 import { _extractTailArgs, _extractFilterArgs } from "../src/commands/logs.js";
 
 // ── Reference implementation ────────────────────────────────────────────────
@@ -288,5 +298,121 @@ describe("pullFlag (via _extractFilterArgs) — value agreement with extractFlag
     const result = _extractFilterArgs(["/aws/lambda/fn", "ERROR", "--limit=5"]);
     expect(result.limit).toBe(5);
     expect(extractFlag(["--limit=5"], "--limit")).toBe("5");
+  });
+});
+
+// ── locateFlag ────────────────────────────────────────────────────────────────
+//
+// locateFlag is the single-scan foundation for both extractFlag (read-only)
+// and pullFlag (extract-and-remove in logs.ts).  These tests pin the shape
+// of the returned match object and confirm extractFlag delegates correctly.
+
+describe("locateFlag — two-arg form", () => {
+  it("returns { value, start, span:2 } for --flag value", () => {
+    // RED if span is wrong: pullFlag would splice the wrong number of tokens.
+    const m = locateFlag(["--flag", "value"], "--flag");
+    expect(m).toStrictEqual({ value: "value", start: 0, span: 2 });
+  });
+
+  it("start reflects the correct index when the flag is not first", () => {
+    // RED if start is wrong: remaining splice produces incorrect array.
+    const m = locateFlag(["--other", "x", "--flag", "val"], "--flag");
+    expect(m).toStrictEqual({ value: "val", start: 2, span: 2 });
+  });
+
+  it("returns undefined when flag is the final token (no value follows)", () => {
+    expect(locateFlag(["--flag"], "--flag")).toBeUndefined();
+  });
+
+  it("returns first match only (first-wins)", () => {
+    const m = locateFlag(["--flag", "a", "--flag", "b"], "--flag");
+    expect(m?.value).toBe("a");
+    expect(m?.start).toBe(0);
+  });
+});
+
+describe("locateFlag — equals form", () => {
+  it("returns { value, start, span:1 } for --flag=value", () => {
+    // RED if span is 2: pullFlag would splice 2 tokens for a single-token form,
+    // removing the token that follows --flag=value.
+    const m = locateFlag(["--flag=value"], "--flag");
+    expect(m).toStrictEqual({ value: "value", start: 0, span: 1 });
+  });
+
+  it("returns empty string for --flag= (empty value, span:1)", () => {
+    const m = locateFlag(["--flag="], "--flag");
+    expect(m).toStrictEqual({ value: "", start: 0, span: 1 });
+  });
+
+  it("does NOT false-match a flag that shares a name prefix (--limit vs --limit-type)", () => {
+    // The eqPrefix check uses `${flag}=` which requires the full flag name before =.
+    expect(locateFlag(["--limit-type=val"], "--limit")).toBeUndefined();
+  });
+
+  it("start reflects the correct index when the flag is not first", () => {
+    const m = locateFlag(["--other=x", "--flag=v"], "--flag");
+    expect(m).toStrictEqual({ value: "v", start: 1, span: 1 });
+  });
+});
+
+describe("locateFlag — extractFlag delegation", () => {
+  it("extractFlag(args, flag) === locateFlag(args, flag)?.value for every case", () => {
+    // Proves extractFlag is a thin wrapper with no added logic.
+    const cases: [readonly string[], string][] = [
+      [["--flag=value"], "--flag"],
+      [["--flag", "value"], "--flag"],
+      [["--flag="], "--flag"],
+      [["--flag"], "--flag"],
+      [[], "--flag"],
+      [["--limit-type=val"], "--limit"],
+    ];
+    for (const [args, flag] of cases) {
+      expect(extractFlag(args, flag)).toStrictEqual(locateFlag(args, flag)?.value);
+    }
+  });
+});
+
+// ── hasFlag ───────────────────────────────────────────────────────────────────
+//
+// hasFlag replaces three private copies: secrets.ts (correct form), ssm.ts
+// (correct form), and s3.ts (broken `includes`-only form that missed equals form).
+
+describe("hasFlag — presence detection", () => {
+  it("returns true for exact token match --flag", () => {
+    // RED if only equals form is checked.
+    expect(hasFlag(["--flag"], "--flag")).toBe(true);
+  });
+
+  it("returns true for --flag=value (equals form)", () => {
+    // RED for the old s3.ts `includes`-only hasFlag — this was the live bug.
+    // includes(["--flag=value"], "--flag") returns false.
+    expect(hasFlag(["--flag=value"], "--flag")).toBe(true);
+  });
+
+  it("returns true for --flag= (empty value, equals form)", () => {
+    expect(hasFlag(["--flag="], "--flag")).toBe(true);
+  });
+
+  it("returns false when only a prefix-sharing flag is present", () => {
+    // --flag-extra is NOT the same flag as --flag.
+    expect(hasFlag(["--flag-extra"], "--flag")).toBe(false);
+  });
+
+  it("returns false when flag is absent", () => {
+    expect(hasFlag(["--other", "value"], "--flag")).toBe(false);
+  });
+
+  it("returns false for empty argv", () => {
+    expect(hasFlag([], "--flag")).toBe(false);
+  });
+
+  it("returns true when flag appears in a longer argv (not the first token)", () => {
+    expect(hasFlag(["--other", "x", "--flag=yes"], "--flag")).toBe(true);
+  });
+
+  it("does NOT false-match --bucket-name-prefix when checking --bucket", () => {
+    // The eqPrefix guard prevents prefix collision.
+    // hasFlag(["--bucket-name-prefix=foo"], "--bucket") must be false.
+    expect(hasFlag(["--bucket-name-prefix=foo"], "--bucket")).toBe(false);
   });
 });

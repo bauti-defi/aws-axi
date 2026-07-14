@@ -20,7 +20,7 @@ import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import { awsJson, type AwsRunOptions } from "../aws.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, locateFlag } from "../overlay-args.js";
 
 // ─── Defaults ─────────────────────────────────────────────────────────────────
 
@@ -147,33 +147,20 @@ function toISO(epochMs: number): string {
  *
  * Returns `[undefined, originalCopy]` when the flag is absent.
  *
- * Value-extraction contract: identical to the shared `extractFlag` in
- * overlay-args.ts. This function stays private in logs.ts because it
- * implements a SUPERSET of that contract: extract-and-remove vs extract-only.
- * The removal is what lets `_extractTailArgs` find positionals by elimination
- * after all named flags have been consumed.
+ * Implements the extract-and-remove superset of `extractFlag`. Built on
+ * `locateFlag` (overlay-args.ts) so the parsing contract is shared — two-arg
+ * form (span=2) removes both the flag token and its value; equals form (span=1)
+ * removes only the combined token. The removal is what lets `_extractTailArgs`
+ * find positionals by elimination after all named flags have been consumed.
  */
 function pullFlag(
   args: readonly string[],
   flag: string,
 ): [string | undefined, string[]] {
-  const eqPrefix = `${flag}=`;
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] ?? "";
-    // --flag value (space-separated form)
-    if (arg === flag && i + 1 < args.length) {
-      const value = args[i + 1];
-      const remaining = [...args.slice(0, i), ...args.slice(i + 2)];
-      return [value, remaining];
-    }
-    // --flag=value (equals-separated form)
-    if (arg.startsWith(eqPrefix)) {
-      const value = arg.slice(eqPrefix.length);
-      const remaining = [...args.slice(0, i), ...args.slice(i + 1)];
-      return [value, remaining];
-    }
-  }
-  return [undefined, [...args]];
+  const m = locateFlag(args, flag);
+  if (m === undefined) return [undefined, [...args]];
+  const remaining = [...args.slice(0, m.start), ...args.slice(m.start + m.span)];
+  return [m.value, remaining];
 }
 
 // ─── tail ─────────────────────────────────────────────────────────────────────
