@@ -65,27 +65,57 @@ function createStub(spec: {
  * Create a stub that succeeds ONLY when `requiredArg` is present in its argv.
  * If the arg is absent, the stub exits 1 with a diagnostic — proving the arg
  * was NOT forwarded if the test unexpectedly errors.
+ *
+ * When `requiredNextArg` is also supplied the stub checks that `requiredArg` is
+ * immediately followed by that exact token — i.e. it asserts both the flag NAME
+ * and its VALUE. This closes the mutation hole where a correct flag name but a
+ * silently-swapped value (e.g. caller's 5 → default 50) would otherwise pass.
+ *
+ *   RED  (mutated): --max-items present but value swapped to 50
+ *     → "5" token not immediately after "--max-items" → found stays 0
+ *     → stub exits 1 → exitCode non-zero → expect(exitCode).toBeUndefined() FAILS.
+ *   GREEN (correct): --max-items 5 forwarded verbatim → found=1 → exits 0 → PASSES.
  */
 function createArgGuardStub(spec: {
   requiredArg: string;
+  requiredNextArg?: string; // when set, the token immediately after requiredArg must equal this
   validStdout: string;
   fallbackStdout?: string; // when requiredArg is absent but we should NOT fail (e.g. secondary calls)
 }): string {
   const dir = mkdtempSync(join(tmpdir(), "aws-axi-argguard-"));
   tempDirs.push(dir);
   const p = join(dir, "aws");
+
+  const missingMsg = spec.requiredNextArg
+    ? `MISSING_PAIR: ${spec.requiredArg} ${spec.requiredNextArg} was not forwarded`
+    : `MISSING_FLAG: ${spec.requiredArg} was not forwarded`;
+
+  // Pair scan: requiredArg immediately followed by requiredNextArg.
+  // Simple scan: just requiredArg presence.
+  const scanLines = spec.requiredNextArg
+    ? [
+        "prev=",
+        'for arg in "$@"; do',
+        `  [ "$prev" = ${shellQuote(spec.requiredArg)} ] && [ "$arg" = ${shellQuote(spec.requiredNextArg)} ] && found=1`,
+        '  prev="$arg"',
+        "done",
+      ]
+    : [
+        'for arg in "$@"; do',
+        `  [ "$arg" = ${shellQuote(spec.requiredArg)} ] && found=1`,
+        "done",
+      ];
+
   const script = [
     "#!/bin/sh",
     "found=0",
-    "for arg in \"$@\"; do",
-    `  [ "$arg" = ${shellQuote(spec.requiredArg)} ] && found=1`,
-    "done",
+    ...scanLines,
     'if [ "$found" = "1" ]; then',
     `  printf '%s' ${shellQuote(spec.validStdout)}`,
     "else",
     spec.fallbackStdout !== undefined
       ? `  printf '%s' ${shellQuote(spec.fallbackStdout)}`
-      : `  printf '%s' ${shellQuote(`MISSING_FLAG: ${spec.requiredArg} was not forwarded`)} >&2 && exit 1`,
+      : `  printf '%s' ${shellQuote(missingMsg)} >&2 && exit 1`,
     "fi",
   ].join("\n");
   writeFileSync(p, script);
@@ -1858,21 +1888,24 @@ describe("ec2 --query cap bypass — --max-items NOT forwarded when --query acti
   });
 });
 
-// ── Re-cap guard: --query + explicit cap → cap IS forwarded ──────────────────
+// ── Re-cap guard: --query + explicit cap → cap IS forwarded with caller's value ──
 //
 // ADR-0002 "re-cap" half: when --query is present AND the caller explicitly
 // supplies a cap flag (--max-items N on most overlays; --limit N on logs),
-// that explicit cap MUST still reach the child process — botocore honors it
-// as a hard limit on the total auto-paged result.
+// that explicit cap MUST still reach the child process with the CALLER'S VALUE —
+// botocore honors it as a hard limit on the total auto-paged result.
 //
-// Mutation proof: deleting `|| explicitMaxItems` from kms.ts:runListKeys,
+// Each test uses createArgGuardStub with both requiredArg AND requiredNextArg so
+// the stub asserts the flag NAME ("--max-items") AND the immediate next token
+// (the caller's value, e.g. "5" or "3"). A value-swap mutation — where the code
+// pushes the default instead of the caller's value — is caught:
+//   Mutation: `awsArgs.push("--max-items", String(hasQuery ? 50 : maxItems))`
+//     → child receives --max-items 50 (not 5) → "5" ≠ "50" → found stays 0
+//     → stub exits 1 → exitCode set → expect(exitCode).toBeUndefined() FAILS → RED.
+//
+// Absence mutation proof: deleting `|| explicitMaxItems` from kms.ts:runListKeys,
 // kms.ts:runListAliases, and lambda.ts:runListFunctions turns those three
 // tests RED (the others prove similar mutations in their own overlays).
-//
-// Guard-stub approach: the stub exits 1 if `--max-items` is ABSENT from argv.
-//   RED  (mutated): explicit cap removed from code → --max-items absent from
-//     child argv → stub exits 1 → exitCode non-zero → expect(exitCode).toBeUndefined() FAILS.
-//   GREEN (correct): cap still pushed → --max-items present → stub exits 0 → PASSES.
 //
 // Note on IAM: iam does not own --max-items (it flows via passthrough, not an
 // explicit push), so the re-cap is structurally different — the guard test for
@@ -1882,14 +1915,19 @@ describe("ec2 --query cap bypass — --max-items NOT forwarded when --query acti
 describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", () => {
   // ── KMS ×2 ────────────────────────────────────────────────────────────────
 
-  it("kms list-keys --query --max-items 5: --max-items forwarded to child", async () => {
+  it("kms list-keys --query --max-items 5: --max-items 5 forwarded to child", async () => {
     // list-keys returns early when hasQuery=true (no secondary list-aliases call),
     // so the guard stub is only invoked once.
     //
     // Mutation: delete `|| explicitMaxItems` in kms.ts runListKeys:
     //   `!hasQuery || false` → cap skipped → stub exits 1 → RED.
+    //
+    // Value-swap mutation: `String(hasQuery ? 50 : maxItems)` silently replaces
+    //   caller's 5 with 50. requiredNextArg catches this: --max-items 50 ≠ --max-items 5
+    //   → found stays 0 → stub exits 1 → RED.
     const binary = createArgGuardStub({
       requiredArg: "--max-items",
+      requiredNextArg: "5",
       validStdout: JSON.stringify(["key-id-1"]),
     });
 
@@ -1901,10 +1939,12 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
     expect(exitCode).toBeUndefined();
   });
 
-  it("kms list-aliases --query --max-items 5: --max-items forwarded to child", async () => {
+  it("kms list-aliases --query --max-items 5: --max-items 5 forwarded to child", async () => {
     // Mutation: delete `|| explicitMaxItems` in kms.ts runListAliases → RED.
+    // Value-swap: stub requires the exact "5" token after "--max-items" → RED if 50.
     const binary = createArgGuardStub({
       requiredArg: "--max-items",
+      requiredNextArg: "5",
       validStdout: JSON.stringify(["alias/my-key"]),
     });
 
@@ -1925,10 +1965,12 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
 
   // ── Lambda ────────────────────────────────────────────────────────────────
 
-  it("lambda list-functions --query --max-items 5: --max-items forwarded to child", async () => {
+  it("lambda list-functions --query --max-items 5: --max-items 5 forwarded to child", async () => {
     // Mutation: delete `|| explicitMaxItems` in lambda.ts runListFunctions → RED.
+    // Value-swap: stub requires the exact "5" token after "--max-items" → RED if 50.
     const binary = createArgGuardStub({
       requiredArg: "--max-items",
+      requiredNextArg: "5",
       validStdout: JSON.stringify(["fn-a"]),
     });
 
@@ -1949,9 +1991,11 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
 
   // ── Secrets ───────────────────────────────────────────────────────────────
 
-  it("secretsmanager list-secrets --query --max-items 5: --max-items forwarded to child", async () => {
+  it("secretsmanager list-secrets --query --max-items 5: --max-items 5 forwarded to child", async () => {
+    // Value-swap: stub requires the exact "5" token after "--max-items" → RED if 50.
     const binary = createArgGuardStub({
       requiredArg: "--max-items",
+      requiredNextArg: "5",
       validStdout: JSON.stringify(["secret-a"]),
     });
 
@@ -1972,9 +2016,11 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
 
   // ── SSM ×2 ────────────────────────────────────────────────────────────────
 
-  it("ssm get-parameters-by-path --query --max-items 5: --max-items forwarded to child", async () => {
+  it("ssm get-parameters-by-path --query --max-items 5: --max-items 5 forwarded to child", async () => {
+    // Value-swap: stub requires the exact "5" token after "--max-items" → RED if 50.
     const binary = createArgGuardStub({
       requiredArg: "--max-items",
+      requiredNextArg: "5",
       validStdout: JSON.stringify(["/my/app/key"]),
     });
 
@@ -1995,9 +2041,11 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
     expect(exitCode).toBeUndefined();
   });
 
-  it("ssm describe-parameters --query --max-items 5: --max-items forwarded to child", async () => {
+  it("ssm describe-parameters --query --max-items 5: --max-items 5 forwarded to child", async () => {
+    // Value-swap: stub requires the exact "5" token after "--max-items" → RED if 50.
     const binary = createArgGuardStub({
       requiredArg: "--max-items",
+      requiredNextArg: "5",
       validStdout: JSON.stringify(["/my/app/key"]),
     });
 
@@ -2018,9 +2066,11 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
 
   // ── EC2 ───────────────────────────────────────────────────────────────────
 
-  it("ec2 describe-vpcs --query --max-items 5: --max-items forwarded to child", async () => {
+  it("ec2 describe-vpcs --query --max-items 5: --max-items 5 forwarded to child", async () => {
+    // Value-swap: stub requires the exact "5" token after "--max-items" → RED if 50.
     const binary = createArgGuardStub({
       requiredArg: "--max-items",
+      requiredNextArg: "5",
       validStdout: JSON.stringify(["vpc-abc123"]),
     });
 
@@ -2034,11 +2084,13 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
 
   // ── IAM ───────────────────────────────────────────────────────────────────
 
-  it("iam list-roles --query --max-items 5: --max-items forwarded via passthrough", async () => {
+  it("iam list-roles --query --max-items 5: --max-items 5 forwarded via passthrough", async () => {
     // IAM does not own --max-items (no extractFlag call) — it flows verbatim via
     // passthrough. Guard verifies it still reaches the child.
+    // Value-swap: stub requires the exact "5" token after "--max-items" → RED if 50.
     const binary = createArgGuardStub({
       requiredArg: "--max-items",
+      requiredNextArg: "5",
       validStdout: JSON.stringify(["role-a"]),
     });
 
@@ -2064,8 +2116,10 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
   //     → stub exits 0 → test GREEN.
 
   it("logs tail --query --limit 3 (space form): --max-items 3 forwarded to child", async () => {
+    // Value-swap: stub requires the exact "3" token after "--max-items" → RED if 50.
     const binary = createArgGuardStub({
       requiredArg: "--max-items",
+      requiredNextArg: "3",
       validStdout: JSON.stringify({ events: [] }),
     });
 
@@ -2089,8 +2143,10 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
     // RED  (before pullFlag fix): --limit=3 not parsed → options.limit=undefined
     //   → guard false → --max-items not pushed → stub exits 1 → FAILS.
     // GREEN (after pullFlag fix): --limit=3 → limit=3 → --max-items 3 pushed → PASSES.
+    // Value-swap: stub requires the exact "3" token after "--max-items" → RED if 50.
     const binary = createArgGuardStub({
       requiredArg: "--max-items",
+      requiredNextArg: "3",
       validStdout: JSON.stringify({ events: [] }),
     });
 
@@ -2110,8 +2166,10 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
   });
 
   it("logs describe-log-groups --query --limit=3 (equals form): --max-items 3 forwarded to child", async () => {
+    // Value-swap: stub requires the exact "3" token after "--max-items" → RED if 50.
     const binary = createArgGuardStub({
       requiredArg: "--max-items",
+      requiredNextArg: "3",
       validStdout: JSON.stringify({ logGroups: [] }),
     });
 

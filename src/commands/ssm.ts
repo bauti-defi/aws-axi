@@ -305,15 +305,16 @@ flags (get-command-invocation):
   --command-id <id>      SSM CommandId to query
   --instance-id <id>     Target instance ID
   --wait                 Poll to terminal state before returning (default: single call)
-  --query <expr>         JMESPath; bypasses overlay projection, returns raw result.
-                         Output is unbounded (botocore auto-pages all results; default
-                         cap suppressed). To bound output, pass --max-items N.
 
 flags (overlay-specific, all subcommands):
   --profile <name>       AWS profile (inherited from global --profile)
   --region <region>      AWS region  (inherited from global --region)
   --reveal               Show actual parameter values (default: redacted; alias for --with-decryption)
   --output               stripped (aws-axi always uses --output json internally)
+  --query <expr>         JMESPath; bypasses overlay projection, returns raw result.
+                         Output is unbounded (botocore auto-pages all results; default
+                         cap suppressed — applies to describe-parameters and
+                         get-parameters-by-path). To bound output, pass --max-items N.
 
 flags (list operations):
   --max-items <n>        Cap results per page (default: ${MAX_ITEMS_DEFAULT})
