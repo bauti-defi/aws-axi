@@ -25,7 +25,7 @@
  *   lambdaCommand(args, ctx, b) → AxiCliCommand adapter (CLI dispatch)
  *   LAMBDA_HELP                 → help text string
  */
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AxiError } from "axi-sdk-js";
@@ -525,7 +525,7 @@ async function runGetFunctionConfiguration(
  */
 async function runInvoke(
   options: LambdaRunOptions,
-): Promise<{ invocation: LambdaInvokeResult }> {
+): Promise<{ invocation: LambdaInvokeResult } | Record<string, unknown>> {
   const fnName = extractFlag(options.args, "--function-name");
   if (fnName === undefined || fnName === "") {
     throw new AxiError(
@@ -563,8 +563,10 @@ async function runInvoke(
   // Forward unknown flags verbatim (superset contract).
   // Note: the outfile positional must come AFTER passthrough flags below.
   // invoke uses awsRaw (not awsJson) with outfile semantics — the payload is
-  // written to a temp file, not returned as JSON. --query is forwarded verbatim
-  // but there is no overlay projection to bypass, so hasQuery is intentionally unused.
+  // written to a temp file, not returned as JSON. When --query is present the
+  // AWS CLI applies JMESPath to the metadata response before printing it to
+  // stdout; hasQuery bypasses our curated projection so the raw result is
+  // surfaced instead (same bypass pattern as list-functions / get-function).
   const rawPassthrough = collectPassthroughFlags(
     options.args,
     ["--function-name", "--payload", "--invocation-type", "--log-type", "--cli-binary-format"],
@@ -572,7 +574,6 @@ async function runInvoke(
     { service: "lambda", operation: "invoke" },
   );
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
-  void hasQuery;
   invokeArgs.push(...passthrough);
 
   // Create a temp file for the response payload
@@ -592,6 +593,13 @@ async function runInvoke(
     if (metadataResult.exitCode !== 0) {
       const { mapAwsError } = await import("../errors.js");
       throw mapAwsError(metadataResult.stderr, metadataResult.exitCode);
+    }
+
+    // --query bypass: the AWS CLI has already applied JMESPath to the metadata
+    // response; stdout contains the projected result (unknown shape). Attempting
+    // to project it again through our curated schema would null every field.
+    if (hasQuery) {
+      return JSON.parse(metadataResult.stdout.trim()) as Record<string, unknown>;
     }
 
     // Parse invocation metadata from stdout

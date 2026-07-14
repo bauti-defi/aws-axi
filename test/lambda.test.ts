@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AxiError } from "axi-sdk-js";
 import { lambdaRun, lambdaCommand } from "../src/commands/lambda.js";
+import { main } from "../src/cli.js";
 
 // ─── Shared fixture data ──────────────────────────────────────────────────────
 
@@ -859,5 +860,127 @@ describe("lambdaRun invoke — --cli-binary-format raw-in-base64-out (CLI v2)", 
 
     const capturedArgs = readFileSync(argsFile, "utf-8");
     expect(capturedArgs).not.toContain("--cli-binary-format");
+  });
+});
+
+// ─── captureMain helper ───────────────────────────────────────────────────────
+
+async function captureMain(
+  argv: string[],
+  env: Record<string, string> = {},
+): Promise<{ output: string; exitCode: number | undefined }> {
+  const chunks: string[] = [];
+  const stdout = {
+    write(chunk: string): true {
+      chunks.push(chunk);
+      return true;
+    },
+  };
+
+  const saved: Record<string, string | undefined> = {};
+  for (const [k, v] of Object.entries(env)) {
+    saved[k] = process.env[k];
+    process.env[k] = v;
+  }
+
+  const prevExitCode = process.exitCode ?? 0;
+  process.exitCode = 0;
+
+  try {
+    await main({ argv, stdout });
+  } finally {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) {
+        delete process.env[k];
+      } else {
+        process.env[k] = v;
+      }
+    }
+  }
+
+  const rawExitCode = process.exitCode as number;
+  const exitCode: number | undefined = rawExitCode === 0 ? undefined : rawExitCode;
+  process.exitCode = prevExitCode;
+
+  return { output: chunks.join(""), exitCode };
+}
+
+// ─── invoke: --query bypass (captureMain — CLI adapter layer) ─────────────────
+//
+// Bug: `lambda invoke --query StatusCode` fed a JMESPath-projected stdout
+// (e.g., `200`) through the overlay's curated projection, yielding
+// `statusCode: null`. The comment at the call site claimed invoke had no
+// projection to bypass — that was false.
+//
+// Fix: when hasQuery is true, bypass the overlay's curated metadata projection
+// and return the AWS-CLI-projected result directly.
+//
+// Revert-proof: remove the `if (hasQuery)` bypass in runInvoke → this fails.
+
+describe("lambda invoke --query bypass — captureMain", () => {
+  /**
+   * Stub that simulates `aws lambda invoke` AWS CLI behaviour:
+   *   - Always writes a payload JSON to the outfile (arg before --output).
+   *   - When --query is present (AWS CLI applied JMESPath): prints just `200`.
+   *   - When --query is absent: prints the full metadata JSON.
+   */
+  function createInvokeQueryStub(): string {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-lambda-query-"));
+    tempDirs.push(dir);
+    const scriptPath = join(dir, "aws");
+
+    const script = [
+      "#!/bin/sh",
+      'case "$1" in',
+      "  lambda)",
+      '    case "$2" in',
+      "      invoke)",
+      // Walk args to find outfile (arg immediately before --output)
+      "        prev=''",
+      "        outfile=''",
+      "        hasquery=0",
+      "        for arg in \"$@\"; do",
+      "          if [ \"$arg\" = \"--output\" ]; then outfile=\"$prev\"; break; fi",
+      "          if [ \"$arg\" = \"--query\" ]; then hasquery=1; fi",
+      "          prev=\"$arg\"",
+      "        done",
+      `        if [ -n "$outfile" ]; then printf '%s' ${shellQuote(INVOKE_PAYLOAD_OK)} > "$outfile"; fi`,
+      // When --query present the real AWS CLI applies JMESPath and prints only the projected value.
+      "        if [ \"$hasquery\" = \"1\" ]; then",
+      "          printf '%s' '200'",
+      "        else",
+      `          printf '%s' ${shellQuote(INVOKE_METADATA_OK)}`,
+      "        fi",
+      "        exit 0;;",
+      "      *)",
+      '        printf "Unexpected lambda sub-op: %s\\n" "$2" >&2',
+      "        exit 254;;",
+      "    esac;;",
+      "  *)",
+      '    printf "Unexpected service: %s\\n" "$1" >&2',
+      "    exit 254;;",
+      "esac",
+    ].join("\n");
+
+    writeFileSync(scriptPath, script);
+    chmodSync(scriptPath, 0o755);
+    return scriptPath;
+  }
+
+  it("invoke --query StatusCode: projection bypassed, not null", async () => {
+    const binary = createInvokeQueryStub();
+    const stubDir = binary.replace(/\/aws$/, "");
+
+    const { output, exitCode } = await captureMain(
+      ["lambda", "invoke", "--function-name", FN_NAME, "--query", "StatusCode"],
+      { PATH: `${stubDir}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    // Without the fix the overlay projects the JMESPath-shaped stdout through its
+    // own curated projection, which yields statusCode: null.
+    expect(output).not.toContain("statusCode: null");
+    // The JMESPath result (200) must appear in the output.
+    expect(output).toContain("200");
   });
 });
