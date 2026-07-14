@@ -141,8 +141,14 @@ interface AwsS3Object {
   readonly StorageClass?: string;
 }
 
+interface AwsCommonPrefix {
+  readonly Prefix: string;
+}
+
 interface ListObjectsV2Response {
   readonly Contents?: readonly AwsS3Object[];
+  /** Present when --delimiter is used: groups objects sharing a common prefix. */
+  readonly CommonPrefixes?: readonly AwsCommonPrefix[];
   readonly KeyCount?: number;
   readonly MaxKeys?: number;
   readonly IsTruncated?: boolean;
@@ -179,8 +185,15 @@ export interface S3LsObjectItem {
   readonly etag?: string;
 }
 
+/** A common-prefix entry ("folder") returned by list-objects-v2 with --delimiter /. */
+export interface S3LsPrefixItem {
+  readonly prefix: string;
+}
+
 export interface S3LsResult {
   readonly buckets?: readonly S3LsBucketItem[];
+  /** Common prefixes ("folders") returned when --delimiter / is active. */
+  readonly prefixes?: readonly S3LsPrefixItem[];
   readonly objects?: readonly S3LsObjectItem[];
   readonly empty?: boolean;
   readonly truncated?: boolean;
@@ -204,6 +217,12 @@ export interface S3LsRunOptions {
    * response; the shape is unknown).
    */
   readonly hasQuery?: boolean;
+  /**
+   * When true, list-objects-v2 is called WITHOUT --delimiter /, returning all
+   * nested objects recursively. Default (false/undefined) adds --delimiter / to
+   * match real `aws s3 ls` non-recursive behavior (groups by common prefix).
+   */
+  readonly recursive?: boolean;
   readonly binary?: string;
   readonly context?: AwsContext;
 }
@@ -264,6 +283,13 @@ export async function s3LsRun(
   if (prefix) {
     args.push("--prefix", prefix);
   }
+  // Add --delimiter / by default to match real `aws s3 ls` non-recursive behavior.
+  // Without a delimiter, list-objects-v2 returns ALL nested keys (recursive). With
+  // --delimiter /, S3 groups keys sharing a common prefix into CommonPrefixes ("folders").
+  // When recursive=true the caller explicitly wants all nested keys; skip the delimiter.
+  if (options.recursive !== true) {
+    args.push("--delimiter", "/");
+  }
   if (options.startingToken !== undefined) {
     args.push("--starting-token", options.startingToken);
   }
@@ -292,13 +318,22 @@ export async function s3LsRun(
     etag: c.ETag,
   }));
 
+  // Map CommonPrefixes ("folder" entries) returned when --delimiter is set.
+  // Folder-only buckets have empty Contents but non-empty CommonPrefixes;
+  // they must NOT be reported as empty.
+  const prefixes: S3LsPrefixItem[] = (resp.CommonPrefixes ?? []).map((cp) => ({
+    prefix: cp.Prefix,
+  }));
+
   // Truncated when S3 signals it OR when the CLI pagination token is present.
   const truncated = resp.IsTruncated === true || resp.NextToken !== undefined;
 
-  if (objects.length === 0) {
+  const totalItems = objects.length + prefixes.length;
+  if (totalItems === 0) {
     const displayPrefix = prefix || "(root)";
     return {
       objects,
+      prefixes,
       empty: true,
       truncated: false,
       hint: `No objects found under prefix "${displayPrefix}" in bucket "${bucket}". Try: aws-axi s3 ls s3://${bucket}/`,
@@ -308,13 +343,14 @@ export async function s3LsRun(
   if (truncated) {
     return {
       objects,
+      prefixes,
       truncated: true,
       nextToken: resp.NextToken,
-      hint: `Showing ${objects.length} objects (more available). Use --starting-token ${resp.NextToken ?? ""} to continue.`,
+      hint: `Showing ${totalItems} items (more available). Use --starting-token ${resp.NextToken ?? ""} to continue.`,
     };
   }
 
-  return { objects, truncated: false };
+  return { objects, prefixes, truncated: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -640,14 +676,101 @@ export async function s3Command(
 
   switch (subcommand) {
     case "ls": {
+      // ── Cross-path display-only flags (invalid on both list-buckets and list-objects-v2) ─
+      // Forwarding these verbatim would cause the s3api child to exit 252 with an
+      // opaque "Unknown options" message. Deliberate exception to the superset
+      // invariant: these are display-formatting flags that aws-axi handles in its
+      // own output layer; silently absorbing them would let an agent believe it
+      // received human-readable sizes when it did not.
+      if (hasFlag(rest, "--human-readable")) {
+        throw new AxiError(
+          "--human-readable is a display-only aws s3 ls flag with no s3api equivalent; aws-axi reports size as a plain integer",
+          "USAGE_ERROR",
+          ["Remove --human-readable — aws-axi reports size as a plain integer"],
+        );
+      }
+      if (hasFlag(rest, "--summarize")) {
+        throw new AxiError(
+          "--summarize is a display-only aws s3 ls flag with no s3api equivalent",
+          "USAGE_ERROR",
+          [
+            "Remove --summarize",
+            "To count objects: aws-axi s3 ls s3://bucket/ --query 'length(Contents)'",
+          ],
+        );
+      }
+
       const prefix = rest.find((a) => a.startsWith("s3://"));
       const startingToken = parseFlag(rest, "--starting-token");
+
+      if (prefix === undefined) {
+        // ── No-URI path → s3api list-buckets ──────────────────────────────────
+        // Intercept flags that only apply to the object-listing (prefix) path.
+        if (hasFlag(rest, "--recursive")) {
+          throw new AxiError(
+            "--recursive requires a s3:// URI; it is not valid when listing all buckets",
+            "USAGE_ERROR",
+            ["To list objects recursively: aws-axi s3 ls s3://bucket/ --recursive"],
+          );
+        }
+        if (hasFlag(rest, "--request-payer")) {
+          throw new AxiError(
+            "--request-payer is only valid when listing objects (s3:// URI path); it is not accepted by s3api list-buckets",
+            "USAGE_ERROR",
+            ["--request-payer is valid for: aws-axi s3 ls s3://bucket/ --request-payer requester"],
+          );
+        }
+
+        // --bucket-name-prefix (aws s3 ls flag) → --prefix (list-buckets parameter).
+        // The aws s3 ls flag name differs from the underlying s3api parameter name;
+        // forwarding it verbatim causes list-buckets to exit 252 "Unknown options".
+        const bucketNamePrefix = parseFlag(rest, "--bucket-name-prefix");
+
+        const argsForPassthrough = stripPositionals(rest);
+        // --bucket-region is a valid list-buckets filter; forward it via passthrough.
+        // --starting-token and --bucket-name-prefix are owned (the latter is translated).
+        const rawPassthrough = collectPassthroughFlags(
+          argsForPassthrough,
+          ["--starting-token", "--bucket-name-prefix"],
+        );
+        // Inject the translated --prefix for --bucket-name-prefix.
+        const translatedPassthrough = bucketNamePrefix !== undefined
+          ? [...rawPassthrough, "--prefix", bucketNamePrefix]
+          : rawPassthrough;
+        const { passthrough, hasQuery } = buildPassthrough(translatedPassthrough);
+        const result = await s3LsRun({ startingToken, passthrough, hasQuery, context });
+        return result as unknown as Record<string, unknown>;
+      }
+
+      // ── Prefix path → s3api list-objects-v2 ─────────────────────────────────
+      // Intercept flags that only apply to the bucket-listing (no-URI) path.
+      if (hasFlag(rest, "--bucket-name-prefix")) {
+        throw new AxiError(
+          "--bucket-name-prefix filters bucket names and is only valid when listing all buckets (no s3:// URI)",
+          "USAGE_ERROR",
+          [
+            "To filter by key prefix, include it in the URI: aws-axi s3 ls s3://bucket/prefix/",
+            "To filter buckets by name: aws-axi s3 ls --bucket-name-prefix foo",
+          ],
+        );
+      }
+      if (hasFlag(rest, "--bucket-region")) {
+        throw new AxiError(
+          "--bucket-region filters the bucket list and is only valid when listing all buckets (no s3:// URI)",
+          "USAGE_ERROR",
+          ["To filter buckets by region: aws-axi s3 ls --bucket-region us-east-1"],
+        );
+      }
+
+      const recursive = hasFlag(rest, "--recursive");
       // Strip the s3:// URI positional before collecting passthrough so the
       // heuristic cannot consume it as a boolean flag's value.
       const argsForPassthrough = stripPositionals(rest, prefix);
-      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, ["--starting-token"]);
+      // --recursive sets recursive=true on s3LsRun (drops --delimiter /); it is
+      // never forwarded to s3api list-objects-v2, which does not accept it.
+      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, ["--starting-token"], ["--recursive"]);
       const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
-      const result = await s3LsRun({ prefix, startingToken, passthrough, hasQuery, context });
+      const result = await s3LsRun({ prefix, startingToken, recursive, passthrough, hasQuery, context });
       return result as unknown as Record<string, unknown>;
     }
 
@@ -706,6 +829,16 @@ export async function s3Command(
           "s3 head-object requires --bucket and --key",
           "USAGE_ERROR",
           ["Usage: aws-axi s3 head-object --bucket <name> --key <key>"],
+        );
+      }
+      // Intercept aws s3-level flags that have no s3api head-object equivalent.
+      // head-object fetches metadata for a single key; --recursive and display
+      // flags from the high-level aws s3 commands do not apply here.
+      if (hasFlag(rest, "--recursive")) {
+        throw new AxiError(
+          "--recursive is not valid for s3 head-object (head-object fetches metadata for a single key, not a prefix)",
+          "USAGE_ERROR",
+          ["Remove --recursive — head-object requires --bucket and --key for a single object"],
         );
       }
       // head-object maps to s3api head-object — all flags are named, no positionals.

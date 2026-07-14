@@ -963,3 +963,418 @@ describe("--query bypass at captureMain level — ssm/kms/lambda/secrets/s3-head
     expect(output).toContain(MARKER);
   });
 });
+
+// ── s3 ls flag translation — issue #38 ───────────────────────────────────────
+//
+// s3 ls rewrites to s3api (list-buckets for no-URI, list-objects-v2 for prefix).
+// Each aws s3-level flag must be handled deliberately — not blindly forwarded
+// into a child that will reject them, and not silently dropped.
+//
+// Full flag × path matrix (implemented in s3Command):
+//   --recursive (prefix)       → drops --delimiter / (real semantic; NOT forwarded)
+//   --recursive (no-URI)       → USAGE_ERROR (listing buckets has no recursion)
+//   --human-readable (both)    → USAGE_ERROR (display-only)
+//   --summarize (both)         → USAGE_ERROR (display-only)
+//   --page-size (prefix)       → forwarded verbatim (valid list-objects-v2 flag)
+//   --request-payer (prefix)   → forwarded verbatim (valid list-objects-v2 flag)
+//   --request-payer (no-URI)   → USAGE_ERROR (invalid for list-buckets)
+//   --bucket-name-prefix (no-URI) → translated to --prefix (list-buckets param)
+//   --bucket-name-prefix (prefix) → USAGE_ERROR (filters bucket names, not objects)
+//   --bucket-region (no-URI)   → forwarded verbatim (valid list-buckets filter)
+//   --bucket-region (prefix)   → USAGE_ERROR (filters bucket list, not objects)
+//
+// Default delimiter behavior (blocker 1 from review):
+//   s3 ls s3://b/ (no --recursive) → --delimiter / IS sent (matches real aws s3 ls)
+//   s3 ls s3://b/ --recursive      → --delimiter is NOT sent (all nested keys returned)
+//
+// CommonPrefixes (blocker 1 from review):
+//   When --delimiter / is active, S3 returns CommonPrefixes ("folder" entries).
+//   Projection maps them to prefixes[]. Folder-only buckets must NOT report empty.
+
+/**
+ * Stub that FAILS (exits 252) if `rejectedArg` appears anywhere in its argv.
+ * Exits 0 with validStdout otherwise.
+ */
+function createRejectArgStub(spec: {
+  rejectedArg: string;
+  validStdout: string;
+}): string {
+  const dir = mkdtempSync(join(tmpdir(), "aws-axi-reject-"));
+  tempDirs.push(dir);
+  const p = join(dir, "aws");
+  const script = [
+    "#!/bin/sh",
+    "for arg in \"$@\"; do",
+    `  if [ "$arg" = ${shellQuote(spec.rejectedArg)} ]; then`,
+    `    printf 'REJECTED: %s must NOT be forwarded to s3api\\n' ${shellQuote(spec.rejectedArg)} >&2`,
+    "    exit 252",
+    "  fi",
+    "done",
+    `printf '%s' ${shellQuote(spec.validStdout)}`,
+    "exit 0",
+  ].join("\n");
+  writeFileSync(p, script);
+  chmodSync(p, 0o755);
+  return p;
+}
+
+/**
+ * Stub that:
+ *  - FAILS (exits 252) if `rejectedArg` appears in argv.
+ *  - FAILS (exits 1)   if `requiredArg` is absent from argv.
+ *  - Exits 0 with validStdout otherwise.
+ *
+ * Used to prove a flag was TRANSLATED (not forwarded verbatim):
+ * the original flag is rejected, the translated flag is required.
+ */
+function createTranslationGuardStub(spec: {
+  rejectedArg: string;
+  requiredArg: string;
+  validStdout: string;
+}): string {
+  const dir = mkdtempSync(join(tmpdir(), "aws-axi-translate-"));
+  tempDirs.push(dir);
+  const p = join(dir, "aws");
+  const script = [
+    "#!/bin/sh",
+    "has_rejected=0",
+    "has_required=0",
+    "for arg in \"$@\"; do",
+    `  [ "$arg" = ${shellQuote(spec.rejectedArg)} ] && has_rejected=1`,
+    `  [ "$arg" = ${shellQuote(spec.requiredArg)} ] && has_required=1`,
+    "done",
+    `if [ "$has_rejected" = "1" ]; then`,
+    `  printf 'REJECTED: %s was forwarded verbatim (expected translation)\\n' ${shellQuote(spec.rejectedArg)} >&2`,
+    "  exit 252",
+    "fi",
+    `if [ "$has_required" != "1" ]; then`,
+    `  printf 'MISSING: %s was not found in argv\\n' ${shellQuote(spec.requiredArg)} >&2`,
+    "  exit 1",
+    "fi",
+    `printf '%s' ${shellQuote(spec.validStdout)}`,
+    "exit 0",
+  ].join("\n");
+  writeFileSync(p, script);
+  chmodSync(p, 0o755);
+  return p;
+}
+
+/** Minimal list-objects-v2 response with one object (no CommonPrefixes). */
+const ONE_OBJECT_RESPONSE = JSON.stringify({
+  Contents: [
+    {
+      Key: "file.txt",
+      Size: 1024,
+      LastModified: "2024-01-01T00:00:00+00:00",
+      ETag: '"abc"',
+      StorageClass: "STANDARD",
+    },
+  ],
+  KeyCount: 1,
+  MaxKeys: 20,
+  IsTruncated: false,
+  Name: "bucket",
+  Prefix: "",
+});
+
+/** list-objects-v2 response with NO objects but two CommonPrefixes (folder-only bucket). */
+const FOLDERS_ONLY_RESPONSE = JSON.stringify({
+  Contents: [],
+  CommonPrefixes: [
+    { Prefix: "logs/" },
+    { Prefix: "data/" },
+  ],
+  KeyCount: 0,
+  MaxKeys: 20,
+  IsTruncated: false,
+  Name: "bucket",
+  Prefix: "",
+});
+
+/** list-buckets response (for no-URI path tests). */
+const LIST_BUCKETS_RESP = JSON.stringify({
+  Buckets: [
+    { Name: "my-bucket", CreationDate: "2024-01-01T00:00:00+00:00" },
+  ],
+  Owner: { DisplayName: "me", ID: "abc" },
+});
+
+describe("s3 ls flag translation — #38", () => {
+  // ── Blocker 1: default delimiter behavior ─────────────────────────────────
+  //
+  // Real `aws s3 ls s3://b/` sends ?delimiter=%2F; aws-axi's default did NOT
+  // (it behaved like --recursive). The fix adds --delimiter / by default.
+  //
+  // Revert-proof: remove `args.push("--delimiter", "/")` from s3LsRun →
+  //   test "default sends --delimiter" goes RED (stub requires --delimiter, doesn't get it).
+  //   test "recursive drops --delimiter" goes RED (stub rejects --delimiter, gets it).
+
+  it("s3 ls s3://b/ (no --recursive): --delimiter / IS sent to s3api child", async () => {
+    // Stub requires --delimiter in argv; exits 1 if absent.
+    // Before fix: no --delimiter sent → stub exits 1 (MISSING_FLAG) → test fails.
+    // After fix:  --delimiter / sent by default → stub exits 0 → test passes.
+    const binary = createArgGuardStub({
+      requiredArg: "--delimiter",
+      validStdout: ONE_OBJECT_RESPONSE,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("file.txt");
+  });
+
+  it("s3 ls s3://b/ --recursive: --delimiter is NOT sent to s3api child", async () => {
+    // Stub exits 252 if --delimiter appears in argv.
+    // Before fix: no --delimiter sent regardless → stub exits 0 (accidentally GREEN).
+    // After fix:  --recursive drops the delimiter → stub exits 0 (correctly GREEN).
+    // Proven via "default sends delimiter" test: without the fix that test is RED,
+    // proving the default did NOT send a delimiter — so this test was vacuously true
+    // before the fix. Both tests together prove the fix is load-bearing.
+    const binary = createRejectArgStub({
+      rejectedArg: "--delimiter",
+      validStdout: ONE_OBJECT_RESPONSE,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/", "--recursive"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("file.txt");
+  });
+
+  // ── Blocker 1: CommonPrefixes — folder-only bucket must NOT report empty ──
+  //
+  // Revert-proof: remove `const prefixes = (resp.CommonPrefixes ?? []).map(...)` and
+  // keep `if (objects.length === 0) return { empty: true }` → test goes RED because
+  // a folder-only response still hits the empty path and outputs "No objects found".
+
+  it("s3 ls s3://b/: folder-only bucket (CommonPrefixes, empty Contents) is NOT reported as empty", async () => {
+    // Without the fix: Contents=[] → objects.length===0 → empty: true → "No objects found".
+    // After fix: prefixes=[{prefix:"logs/"},{prefix:"data/"}] → totalItems=2 → not empty.
+    const binary = createStub({ stdout: FOLDERS_ONLY_RESPONSE, exitCode: 0 });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).not.toContain("No objects found");
+    expect(output).toContain("logs/");
+    expect(output).toContain("data/");
+  });
+
+  // ── --recursive: must NOT be forwarded to s3api child (drops delimiter only) ─
+  //
+  // Revert-proof: remove ["--recursive"] from ownedBoolFlags in s3Command →
+  // --recursive reaches stub → stub exits 252 → test fails.
+
+  it("s3 ls s3://b/ --recursive: --recursive is NOT forwarded to s3api child", async () => {
+    const binary = createRejectArgStub({
+      rejectedArg: "--recursive",
+      validStdout: ONE_OBJECT_RESPONSE,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/", "--recursive"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).not.toContain("REJECTED");
+    expect(output).not.toContain("USAGE_ERROR");
+    expect(output).toContain("objects");
+  });
+
+  it("s3 ls s3://b/ --recursive: returns enriched object listing (no spurious empty)", async () => {
+    const binary = createStub({ stdout: ONE_OBJECT_RESPONSE, exitCode: 0 });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/", "--recursive"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).not.toContain("No objects found");
+    expect(output).toContain("file.txt");
+  });
+
+  // ── --human-readable: USAGE_ERROR (both paths) ───────────────────────────
+  //
+  // Revert-proof: remove the --human-readable guard → forwarded to s3api →
+  // stub emits "Unknown options: --human-readable" → test expects clean overlay error.
+
+  it("s3 ls --human-readable: overlay emits clean USAGE_ERROR (not opaque s3api error)", async () => {
+    const binary = createStub({ exitCode: 252, stderr: "Unknown options: --human-readable" });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/", "--human-readable"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeDefined();
+    expect(output).toContain("--human-readable");
+    expect(output).not.toContain("Unknown options");
+  });
+
+  // ── --summarize: USAGE_ERROR (both paths) ────────────────────────────────
+
+  it("s3 ls --summarize: overlay emits clean USAGE_ERROR (not opaque s3api error)", async () => {
+    const binary = createStub({ exitCode: 252, stderr: "Unknown options: --summarize" });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/", "--summarize"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeDefined();
+    expect(output).toContain("--summarize");
+    expect(output).not.toContain("Unknown options");
+  });
+
+  // ── --page-size: forwarded verbatim to list-objects-v2 (already works) ───
+
+  it("s3 ls s3://b/ --page-size 5: --page-size IS forwarded to s3api child", async () => {
+    const binary = createArgGuardStub({
+      requiredArg: "--page-size",
+      validStdout: ONE_OBJECT_RESPONSE,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/", "--page-size", "5"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).not.toContain("USAGE_ERROR");
+  });
+
+  // ── Blocker 2: --bucket-name-prefix → --prefix translation (no-URI path) ─
+  //
+  // `aws s3 ls --bucket-name-prefix foo` → s3api list-buckets --prefix foo
+  // (--bucket-name-prefix is an aws s3 flag; --prefix is the list-buckets param)
+  //
+  // Revert-proof: remove the bucket-name-prefix extraction and --prefix injection
+  // from s3Command → --bucket-name-prefix forwarded verbatim → s3api exits 252 →
+  // translationGuard stub sees the REJECTED arg → test fails.
+
+  it("s3 ls --bucket-name-prefix foo: translated to --prefix foo for list-buckets (NOT forwarded verbatim)", async () => {
+    // Stub exits 252 if --bucket-name-prefix appears (untranslated).
+    // Stub exits 1  if --prefix is absent (translation didn't happen).
+    // Exits 0 when --prefix is present and --bucket-name-prefix is absent.
+    // Before fix: --bucket-name-prefix forwarded → stub exits 252 → test fails.
+    // After fix:  --prefix injected, --bucket-name-prefix stripped → stub exits 0.
+    const binary = createTranslationGuardStub({
+      rejectedArg: "--bucket-name-prefix",
+      requiredArg: "--prefix",
+      validStdout: LIST_BUCKETS_RESP,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "--bucket-name-prefix", "foo"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).not.toContain("REJECTED");
+    expect(output).not.toContain("MISSING");
+    expect(output).toContain("my-bucket");
+  });
+
+  // ── Blocker 2: --recursive on no-URI path → USAGE_ERROR ─────────────────
+  //
+  // Revert-proof: remove the --recursive guard for the no-URI path → --recursive
+  // is forwarded to list-buckets → list-buckets rejects it → stub's "Unknown
+  // options" message appears; test expects overlay USAGE_ERROR.
+
+  it("s3 ls --recursive (no URI): USAGE_ERROR — listing buckets has no recursion concept", async () => {
+    const binary = createStub({ exitCode: 252, stderr: "Unknown options: --recursive" });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "--recursive"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeDefined();
+    expect(output).toContain("--recursive");
+    expect(output).not.toContain("Unknown options");
+  });
+
+  // ── Blocker 2: --request-payer on no-URI path → USAGE_ERROR ─────────────
+  //
+  // --request-payer is valid for list-objects-v2 but NOT for list-buckets.
+  // Revert-proof: remove the guard → forwarded to list-buckets → s3api rejects it.
+
+  it("s3 ls --request-payer requester (no URI): USAGE_ERROR — not valid for list-buckets", async () => {
+    const binary = createStub({ exitCode: 252, stderr: "Unknown options: --request-payer" });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "--request-payer", "requester"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeDefined();
+    expect(output).toContain("--request-payer");
+    expect(output).not.toContain("Unknown options");
+  });
+
+  // ── Blocker 2: --bucket-name-prefix on prefix path → USAGE_ERROR ─────────
+
+  it("s3 ls s3://b/ --bucket-name-prefix foo: USAGE_ERROR — filters bucket names, not objects", async () => {
+    const binary = createStub({ exitCode: 252, stderr: "Unknown options: --bucket-name-prefix" });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/", "--bucket-name-prefix", "foo"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeDefined();
+    expect(output).toContain("--bucket-name-prefix");
+    expect(output).not.toContain("Unknown options");
+  });
+
+  // ── Blocker 2: --bucket-region on prefix path → USAGE_ERROR ─────────────
+
+  it("s3 ls s3://b/ --bucket-region us-east-1: USAGE_ERROR — filters bucket list, not objects", async () => {
+    const binary = createStub({ exitCode: 252, stderr: "Unknown options: --bucket-region" });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/", "--bucket-region", "us-east-1"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeDefined();
+    expect(output).toContain("--bucket-region");
+    expect(output).not.toContain("Unknown options");
+  });
+});
+
+// ── s3 head-object flag guard — issue #38 ────────────────────────────────────
+//
+// head-object maps to s3api head-object. If a user mistakenly passes an aws
+// s3 display flag (--recursive) to head-object, it must produce a clean
+// USAGE_ERROR rather than forwarding to s3api and dying with an opaque message.
+//
+// Revert-proof: remove the --recursive USAGE_ERROR guard in the "head-object"
+// case of s3Command → --recursive is forwarded → stub emits "Unknown options".
+
+describe("s3 head-object flag guard — #38", () => {
+  it("s3 head-object --recursive: overlay emits clean USAGE_ERROR", async () => {
+    const binary = createStub({ exitCode: 252, stderr: "Unknown options: --recursive" });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "head-object", "--bucket", "b", "--key", "k", "--recursive"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeDefined();
+    expect(output).toContain("--recursive");
+    expect(output).not.toContain("Unknown options");
+  });
+});
