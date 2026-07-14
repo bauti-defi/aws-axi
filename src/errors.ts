@@ -7,15 +7,15 @@ export { AxiError };
  * Exit code contract (mirrors spec §error-surfacing):
  *   252 = usage error
  *   253 = no-credentials / auth-expired
- *   254 = service-client-error
+ *   254 = service-client-error (incl. SSM delivery failures: TimedOut, Undeliverable, etc.)
  *   255 = general / unknown
  *   127 = aws CLI not installed
- *     1 = remote-exec-error (remote shell exited non-zero; SSM API itself succeeded)
- *     0 = DryRunOperation (success signal)
+ *   250 = SSM -1 sentinel (invocation not run; ResponseCode=-1 outside a delivery-failure state)
+ * 1..249 = remote shell exit code propagated verbatim (ssh/docker exec semantics)
+ *     0 = success (also DryRunOperation success signal)
  *
- * REMOTE_EXEC_ERROR (exit 1) is distinct from SERVICE_CLIENT_ERROR (exit 254):
- * the AWS SSM API call succeeded; the *remote shell command* failed.
- * An agent must distinguish "AWS denied my call" from "command ran but bombed".
+ * SSM-specific exits (1..249, 250, 254) are set directly on process.exitCode by
+ * ssmCommand — they do not map through AwsErrorCode / awsExitCode.
  */
 export type AwsErrorCode =
   | "USAGE_ERROR"
@@ -24,7 +24,6 @@ export type AwsErrorCode =
   | "SERVICE_CLIENT_ERROR"
   | "AWS_NOT_INSTALLED"
   | "DRY_RUN_SUCCESS"
-  | "REMOTE_EXEC_ERROR"
   | "UNKNOWN";
 
 export interface ParsedAwsError {
@@ -163,9 +162,6 @@ export function awsExitCode(code: AwsErrorCode): number {
       return 0;
     case "AWS_NOT_INSTALLED":
       return 127;
-    case "REMOTE_EXEC_ERROR":
-      // exit 1 = conventional "command failed"; distinct from 254 (AWS API error)
-      return 1;
     default:
       return 255;
   }

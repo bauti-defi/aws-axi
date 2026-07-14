@@ -824,6 +824,48 @@ const TEST_COMMAND_ID = "cmd-12345678-test-0001-abcdef";
 const TEST_INSTANCE_ID = "i-0abc123def456789";
 const TEST_COMMAND = "docker ps";
 
+// GCI response where remote command exited 7 (for verbatim exit-code test)
+const GCI_FAILED_7 = JSON.stringify({
+  CommandId: TEST_COMMAND_ID,
+  InstanceId: TEST_INSTANCE_ID,
+  DocumentName: "AWS-RunShellScript",
+  Status: "Failed",
+  StatusDetails: "Failed",
+  ResponseCode: 7,
+  StandardOutputContent: "",
+  StandardErrorContent: "script exited with code 7\n",
+  ExecutionElapsedTime: "PT0.200S",
+});
+
+// GCI response for AWS-level delivery timeout (SSM never ran the shell)
+const GCI_TIMED_OUT = JSON.stringify({
+  CommandId: TEST_COMMAND_ID,
+  InstanceId: TEST_INSTANCE_ID,
+  DocumentName: "AWS-RunShellScript",
+  Status: "TimedOut",
+  StatusDetails: "DeliveryTimedOut",
+  ResponseCode: -1,
+  StandardOutputContent: "",
+  StandardErrorContent: "",
+  ExecutionElapsedTime: "",
+});
+
+// GCI response with a Windows-style path in stdout (contains literal \n pair)
+const GCI_WINDOWS_PATH = JSON.stringify({
+  CommandId: TEST_COMMAND_ID,
+  InstanceId: TEST_INSTANCE_ID,
+  DocumentName: "AWS-RunShellScript",
+  Status: "Success",
+  StatusDetails: "Success",
+  ResponseCode: 0,
+  // Runtime value after JSON.parse: "C:\node\bin" — backslash-n, not a newline.
+  // The broken double-unescape would split this into ["C:", "ode\bin"],
+  // destroying "node". The fixed toLines keeps it as one element.
+  StandardOutputContent: "C:\\node\\bin",
+  StandardErrorContent: "",
+  ExecutionElapsedTime: "PT0.100S",
+});
+
 const SEND_COMMAND_RESPONSE = JSON.stringify({
   Command: { CommandId: TEST_COMMAND_ID },
 });
@@ -962,9 +1004,12 @@ describe("ssm run — remote non-zero exit (captureMain)", () => {
     expect(output).not.toContain("SERVICE_CLIENT_ERROR");
   });
 
-  it("REMOTE_EXEC_ERROR exit code is 1 (not 254 SERVICE_CLIENT_ERROR)", async () => {
-    // Revert-proof: change `process.exitCode = 1` to something else in ssmCommand
-    // → this assertion fails.
+  it("remote exit code propagated verbatim (ResponseCode=1 → process exit 1, not 254)", async () => {
+    // ssh / docker exec semantics: remote exit is propagated verbatim (1..249),
+    // never collapsed to a hardcoded sentinel. 254 is reserved for delivery failures.
+    //
+    // Revert-proof: remove the `remoteExitCode > 0` branch in ssmCommand
+    // → no assignment → exitCode is undefined → assertion fails.
     const binary = createStub({
       "ssm-send-command": { stdout: SEND_COMMAND_RESPONSE },
       "ssm-get-command-invocation": { stdout: GCI_FAILED },
@@ -975,8 +1020,8 @@ describe("ssm run — remote non-zero exit (captureMain)", () => {
       { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
     );
 
-    // exit code 1 = REMOTE_EXEC_ERROR (distinct from 254 = SERVICE_CLIENT_ERROR).
-    // 1 is conventional "command failed" — legible to set -e scripts and agents.
+    // ResponseCode=1 → process exit 1 (verbatim; NOT a hardcoded sentinel).
+    // Distinct from 254 (delivery failure) and 252 (usage error).
     expect(exitCode).toBe(1);
   });
 });
@@ -1261,5 +1306,348 @@ describe("ssm get-command-invocation — --query bypass (captureMain)", () => {
     expect(output).toContain(MARKER);
     // Overlay projection was bypassed — no projected "commandId" / "status" keys
     expect(output).not.toContain("commandId: null");
+  });
+});
+
+// ─── BLOCKER 1: InvocationDoesNotExist retry ─────────────────────────────────
+//
+// After send-command, SSM takes ~0.5–2 s to register the invocation. The first
+// poll(s) may receive InvocationDoesNotExist. This is non-fatal — treat it as
+// non-terminal and retry with backoff.
+//
+// Without the fix: the first InvocationDoesNotExist propagates as a fatal
+// SERVICE_CLIENT_ERROR → aws-axi exits 254 → command stranded with no handle.
+//
+// Revert-proof: remove the InvocationDoesNotExist catch in pollInvocation
+// → first poll throws → captureMain sees exitCode=254 (SERVICE_CLIENT_ERROR).
+
+const INV_NOT_EXISTS_STDERR =
+  "An error occurred (InvocationDoesNotExist) when calling the GetCommandInvocation operation: Invocation does not exist";
+
+describe("ssm run — InvocationDoesNotExist retry (captureMain)", () => {
+  it("retries through InvocationDoesNotExist until the invocation registers", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-ssm-inv-"));
+    tempDirs.push(dir);
+    const binary = join(dir, "aws");
+    const counterFile = join(dir, "gci-counter");
+
+    // First GCI call → InvocationDoesNotExist; second → Success.
+    const script = [
+      "#!/bin/sh",
+      'case "$1-$2" in',
+      "  ssm-send-command)",
+      `    printf '%s' ${shellQuote(SEND_COMMAND_RESPONSE)}`,
+      "    exit 0;;",
+      "  ssm-get-command-invocation)",
+      `    if [ -f '${counterFile}' ]; then count=$(cat '${counterFile}'); else count=0; fi`,
+      `    count=$((count + 1))`,
+      `    printf '%d' "$count" > '${counterFile}'`,
+      `    if [ "$count" -le 1 ]; then`,
+      `      printf '%s' ${shellQuote(INV_NOT_EXISTS_STDERR)} >&2`,
+      `      exit 254`,
+      `    else`,
+      `      printf '%s' ${shellQuote(GCI_SUCCESS)}`,
+      `      exit 0`,
+      `    fi;;`,
+      "  *)",
+      '    printf "Unexpected: %s %s\\n" "$1" "$2" >&2',
+      "    exit 254;;",
+      "esac",
+    ].join("\n");
+    writeFileSync(binary, script);
+    chmodSync(binary, 0o755);
+
+    const { output, exitCode } = await captureMain(
+      ["ssm", "run", "--instance-ids", TEST_INSTANCE_ID, "--commands", TEST_COMMAND],
+      { PATH: `${dir}:${process.env["PATH"] ?? ""}` },
+    );
+
+    // InvocationDoesNotExist was retried, not fatal — should succeed
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("Success");
+    expect(output).toContain(TEST_COMMAND_ID);
+  });
+
+  it("CommandId appears in error output when InvocationDoesNotExist exhausts timeout", async () => {
+    // Stub always returns InvocationDoesNotExist → eventually --timeout 0 hits.
+    // Even with 0 timeout the send-command must complete first, so the deadline
+    // is guaranteed to be in the past when the first poll fires.
+    //
+    // Revert-proof: the CommandId must be in the error output so the operator
+    // can resume; without the fix, the error doesn't contain it.
+    const binary = createStub({
+      "ssm-send-command": { stdout: SEND_COMMAND_RESPONSE },
+      "ssm-get-command-invocation": {
+        stderr: INV_NOT_EXISTS_STDERR,
+        exitCode: 254,
+      },
+    });
+
+    const { output, exitCode } = await captureMain(
+      [
+        "ssm", "run",
+        "--instance-ids", TEST_INSTANCE_ID,
+        "--commands", TEST_COMMAND,
+        "--timeout", "0",
+      ],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeDefined();
+    expect(exitCode).not.toBe(0);
+    // CommandId MUST appear so the operator can resume
+    expect(output).toContain(TEST_COMMAND_ID);
+  });
+});
+
+// ─── BLOCKER 2: --commands quoting ───────────────────────────────────────────
+//
+// --parameters must be a JSON object (JSON.stringify), not a shell-interpolated
+// string (`commands=["${commands}"]`). Commands with " break the parser.
+//
+// Revert-proof: restore string interpolation → stub receives a non-JSON params
+// value → exits 1 → captureMain sees exitCode non-zero.
+
+describe("ssm run — --commands quoting (captureMain)", () => {
+  it("commands with double quotes are JSON-encoded, not string-interpolated", async () => {
+    const QUOTED_COMMAND = 'grep "error" /var/log/app.log';
+
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-ssm-qc-"));
+    tempDirs.push(dir);
+    const binary = join(dir, "aws");
+
+    // Stub validates --parameters starts with '{' (JSON object).
+    // String-interpolation form starts with 'commands=[' (not a JSON object).
+    const script = [
+      "#!/bin/sh",
+      'case "$1-$2" in',
+      "  ssm-send-command)",
+      "    shift 2; params=''",
+      "    while [ \"$#\" -gt 0 ]; do",
+      "      if [ \"$1\" = \"--parameters\" ] && [ \"$#\" -gt 1 ]; then params=\"$2\"; break; fi",
+      "      shift",
+      "    done",
+      "    case \"$params\" in",
+      "      '{'*)",
+      `        printf '%s' ${shellQuote(SEND_COMMAND_RESPONSE)}`,
+      "        exit 0;;",
+      "      *)",
+      "        printf 'INVALID_PARAMS_NOT_JSON_OBJECT\\n' >&2",
+      "        exit 1;;",
+      "    esac;;",
+      "  ssm-get-command-invocation)",
+      `    printf '%s' ${shellQuote(GCI_SUCCESS)}`,
+      "    exit 0;;",
+      "  *)",
+      '    printf "Unexpected: %s %s\\n" "$1" "$2" >&2',
+      "    exit 254;;",
+      "esac",
+    ].join("\n");
+    writeFileSync(binary, script);
+    chmodSync(binary, 0o755);
+
+    const { output, exitCode } = await captureMain(
+      ["ssm", "run", "--instance-ids", TEST_INSTANCE_ID, "--commands", QUOTED_COMMAND],
+      { PATH: `${dir}:${process.env["PATH"] ?? ""}` },
+    );
+
+    // Stub accepted the JSON-encoded params → must succeed
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("commandId");
+    expect(output).not.toContain("INVALID_PARAMS_NOT_JSON_OBJECT");
+  });
+});
+
+// ─── BLOCKER 3: --query stripped from ssm run ─────────────────────────────────
+//
+// ssm run is a composite (send-command + poll). If --query leaks to send-command,
+// the aws CLI applies JMESPath and returns a scalar instead of the full Command
+// object → CommandId extraction fails → TypeError / exit 255.
+//
+// Revert-proof: remove "--query" from ownedFlagNames in collectPassthroughFlags →
+// stub detects --query in send-command args → exits 1 → captureMain sees non-zero.
+
+describe("ssm run — --query stripped from send-command (captureMain)", () => {
+  it("--query is consumed by the overlay and NOT forwarded to send-command", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-ssm-nq-"));
+    tempDirs.push(dir);
+    const binary = join(dir, "aws");
+
+    // Stub fails if --query appears among send-command arguments.
+    const script = [
+      "#!/bin/sh",
+      'case "$1-$2" in',
+      "  ssm-send-command)",
+      "    for arg in \"$@\"; do",
+      "      if [ \"$arg\" = \"--query\" ]; then",
+      "        printf 'BLOCKER3_QUERY_LEAKED_TO_SEND_COMMAND\\n' >&2",
+      "        exit 1",
+      "      fi",
+      "    done",
+      `    printf '%s' ${shellQuote(SEND_COMMAND_RESPONSE)}`,
+      "    exit 0;;",
+      "  ssm-get-command-invocation)",
+      `    printf '%s' ${shellQuote(GCI_SUCCESS)}`,
+      "    exit 0;;",
+      "  *)",
+      '    printf "Unexpected: %s %s\\n" "$1" "$2" >&2',
+      "    exit 254;;",
+      "esac",
+    ].join("\n");
+    writeFileSync(binary, script);
+    chmodSync(binary, 0o755);
+
+    const { output, exitCode } = await captureMain(
+      [
+        "ssm", "run",
+        "--instance-ids", TEST_INSTANCE_ID,
+        "--commands", TEST_COMMAND,
+        "--query", "Command.CommandId",
+      ],
+      { PATH: `${dir}:${process.env["PATH"] ?? ""}` },
+    );
+
+    // --query was stripped by the overlay → stub did not see it → success
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("commandId");
+    expect(output).not.toContain("BLOCKER3_QUERY_LEAKED_TO_SEND_COMMAND");
+  });
+});
+
+// ─── BLOCKER 4: toLines() backslash path integrity ───────────────────────────
+//
+// awsJson already JSON.parse()s the response → StandardOutputContent has real
+// newlines. An extra .replace(/\\n/g, "\n") would eat the 'n' in backslash-n
+// pairs, corrupting Windows paths: C:\node\bin → ["C:", "ode\bin"].
+//
+// Revert-proof: restore the double-unescape in toLines() → "node" is split away
+// → test RED.
+
+describe("ssm run — backslash path integrity in stdout (captureMain)", () => {
+  it("Windows paths with \\n are not split at the backslash-n pair", async () => {
+    const binary = createStub({
+      "ssm-send-command": { stdout: SEND_COMMAND_RESPONSE },
+      "ssm-get-command-invocation": { stdout: GCI_WINDOWS_PATH },
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["ssm", "run", "--instance-ids", TEST_INSTANCE_ID, "--commands", "where node"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    // "node" must appear intact — not split at the \n pair into "C:" + "ode\bin".
+    // Broken form: toLines("C:\node\bin") → ["C:", "ode\bin"] → "node" absent.
+    expect(output).toContain("node");
+    // The corrupted form produces "ode\bin" as a separate token without "n" prefix.
+    // This is a reliable signal that the backslash-n pair was consumed.
+    expect(output).not.toMatch(/\bode\\?bin\b/);
+  });
+});
+
+describe("ssm get-command-invocation — backslash path integrity (captureMain)", () => {
+  it("Windows paths with \\n in stdout are not corrupted", async () => {
+    const binary = createStub({
+      "ssm-get-command-invocation": { stdout: GCI_WINDOWS_PATH },
+    });
+
+    const { output, exitCode } = await captureMain(
+      [
+        "ssm", "get-command-invocation",
+        "--command-id", TEST_COMMAND_ID,
+        "--instance-id", TEST_INSTANCE_ID,
+      ],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("node");
+  });
+});
+
+// ─── BLOCKER 5a: verbatim remote exit code propagation ───────────────────────
+//
+// Remote exit codes must be propagated verbatim (1..249), NOT collapsed to 1.
+// Remote exit 7 → aws-axi exit 7 (ssh / docker exec semantics).
+//
+// Revert-proof: hardcode `process.exitCode = 1` instead of Math.min(remoteExitCode, 249)
+// → captureMain sees exitCode=1 not 7 → test RED.
+
+describe("ssm run — verbatim exit code propagation (captureMain)", () => {
+  it("remote exit 7 → process exit 7 (not collapsed to 1)", async () => {
+    const binary = createStub({
+      "ssm-send-command": { stdout: SEND_COMMAND_RESPONSE },
+      "ssm-get-command-invocation": { stdout: GCI_FAILED_7 },
+    });
+
+    const { exitCode } = await captureMain(
+      ["ssm", "run", "--instance-ids", TEST_INSTANCE_ID, "--commands", "exit 7"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    // Verbatim propagation: remote 7 → aws-axi 7, not 1.
+    // Distinguishes from the "command not found" case (exit 127) etc.
+    expect(exitCode).toBe(7);
+  });
+});
+
+// ─── BLOCKER 5b: delivery failure → exit 254 ─────────────────────────────────
+//
+// When SSM never runs the shell (TimedOut, Undeliverable, Cancelled, etc.),
+// ResponseCode is -1 and status is a delivery-failure state. Exit must be 254
+// (SERVICE_CLIENT_ERROR), NOT 1 (which implies "remote shell ran and failed").
+//
+// Revert-proof: remove SSM_DELIVERY_FAILURE_STATES gate in ssmCommand →
+// remoteExitCode=-1 falls through to exit 250 (sentinel) or no branch fires →
+// exitCode is 250 not 254 → test RED.
+
+describe("ssm run — delivery failure exits 254 (captureMain)", () => {
+  it("TimedOut (ResponseCode=-1) exits 254, not 1 or 250", async () => {
+    const binary = createStub({
+      "ssm-send-command": { stdout: SEND_COMMAND_RESPONSE },
+      "ssm-get-command-invocation": { stdout: GCI_TIMED_OUT },
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["ssm", "run", "--instance-ids", TEST_INSTANCE_ID, "--commands", TEST_COMMAND],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    // Delivery failure → 254 (SSM API-level failure, not remote shell failure)
+    expect(exitCode).toBe(254);
+    // Verify the status is present in the structured output
+    expect(output).toContain("TimedOut");
+    // Must NOT misreport as exit 1 (would imply remote shell ran and failed)
+    expect(exitCode).not.toBe(1);
+  });
+});
+
+// ─── BLOCKER 5c: InProgress single-call → exit 0, no false failure ───────────
+//
+// `get-command-invocation` without --wait may return InProgress (ResponseCode=-1).
+// This is NOT a failure — the command is still running. Exiting non-zero here
+// would abort `set -e` polling loops.
+//
+// Revert-proof: remove SSM_NON_TERMINAL_STATES guard → -1 sentinel branch fires
+// → exit 250 (false failure) → test RED.
+
+describe("ssm get-command-invocation — InProgress single-call exits 0 (captureMain)", () => {
+  it("InProgress (ResponseCode=-1) single call exits 0 — no false failure", async () => {
+    const binary = createStub({
+      "ssm-get-command-invocation": { stdout: GCI_IN_PROGRESS },
+    });
+
+    const { output, exitCode } = await captureMain(
+      [
+        "ssm", "get-command-invocation",
+        "--command-id", TEST_COMMAND_ID,
+        "--instance-id", TEST_INSTANCE_ID,
+      ],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    // Still running → exit 0. A set -e polling loop must not abort here.
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("InProgress");
   });
 });

@@ -58,6 +58,39 @@ const SSM_TERMINAL_STATES = new Set([
   "Cancelling",  // practically terminal
 ]);
 
+/**
+ * Subset of terminal states that represent AWS-level delivery failures —
+ * SSM never ran the shell command on the instance. Exit 254 (SERVICE_CLIENT_ERROR).
+ *
+ * Exit code contract for ssm run / get-command-invocation (ssh/docker exec semantics):
+ *   0       = success (remote exit 0, or non-terminal status — see below)
+ *   1..249  = remote shell exit code, propagated verbatim
+ *   250     = -1 sentinel in an unexpected terminal context (safety net; rare)
+ *   254     = delivery failure: TimedOut, Undeliverable, Cancelled, etc.
+ */
+const SSM_DELIVERY_FAILURE_STATES = new Set([
+  "TimedOut",
+  "Undeliverable",
+  "DeliveryTimedOut",
+  "Cancelled",
+  "Cancelling",
+]);
+
+/**
+ * Non-terminal SSM statuses: command is still running or queued.
+ * `get-command-invocation` without --wait may return these. They MUST exit 0
+ * so that `set -e` polling loops (`until aws-axi ssm get-command-invocation ...`)
+ * don't abort on a normal mid-flight response.
+ * ResponseCode is -1 for all non-terminal states; we must not map that -1 to
+ * exit 250 or any non-zero code.
+ */
+const SSM_NON_TERMINAL_STATES = new Set([
+  "Pending",
+  "InProgress",
+  "Delayed",
+  "Waiting",
+]);
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, Math.max(0, ms)));
 }
@@ -282,10 +315,12 @@ flags (get-parameters-by-path):
   --path <path>          Parameter path prefix (alternative to positional)
 
 exit codes (ssm run / get-command-invocation):
-  0   = success (remote command exited 0)
-  1   = REMOTE_EXEC_ERROR — remote command ran but exited non-zero (distinct from 254)
-  252 = USAGE_ERROR — missing required flag
-  254 = SERVICE_CLIENT_ERROR — SSM API failure (delivery timeout, undeliverable, etc.)
+  0       = success (remote exit 0); also non-terminal status (InProgress, Pending…) for
+            get-command-invocation without --wait — command still running, not an error
+  1..249  = remote shell exit code propagated verbatim (ssh / docker exec semantics)
+  250     = SSM -1 sentinel in an unexpected terminal context (safety net; rare in practice)
+  252     = USAGE_ERROR — missing required flag
+  254     = delivery failure — AWS never ran the command (TimedOut, Undeliverable, Cancelled…)
 
 examples:
   aws-axi ssm run --instance-ids i-0abc123 --commands "docker ps"
@@ -409,23 +444,19 @@ function projectParameter(
 // ─── Shared helpers for run + get-command-invocation ─────────────────────────
 
 /**
- * Unescape SSM output content.
+ * Split SSM stdout/stderr content into a line array for TOON rendering.
  *
- * SSM sometimes encodes newlines as literal \\n sequences within the JSON
- * string value (two chars: backslash + n). JSON.parse converts JSON \\n escapes
- * to real newlines, but TOON's escapeString then converts those back to \\n in
- * the rendered output. By calling toLines() we avoid the blob rendering problem
- * regardless of the exact encoding the SSM service uses.
+ * awsJson already JSON.parse()s the response, so content contains real
+ * newlines — no additional unescaping is needed here. A second replace
+ * for "\\n" → "\n" would corrupt Windows paths (C:\node\bin becomes
+ * ["C:", "ode\bin"] because the `\n` pair is eaten as a newline separator).
  *
- * If the string still has literal \\n (backslash-n, two chars) after JSON.parse
- * (the double-encoding case), this function converts them to real newlines before
- * splitting into lines.
+ * All we do is trim the single trailing newline that unix commands conventionally
+ * append, then split on real newlines. The resulting string[] renders as
+ * separate TOON array rows instead of a single quoted \n-blob.
  */
 function toLines(content: string): readonly string[] {
-  // Handle the double-encoding case: literal backslash-n → real newline
-  const normalised = content.replace(/\\n/g, "\n").replace(/\\r/g, "\r");
-  // Trim a single trailing newline (standard unix command output convention)
-  const trimmed = normalised.replace(/\n$/, "");
+  const trimmed = content.replace(/\n$/, "");
   return trimmed === "" ? [] : trimmed.split("\n");
 }
 
@@ -436,8 +467,16 @@ function toLines(content: string): readonly string[] {
  * Back-off: starts at POLL_INITIAL_MS, multiplied by POLL_MULTIPLIER each
  * round, capped at POLL_MAX_MS. Never sleeps past the deadline.
  *
- * On timeout: throws an UNKNOWN AxiError that includes the CommandId so the
- * operator can resume with `get-command-invocation --command-id <id> --wait`.
+ * InvocationDoesNotExist handling:
+ *   After send-command, SSM takes ~0.5–2 s to register the invocation. The
+ *   first poll(s) may receive InvocationDoesNotExist — this is NOT a fatal
+ *   error; it means "not registered yet". We treat it as non-terminal and
+ *   retry until the deadline.
+ *
+ * CommandId invariant:
+ *   Every failure path (timeout, fatal error) surfaces the CommandId so the
+ *   operator can resume with `get-command-invocation --command-id <id> --wait`.
+ *   A command running on a prod box must never be stranded without a handle.
  */
 async function pollInvocation(
   commandId: string,
@@ -448,37 +487,73 @@ async function pollInvocation(
   let intervalMs = POLL_INITIAL_MS;
 
   while (true) {
+    // Deadline check BEFORE the poll so --timeout 0 reliably fails fast.
     if (Date.now() >= deadlineMs) {
       throw new AxiError(
-        `ssm run timed out before ${instanceId} reached a terminal state — CommandId: ${commandId}`,
+        `ssm run timed out waiting for ${instanceId} to reach a terminal state — CommandId: ${commandId}`,
         "UNKNOWN",
         [
+          `CommandId: ${commandId}`,
           `Resume with: aws-axi ssm get-command-invocation --command-id ${commandId} --instance-id ${instanceId} --wait`,
-          `Or use the raw aws CLI: aws ssm get-command-invocation --command-id ${commandId} --instance-id ${instanceId}`,
         ],
       );
     }
 
-    const resp = await awsJson<RawGetCommandInvocationResponse>(
-      [
-        "ssm", "get-command-invocation",
-        "--command-id", commandId,
-        "--instance-id", instanceId,
-      ],
-      toRunOpts(options),
-    );
+    let resp: RawGetCommandInvocationResponse;
+    try {
+      resp = await awsJson<RawGetCommandInvocationResponse>(
+        [
+          "ssm", "get-command-invocation",
+          "--command-id", commandId,
+          "--instance-id", instanceId,
+        ],
+        toRunOpts(options),
+      );
+    } catch (err) {
+      // InvocationDoesNotExist is normal for ~0.5–2 s after send-command while
+      // the invocation registers. Treat it as non-terminal and retry.
+      if (err instanceof AxiError && err.message.includes("InvocationDoesNotExist")) {
+        const remaining = deadlineMs - Date.now();
+        if (remaining <= 0) {
+          throw new AxiError(
+            `ssm run timed out before invocation registered — CommandId: ${commandId}`,
+            "UNKNOWN",
+            [
+              `CommandId: ${commandId}`,
+              `Resume with: aws-axi ssm get-command-invocation --command-id ${commandId} --instance-id ${instanceId} --wait`,
+            ],
+          );
+        }
+        await sleep(Math.min(intervalMs, remaining));
+        intervalMs = Math.min(intervalMs * POLL_MULTIPLIER, POLL_MAX_MS);
+        continue;
+      }
+
+      // Fatal error (auth, network, etc.) — re-throw with CommandId so the
+      // operator can locate the running command.
+      const origMsg = err instanceof Error ? err.message : String(err);
+      throw new AxiError(
+        `${origMsg} [CommandId: ${commandId}]`,
+        "UNKNOWN",
+        [
+          `CommandId: ${commandId}`,
+          `Resume with: aws-axi ssm get-command-invocation --command-id ${commandId} --instance-id ${instanceId} --wait`,
+        ],
+      );
+    }
 
     if (SSM_TERMINAL_STATES.has(resp.Status)) {
       return resp;
     }
 
-    // Not yet terminal — sleep (bounded by remaining deadline) then poll again.
+    // Non-terminal — sleep bounded by remaining deadline.
     const remaining = deadlineMs - Date.now();
     if (remaining <= 0) {
       throw new AxiError(
         `ssm run timed out after polling — CommandId: ${commandId}`,
         "UNKNOWN",
         [
+          `CommandId: ${commandId}`,
           `Resume with: aws-axi ssm get-command-invocation --command-id ${commandId} --instance-id ${instanceId} --wait`,
         ],
       );
@@ -560,29 +635,35 @@ async function runSsmRun(
   }
 
   // Collect passthrough for send-command.
-  // Strip --query: ssm run is a composite (2 calls); --query on send-command
-  // would yield a JMESPath result instead of the full Command object, breaking
-  // CommandId extraction.
+  //
+  // --query is added to ownedFlagNames so it is consumed here (not forwarded).
+  // ssm run is a composite operation (send-command + poll); if --query were
+  // forwarded to send-command, the aws CLI would apply JMESPath and return a
+  // scalar instead of the full Command object, breaking CommandId extraction.
+  //
+  // --instance-ids, --commands, --timeout are overlay-owned value flags.
   const rawPassthrough = collectPassthroughFlags(
     options.args,
-    ["--instance-ids", "--commands", "--timeout"],
+    ["--instance-ids", "--commands", "--timeout", "--query"],
     [],
     { service: "ssm", operation: "send-command" },
   );
-  // buildPassthrough strips --output and detects --query;
-  // we deliberately discard hasQuery here (documented above).
+  // buildPassthrough strips --output; --query is already absent (consumed above).
   const { passthrough } = buildPassthrough(rawPassthrough);
 
   // Deadline set BEFORE send-command so the total clock starts immediately.
   const deadlineMs = Date.now() + timeoutSecs * 1000;
 
   // ── 1. Send command ──────────────────────────────────────────────────────────
+  // Use JSON.stringify for --parameters so commands with ", $, `, or \n are
+  // safely encoded. String interpolation (`commands=["${commands}"]`) is broken
+  // for any command containing a double-quote: the aws CLI JSON parser rejects it.
   const sendResp = await awsJson<RawSendCommandResponse>(
     [
       "ssm", "send-command",
       "--document-name", "AWS-RunShellScript",
       "--instance-ids", instanceId,
-      "--parameters", `commands=["${commands}"]`,
+      "--parameters", JSON.stringify({ commands: [commands] }),
       ...passthrough,
     ],
     toRunOpts(options),
@@ -1026,21 +1107,45 @@ export async function ssmCommand(
 
   const result = await ssmRun({ subcommand, args: remainingArgs, context });
 
-  // For ssm run and get-command-invocation: propagate remote non-zero exit.
-  // The structured TOON result (with stdout, stderr, remoteExitCode) is still
-  // written to stdout — the agent has all diagnostic information available.
-  // Guard: result may be a bare string/number (--query bypass returns a JMESPath
-  // scalar); `in` throws a TypeError on non-objects, so verify it is an object
-  // before inspecting the remoteExitCode field.
+  // Exit code mapping for ssm run and get-command-invocation.
+  //
+  // Gate on status BEFORE interpreting ResponseCode:
+  //   1. Delivery failures (TimedOut, Undeliverable, Cancelled…) → 254
+  //      SSM never ran the shell; ResponseCode is -1 as an AWS sentinel.
+  //   2. Non-terminal states (InProgress, Pending…) → exit 0
+  //      The command is still running; -1 is normal. Aborting set -e loops here
+  //      would be wrong — the operator is polling, not reading a final result.
+  //   3. Positive ResponseCode (remote shell ran and failed) → verbatim, capped at 249.
+  //      ssh / docker exec semantics: remote 7 → aws-axi 7.
+  //   4. -1 sentinel in a terminal non-delivery state → 250 (safety net; rare).
+  //      Success always has 0; this covers malformed/unexpected responses.
+  //
+  // Guard: --query bypass may return a scalar; `in` throws TypeError on non-objects.
   if (
     (subcommand === "run" || subcommand === "get-command-invocation") &&
     result !== null &&
     typeof result === "object" &&
     "remoteExitCode" in result &&
-    typeof result["remoteExitCode"] === "number" &&
-    result["remoteExitCode"] !== 0
+    "status" in result
   ) {
-    process.exitCode = 1;  // REMOTE_EXEC_ERROR — remote shell failed, not AWS API
+    const remoteExitCode = result["remoteExitCode"];
+    const status = result["status"];
+
+    if (typeof status === "string" && SSM_DELIVERY_FAILURE_STATES.has(status)) {
+      // AWS-level delivery failure — SSM never ran the shell command.
+      process.exitCode = 254;
+    } else if (typeof status === "string" && SSM_NON_TERMINAL_STATES.has(status)) {
+      // Command still running — exit 0 so set -e polling loops don't abort.
+      // (no assignment)
+    } else if (typeof remoteExitCode === "number" && remoteExitCode > 0) {
+      // Remote shell ran and exited non-zero. Propagate verbatim.
+      // Cap at 249 to preserve the 250–255 reserved band.
+      process.exitCode = Math.min(remoteExitCode, 249);
+    } else if (typeof remoteExitCode === "number" && remoteExitCode === -1) {
+      // -1 in a terminal, non-delivery context (unexpected; safety net).
+      process.exitCode = 250;
+    }
+    // remoteExitCode === 0 → success → no assignment (exit 0 default).
   }
 
   return { ssm: result };
