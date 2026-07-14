@@ -280,7 +280,15 @@ async function runListRoles(
   const rawPassthrough = collectPassthroughFlags(args, ["--next-token"], undefined, { service: "iam", operation: "list-roles" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
-  const awsArgs = ["iam", "list-roles", "--max-items", DEFAULT_MAX_ITEMS];
+  // --query bypass (ADR-0002): skip the overlay's default cap when --query is
+  // active. JMESPath projects NextToken away, so the cap would cause silent
+  // truncation with no signal. Without --max-items, botocore auto-pages the
+  // complete result. If the caller explicitly passed --max-items it flows via
+  // passthrough (not an owned flag here) and wins.
+  const awsArgs: string[] = ["iam", "list-roles"];
+  if (!hasQuery) {
+    awsArgs.push("--max-items", DEFAULT_MAX_ITEMS);
+  }
   if (token !== undefined) awsArgs.push("--starting-token", token);
   awsArgs.push(...passthrough);
 
@@ -358,7 +366,12 @@ async function runListPolicies(
   const rawPassthrough = collectPassthroughFlags(args, ["--scope", "--next-token"], undefined, { service: "iam", operation: "list-policies" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
-  const awsArgs = ["iam", "list-policies", "--max-items", DEFAULT_MAX_ITEMS];
+  // --query bypass (ADR-0002): skip the overlay's default cap when --query is
+  // active. Same reasoning as list-roles: explicit --max-items flows via passthrough.
+  const awsArgs: string[] = ["iam", "list-policies"];
+  if (!hasQuery) {
+    awsArgs.push("--max-items", DEFAULT_MAX_ITEMS);
+  }
   if (scope !== undefined) awsArgs.push("--scope", scope);
   if (token !== undefined) awsArgs.push("--starting-token", token);
   awsArgs.push(...passthrough);
@@ -449,14 +462,12 @@ async function runListAttachedRolePolicies(
   const rawPassthrough = collectPassthroughFlags(args.slice(1), ["--next-token"], undefined, { service: "iam", operation: "list-attached-role-policies" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
-  const awsArgs = [
-    "iam",
-    "list-attached-role-policies",
-    "--role-name",
-    roleName,
-    "--max-items",
-    DEFAULT_MAX_ITEMS,
-  ];
+  // --query bypass (ADR-0002): skip the overlay's default cap when --query is
+  // active. Explicit --max-items flows via passthrough (not an owned flag here).
+  const awsArgs: string[] = ["iam", "list-attached-role-policies", "--role-name", roleName];
+  if (!hasQuery) {
+    awsArgs.push("--max-items", DEFAULT_MAX_ITEMS);
+  }
   if (token !== undefined) awsArgs.push("--starting-token", token);
   awsArgs.push(...passthrough);
 

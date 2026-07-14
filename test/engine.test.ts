@@ -59,6 +59,75 @@ function createStub(spec: {
   return p;
 }
 
+/**
+ * Create a stub that exits 1 (with a diagnostic) if `bannedArg` IS present in
+ * its argv. Proves a flag was NOT forwarded to the child when the test passes.
+ *
+ * RED  (before fix): banned flag IS forwarded → stub exits 1 → awsJson throws.
+ * GREEN (after fix): banned flag absent        → stub exits 0 → test passes.
+ */
+function createArgBanStub(spec: {
+  bannedArg: string;
+  validStdout: string;
+}): string {
+  const dir = mkdtempSync(join(tmpdir(), "aws-axi-engine-ban-"));
+  tempDirs.push(dir);
+  const p = join(dir, "aws");
+
+  function shellQuote(s: string): string {
+    return `'${s.replaceAll("'", "'\\''")}'`;
+  }
+
+  const script = [
+    "#!/bin/sh",
+    "found=0",
+    'for arg in "$@"; do',
+    `  [ "$arg" = ${shellQuote(spec.bannedArg)} ] && found=1`,
+    "done",
+    'if [ "$found" = "1" ]; then',
+    `  printf 'BANNED_FLAG: %s must not be forwarded when --query is active\\n' ${shellQuote(spec.bannedArg)} >&2`,
+    "  exit 1",
+    "fi",
+    `printf '%s' ${shellQuote(spec.validStdout)}`,
+  ].join("\n");
+  writeFileSync(p, script);
+  chmodSync(p, 0o755);
+  return p;
+}
+
+/**
+ * Create a stub that exits 1 if `requiredArg` is absent from its argv.
+ * Proves a flag WAS forwarded to the child when the test passes.
+ */
+function createArgGuardStub(spec: {
+  requiredArg: string;
+  validStdout: string;
+}): string {
+  const dir = mkdtempSync(join(tmpdir(), "aws-axi-engine-guard-"));
+  tempDirs.push(dir);
+  const p = join(dir, "aws");
+
+  function shellQuote(s: string): string {
+    return `'${s.replaceAll("'", "'\\''")}'`;
+  }
+
+  const script = [
+    "#!/bin/sh",
+    "found=0",
+    'for arg in "$@"; do',
+    `  [ "$arg" = ${shellQuote(spec.requiredArg)} ] && found=1`,
+    "done",
+    'if [ "$found" = "0" ]; then',
+    `  printf 'MISSING_FLAG: %s was not forwarded\\n' ${shellQuote(spec.requiredArg)} >&2`,
+    "  exit 1",
+    "fi",
+    `printf '%s' ${shellQuote(spec.validStdout)}`,
+  ].join("\n");
+  writeFileSync(p, script);
+  chmodSync(p, 0o755);
+  return p;
+}
+
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     try {
@@ -435,6 +504,70 @@ describe("engineRun — pagination cap (paginated-op)", () => {
       }),
     );
     expect(result["count"]).toBe(1);
+  });
+});
+
+// ── --query bypass: cap suppressed ───────────────────────────────────────────
+//
+// ADR-0002 cap bypass for the generic engine path.
+//
+// Without --query: engine pushes --max-items on every paginated op.
+// With    --query: JMESPath is applied by the aws CLI before the response
+//   reaches us; the result shape is unknown and may be an array. The engine
+//   must NOT push --max-items (botocore auto-pages to completion) and must
+//   skip projectOutput (which expects the paginator result-key shape).
+//
+// Ban-stub approach: the stub exits 1 if the banned flag appears in its argv.
+//   RED  (before fix): engine pushes --max-items → ban stub exits 1 → awsJson
+//     throws SERVICE_CLIENT_ERROR → engineRun throws → test FAILS.
+//   GREEN (after fix): queryActive suppresses --max-items push → ban stub exits 0
+//     → engine returns the raw result → test PASSES.
+//
+// Revert proof: commenting out the `&& !queryActive` guard in engine.ts step 4
+// turns both tests red.
+
+describe("engineRun — --query bypass: cap suppressed on paginated ops", () => {
+  it("--query: --max-items NOT forwarded to child when --query is present", async () => {
+    // paginated-op is in paginators-1.json, so the engine would normally push
+    // --max-items. With --query active it must not.
+    const banStub = createArgBanStub({
+      bannedArg: "--max-items",
+      validStdout: '{"result":"query-engine-ok"}',
+    });
+
+    const result = await engineRun(
+      baseOptions({
+        operation: "paginated-op",
+        args: ["--query", "Items[0]"],
+        binary: banStub,
+      }),
+    );
+
+    // Ban stub exited 0 — --max-items was absent.
+    // Engine skipped projectOutput (queryActive=true) and returned raw JSON.
+    expect(result).toMatchObject({ result: "query-engine-ok" });
+  });
+
+  it("--query + explicit --max-items: caller re-cap IS forwarded to child", async () => {
+    // User supplied their own --max-items alongside --query. The engine must not
+    // add a second one, but the user's value must still reach the child process
+    // (it's already in cleanedArgs → awsArgs via the spread).
+    const guardStub = createArgGuardStub({
+      requiredArg: "--max-items",
+      validStdout: '{"result":"recapped-ok"}',
+    });
+
+    const result = await engineRun(
+      baseOptions({
+        operation: "paginated-op",
+        args: ["--max-items", "5", "--query", "Items[0]"],
+        binary: guardStub,
+      }),
+    );
+
+    // Guard stub exited 0 — --max-items WAS in child argv (from cleanedArgs,
+    // not re-added by the engine — the engine's push is suppressed by queryActive).
+    expect(result).toMatchObject({ result: "recapped-ok" });
   });
 });
 

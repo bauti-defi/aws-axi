@@ -272,6 +272,9 @@ function toRunOpts(options: KmsRunOptions): AwsRunOptions {
 async function runListKeys(
   options: KmsRunOptions,
 ): Promise<{ listKeys: KmsListKeysResult } | Record<string, unknown>> {
+  // Track whether --max-items was explicitly provided before extractMaxItems
+  // returns the default — needed for the --query bypass check below.
+  const explicitMaxItems = extractFlag(options.args, "--max-items") !== undefined;
   const maxItems = extractMaxItems(options.args);
   const nextTokenArg = extractFlag(options.args, "--next-token");
   const runOpts = toRunOpts(options);
@@ -280,12 +283,14 @@ async function runListKeys(
   const rawPassthrough = collectPassthroughFlags(options.args, ["--max-items", "--next-token"], undefined, { service: "kms", operation: "list-keys" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
-  const awsArgs: string[] = [
-    "kms",
-    "list-keys",
-    "--max-items",
-    String(maxItems),
-  ];
+  // --query bypass (ADR-0002): skip the overlay's default cap when --query is
+  // active and no explicit --max-items was given. JMESPath projects NextToken
+  // away; the cap would cause silent truncation. Without --max-items, botocore
+  // auto-pages to completion. An explicit --max-items is always honored.
+  const awsArgs: string[] = ["kms", "list-keys"];
+  if (!hasQuery || explicitMaxItems) {
+    awsArgs.push("--max-items", String(maxItems));
+  }
   if (nextTokenArg !== undefined) {
     awsArgs.push("--starting-token", nextTokenArg);
   }
@@ -337,6 +342,9 @@ async function runListKeys(
 async function runListAliases(
   options: KmsRunOptions,
 ): Promise<{ listAliases: KmsListAliasesResult } | Record<string, unknown>> {
+  // Track whether --max-items was explicitly provided before extractMaxItems
+  // returns the default — needed for the --query bypass check below.
+  const explicitMaxItems = extractFlag(options.args, "--max-items") !== undefined;
   const maxItems = extractMaxItems(options.args);
   const nextTokenArg = extractFlag(options.args, "--next-token");
   const keyIdArg = extractFlag(options.args, "--key-id");
@@ -351,12 +359,12 @@ async function runListAliases(
   );
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
-  const awsArgs: string[] = [
-    "kms",
-    "list-aliases",
-    "--max-items",
-    String(maxItems),
-  ];
+  // --query bypass (ADR-0002): skip the overlay's default cap when --query is
+  // active and no explicit --max-items was given. Explicit --max-items is honored.
+  const awsArgs: string[] = ["kms", "list-aliases"];
+  if (!hasQuery || explicitMaxItems) {
+    awsArgs.push("--max-items", String(maxItems));
+  }
   if (keyIdArg !== undefined) {
     awsArgs.push("--key-id", keyIdArg);
   }

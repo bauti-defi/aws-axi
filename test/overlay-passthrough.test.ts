@@ -1626,3 +1626,234 @@ describe("s3 ls --query cap bypass — --max-items NOT forwarded when --query ac
     expect(output).not.toContain("BANNED_FLAG");
   });
 });
+
+// ── IAM --query cap bypass (issue #47) ───────────────────────────────────────
+//
+// All three IAM paginated overlays (list-roles, list-policies,
+// list-attached-role-policies) formerly pushed --max-items unconditionally.
+// The fix gates each push on `!hasQuery`.
+//
+// Ban-stub approach: the stub exits 1 if --max-items appears in child argv.
+//   RED  (before fix): overlay pushed --max-items → stub exits 1 → captureMain
+//     records a non-zero exitCode → expect(exitCode).toBeUndefined() FAILS.
+//   GREEN (after fix): push suppressed when hasQuery → stub exits 0 → PASSES.
+
+describe("iam --query cap bypass — --max-items NOT forwarded when --query active", () => {
+  it("iam list-roles --query: --max-items NOT forwarded to child", async () => {
+    const binary = createArgBanStub({
+      bannedArg: "--max-items",
+      validStdout: JSON.stringify(["role-a", "role-b"]),
+    });
+
+    const { exitCode } = await captureMain(
+      ["iam", "list-roles", "--query", "Roles[].RoleName"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("iam list-policies --query: --max-items NOT forwarded to child", async () => {
+    const binary = createArgBanStub({
+      bannedArg: "--max-items",
+      validStdout: JSON.stringify(["policy-a", "policy-b"]),
+    });
+
+    const { exitCode } = await captureMain(
+      ["iam", "list-policies", "--query", "Policies[].PolicyName"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("iam list-attached-role-policies <role> --query: --max-items NOT forwarded", async () => {
+    const binary = createArgBanStub({
+      bannedArg: "--max-items",
+      validStdout: JSON.stringify(["arn:aws:iam::aws:policy/AdministratorAccess"]),
+    });
+
+    const { exitCode } = await captureMain(
+      [
+        "iam",
+        "list-attached-role-policies",
+        "my-role",
+        "--query",
+        "AttachedPolicies[].PolicyArn",
+      ],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+});
+
+// ── KMS --query cap bypass (issue #47) ───────────────────────────────────────
+//
+// list-keys and list-aliases both owned --max-items (MAX_ITEMS_DEFAULT = 50).
+// The fix adds `explicitMaxItems` detection: cap is only pushed when
+// !hasQuery OR the user explicitly provided --max-items.
+
+describe("kms --query cap bypass — --max-items NOT forwarded when --query active", () => {
+  it("kms list-keys --query: --max-items NOT forwarded to child", async () => {
+    // list-keys returns early when hasQuery=true (no secondary alias call).
+    const binary = createArgBanStub({
+      bannedArg: "--max-items",
+      validStdout: JSON.stringify(["key-id-1", "key-id-2"]),
+    });
+
+    const { exitCode } = await captureMain(
+      ["kms", "list-keys", "--query", "Keys[].KeyId"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("kms list-aliases --query: --max-items NOT forwarded to child", async () => {
+    const binary = createArgBanStub({
+      bannedArg: "--max-items",
+      validStdout: JSON.stringify(["alias/my-key"]),
+    });
+
+    const { exitCode } = await captureMain(
+      ["kms", "list-aliases", "--query", "Aliases[].AliasName"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+});
+
+// ── Lambda --query cap bypass (issue #47) ────────────────────────────────────
+
+describe("lambda --query cap bypass — --max-items NOT forwarded when --query active", () => {
+  it("lambda list-functions --query: --max-items NOT forwarded to child", async () => {
+    const binary = createArgBanStub({
+      bannedArg: "--max-items",
+      validStdout: JSON.stringify(["fn-a", "fn-b"]),
+    });
+
+    const { exitCode } = await captureMain(
+      ["lambda", "list-functions", "--query", "Functions[].FunctionName"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+});
+
+// ── Logs --query cap bypass (issue #47) ──────────────────────────────────────
+//
+// tailRun gates the --max-items push on `!hasQuery || limit !== undefined`.
+// When --query is present and --limit is absent, limit is undefined → cap suppressed.
+// describeLogGroupsRun applies the same logic.
+
+describe("logs --query cap bypass — --max-items NOT forwarded when --query active", () => {
+  it("logs tail <group> --query: --max-items NOT forwarded to child", async () => {
+    const binary = createArgBanStub({
+      bannedArg: "--max-items",
+      validStdout: JSON.stringify("event-message-text"),
+    });
+
+    const { exitCode } = await captureMain(
+      ["logs", "tail", "/test/log-group", "--query", "events[0].message"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("logs describe-log-groups --query: --max-items NOT forwarded to child", async () => {
+    const binary = createArgBanStub({
+      bannedArg: "--max-items",
+      validStdout: JSON.stringify(["/aws/lambda/fn"]),
+    });
+
+    const { exitCode } = await captureMain(
+      ["logs", "describe-log-groups", "--query", "logGroups[0].logGroupName"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+});
+
+// ── Secrets --query cap bypass (issue #47) ───────────────────────────────────
+
+describe("secretsmanager --query cap bypass — --max-items NOT forwarded when --query active", () => {
+  it("secretsmanager list-secrets --query: --max-items NOT forwarded to child", async () => {
+    const binary = createArgBanStub({
+      bannedArg: "--max-items",
+      validStdout: JSON.stringify(["secret-a", "secret-b"]),
+    });
+
+    const { exitCode } = await captureMain(
+      ["secretsmanager", "list-secrets", "--query", "SecretList[].Name"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+});
+
+// ── SSM --query cap bypass (issue #47) ───────────────────────────────────────
+
+describe("ssm --query cap bypass — --max-items NOT forwarded when --query active", () => {
+  it("ssm get-parameters-by-path --query: --max-items NOT forwarded to child", async () => {
+    const binary = createArgBanStub({
+      bannedArg: "--max-items",
+      validStdout: JSON.stringify(["/my/app/key"]),
+    });
+
+    const { exitCode } = await captureMain(
+      [
+        "ssm",
+        "get-parameters-by-path",
+        "--path",
+        "/my/app",
+        "--query",
+        "Parameters[].Name",
+      ],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+
+  it("ssm describe-parameters --query: --max-items NOT forwarded to child", async () => {
+    const binary = createArgBanStub({
+      bannedArg: "--max-items",
+      validStdout: JSON.stringify(["/my/app/key"]),
+    });
+
+    const { exitCode } = await captureMain(
+      ["ssm", "describe-parameters", "--query", "Parameters[].Name"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+});
+
+// ── EC2 --query cap bypass (issue #47) ───────────────────────────────────────
+//
+// ec2Run used buildPaginationArgs({ maxItems: DEFAULT_MAX_ITEMS }) in the hasQuery
+// branch; replaced with a conditional push that only fires when
+// normalizedOptions.maxItems !== undefined.
+
+describe("ec2 --query cap bypass — --max-items NOT forwarded when --query active", () => {
+  it("ec2 describe-vpcs --query: --max-items NOT forwarded to child", async () => {
+    const binary = createArgBanStub({
+      bannedArg: "--max-items",
+      validStdout: JSON.stringify(["vpc-abc123", "vpc-def456"]),
+    });
+
+    const { exitCode } = await captureMain(
+      ["ec2", "describe-vpcs", "--query", "Vpcs[].VpcId"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+  });
+});

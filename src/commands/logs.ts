@@ -220,6 +220,10 @@ export async function tailRun(options: TailRunOptions): Promise<TailResult | Rec
     context: options.context,
   };
 
+  // --query bypass (ADR-0002): skip the overlay's default cap when --query is
+  // active and the caller did not explicitly provide --limit. options.limit is
+  // undefined when --limit was absent from argv; the default cap is the overlay's
+  // own curation, not a user request. An explicit --limit is always honored.
   const awsArgs: string[] = [
     "logs",
     "filter-log-events",
@@ -227,9 +231,10 @@ export async function tailRun(options: TailRunOptions): Promise<TailResult | Rec
     options.logGroupName,
     "--start-time",
     String(sinceMs),
-    "--max-items",
-    String(limit),
   ];
+  if (!options.hasQuery || options.limit !== undefined) {
+    awsArgs.push("--max-items", String(limit));
+  }
 
   if (options.streamName !== undefined) {
     awsArgs.push("--log-stream-names", options.streamName);
@@ -380,12 +385,13 @@ export async function describeLogGroupsRun(
     context: options.context,
   };
 
-  const awsArgs: string[] = [
-    "logs",
-    "describe-log-groups",
-    "--max-items",
-    String(limit),
-  ];
+  // --query bypass (ADR-0002): skip the overlay's default cap when --query is
+  // active and no explicit --limit was given. options.limit is undefined when
+  // --limit was absent from argv. An explicit --limit is always honored.
+  const awsArgs: string[] = ["logs", "describe-log-groups"];
+  if (!options.hasQuery || options.limit !== undefined) {
+    awsArgs.push("--max-items", String(limit));
+  }
 
   if (options.prefix !== undefined && options.prefix.length > 0) {
     awsArgs.push("--log-group-name-prefix", options.prefix);

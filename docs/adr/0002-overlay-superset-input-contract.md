@@ -37,7 +37,7 @@ invocation. Two flag classes are handled specially:
 | Flag | Behavior |
 |---|---|
 | `--output <value>` / `--output=<value>` | **Stripped.** The exec seam (`awsJson`) always appends `--output json`; a duplicate `--output` from passthrough would conflict. |
-| `--query <expr>` / `--query=<expr>` | **Kept in passthrough, projection bypassed, page cap bypassed on `s3 ls`.** JMESPath is applied by the aws CLI before the response reaches the overlay; the overlay CANNOT safely project a JMESPath result of unknown shape. `hasQuery=true` tells the overlay's `*Run` helper to skip its curated projection. On the `s3 ls` paths (both list-buckets and list-objects-v2), `hasQuery=true` also suppresses `--max-items`: JMESPath projects `NextToken` away, so the cap would cause silent truncation with no signal to the caller. Without the cap, botocore auto-pages the complete result. The CLI adapter (`logsCommand`, `s3Command`, etc.) must also bypass its record-builder wrappers when `hasQuery=true` — if the adapter re-wraps a raw result, all fields become null. |
+| `--query <expr>` / `--query=<expr>` | **Kept in passthrough; projection bypassed; page cap bypassed (repo-wide: all overlays + generic engine).** JMESPath is applied by the aws CLI before the response reaches the overlay; the overlay CANNOT safely project a JMESPath result of unknown shape. `hasQuery=true` tells the overlay's `*Run` helper to (1) skip its curated projection and (2) omit the default `--max-items` push. JMESPath projects `NextToken` away, so the cap would cause silent truncation with no signal to the caller; without it, botocore auto-pages the complete result. An explicit `--max-items` supplied by the caller is always honored (last-wins). The CLI adapter (`logsCommand`, `s3Command`, etc.) must also bypass its record-builder wrappers when `hasQuery=true` — if the adapter re-wraps a raw result, all fields become null. The generic engine (`engineRun` in `src/engine.ts`) applies the same two-part bypass for every paginated operation in the botocore model. |
 
 Positionals owned by the overlay (e.g. `<key-id>` for `kms describe-key`,
 `<group-name>` for `logs filter`) are never leaked into passthrough.
@@ -135,7 +135,10 @@ tests) get the same `--output` dedup guarantee as the CLI adapter path.
   with enrichment (SG names, KMS aliases, redaction). Passthrough makes this
   possible without any special-casing per-flag.
 - **`--query` is a special case**: JMESPath changes the response shape in a way
-  the overlay cannot predict. Bypassing projection is the only safe option.
+  the overlay cannot predict. Bypassing projection is the only safe option. Bypassing
+  the default cap is equally necessary: JMESPath projects `NextToken` away, so a cap
+  would silently truncate the result with no signal. Both bypasses apply repo-wide
+  (all enriched overlays and the generic engine) as of PR #47.
 
 ## Accepted tradeoffs
 
