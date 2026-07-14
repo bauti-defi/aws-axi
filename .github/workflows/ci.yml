@@ -30,6 +30,9 @@ jobs:
       - name: Test
         run: bun test
 
+      - name: Skill drift check
+        run: bun run build:skill -- --check
+
       - name: Smoke test — launcher version
         run: ./dist/bin/aws-axi --version
 
