@@ -866,6 +866,18 @@ const GCI_WINDOWS_PATH = JSON.stringify({
   ExecutionElapsedTime: "PT0.100S",
 });
 
+// ─── B1-regression: fatal polling errors propagate with original error code ───
+//
+// These appear on stderr when the aws CLI rejects the GetCommandInvocation call
+// mid-poll (not an InvocationDoesNotExist transient; a fatal auth/permission error).
+// The re-throw in pollInvocation must preserve err.code so:
+//   AccessDeniedException → SERVICE_CLIENT_ERROR → exit 254
+//   ExpiredTokenException → AUTH_EXPIRED          → exit 253
+const ACCESS_DENIED_GCI_STDERR =
+  "An error occurred (AccessDeniedException) when calling the GetCommandInvocation operation: User is not authorized to perform: ssm:GetCommandInvocation";
+const EXPIRED_TOKEN_GCI_STDERR =
+  "An error occurred (ExpiredTokenException) when calling the GetCommandInvocation operation: The security token included in the request is expired";
+
 const SEND_COMMAND_RESPONSE = JSON.stringify({
   Command: { CommandId: TEST_COMMAND_ID },
 });
@@ -1458,44 +1470,25 @@ describe("ssm run — --commands quoting (captureMain)", () => {
   });
 });
 
-// ─── BLOCKER 3: --query stripped from ssm run ─────────────────────────────────
+// ─── BLOCKER 3: --query on ssm run → USAGE_ERROR (loud, not silent drop) ──────
 //
-// ssm run is a composite (send-command + poll). If --query leaks to send-command,
-// the aws CLI applies JMESPath and returns a scalar instead of the full Command
-// object → CommandId extraction fails → TypeError / exit 255.
+// ssm run is a composite (send-command + poll); there is no single underlying
+// aws response for JMESPath to target. --query must fail with USAGE_ERROR and
+// name the workaround: `get-command-invocation --query`.
 //
-// Revert-proof: remove "--query" from ownedFlagNames in collectPassthroughFlags →
-// stub detects --query in send-command args → exits 1 → captureMain sees non-zero.
+// Silently dropping --query (adding it to ownedFlagNames) is the #33 bug class:
+// operator types a flag, gets exit 0, gets WRONG data with no indication.
+//
+// Revert-proof: remove the hasFlag("--query") guard in runSsmRun →
+// --query leaks into passthrough OR is silently dropped → exit 0 →
+// expect(exitCode).toBeDefined() fails.
 
-describe("ssm run — --query stripped from send-command (captureMain)", () => {
-  it("--query is consumed by the overlay and NOT forwarded to send-command", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-ssm-nq-"));
-    tempDirs.push(dir);
-    const binary = join(dir, "aws");
-
-    // Stub fails if --query appears among send-command arguments.
-    const script = [
-      "#!/bin/sh",
-      'case "$1-$2" in',
-      "  ssm-send-command)",
-      "    for arg in \"$@\"; do",
-      "      if [ \"$arg\" = \"--query\" ]; then",
-      "        printf 'BLOCKER3_QUERY_LEAKED_TO_SEND_COMMAND\\n' >&2",
-      "        exit 1",
-      "      fi",
-      "    done",
-      `    printf '%s' ${shellQuote(SEND_COMMAND_RESPONSE)}`,
-      "    exit 0;;",
-      "  ssm-get-command-invocation)",
-      `    printf '%s' ${shellQuote(GCI_SUCCESS)}`,
-      "    exit 0;;",
-      "  *)",
-      '    printf "Unexpected: %s %s\\n" "$1" "$2" >&2',
-      "    exit 254;;",
-      "esac",
-    ].join("\n");
-    writeFileSync(binary, script);
-    chmodSync(binary, 0o755);
+describe("ssm run — --query rejected with USAGE_ERROR (captureMain)", () => {
+  it("--query exits USAGE_ERROR and names get-command-invocation as the workaround", async () => {
+    const binary = createStub({
+      "ssm-send-command": { stdout: SEND_COMMAND_RESPONSE },
+      "ssm-get-command-invocation": { stdout: GCI_SUCCESS },
+    });
 
     const { output, exitCode } = await captureMain(
       [
@@ -1504,13 +1497,65 @@ describe("ssm run — --query stripped from send-command (captureMain)", () => {
         "--commands", TEST_COMMAND,
         "--query", "Command.CommandId",
       ],
-      { PATH: `${dir}:${process.env["PATH"] ?? ""}` },
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
     );
 
-    // --query was stripped by the overlay → stub did not see it → success
-    expect(exitCode).toBeUndefined();
-    expect(output).toContain("commandId");
-    expect(output).not.toContain("BLOCKER3_QUERY_LEAKED_TO_SEND_COMMAND");
+    // Must fail — not silently succeed with --query ignored or forwarded
+    expect(exitCode).toBeDefined();
+    expect(output).toContain("USAGE_ERROR");
+    // Error must name the workaround so the operator knows where to go
+    expect(output).toContain("get-command-invocation");
+    // Must NOT proceed to send-command
+    expect(output).not.toContain(`commandId: ${TEST_COMMAND_ID}`);
+  });
+});
+
+// ─── B1-regression: fatal polling error codes preserved through re-throw ──────
+//
+// When get-command-invocation fails with a SERVICE-level error (not the transient
+// InvocationDoesNotExist), pollInvocation re-throws with the ORIGINAL AxiError code
+// intact. A re-throw that hardcodes "UNKNOWN" collapses both to exit 255 (wrong).
+//
+// Revert-proof: change origCode back to "UNKNOWN" in the re-throw catch block →
+// both tests below expect 254 / 253 but get 255 → RED.
+
+describe("ssm run — AccessDenied during polling exits 254, not 255 (captureMain)", () => {
+  it("AccessDeniedException from get-command-invocation produces SERVICE_CLIENT_ERROR exit 254", async () => {
+    const binary = createStub({
+      "ssm-send-command": { stdout: SEND_COMMAND_RESPONSE },
+      "ssm-get-command-invocation": {
+        stderr: ACCESS_DENIED_GCI_STDERR,
+        exitCode: 254,
+      },
+    });
+
+    const { exitCode } = await captureMain(
+      ["ssm", "run", "--instance-ids", TEST_INSTANCE_ID, "--commands", TEST_COMMAND],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    // SERVICE_CLIENT_ERROR maps to exit 254 — not 255 (UNKNOWN)
+    expect(exitCode).toBe(254);
+  });
+});
+
+describe("ssm run — ExpiredToken during polling exits 253, not 255 (captureMain)", () => {
+  it("ExpiredTokenException from get-command-invocation produces AUTH_EXPIRED exit 253", async () => {
+    const binary = createStub({
+      "ssm-send-command": { stdout: SEND_COMMAND_RESPONSE },
+      "ssm-get-command-invocation": {
+        stderr: EXPIRED_TOKEN_GCI_STDERR,
+        exitCode: 254,
+      },
+    });
+
+    const { exitCode } = await captureMain(
+      ["ssm", "run", "--instance-ids", TEST_INSTANCE_ID, "--commands", TEST_COMMAND],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    // AUTH_EXPIRED maps to exit 253 — not 255 (UNKNOWN)
+    expect(exitCode).toBe(253);
   });
 });
 

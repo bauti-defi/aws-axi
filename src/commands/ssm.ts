@@ -267,9 +267,13 @@ export interface SsmRunOptions {
 
 export const SSM_HELP = `usage: aws-axi ssm <subcommand> [flags]
 
-Any flag accepted by the underlying \`aws ssm\` operation (e.g. --recursive,
---filters, --with-decryption, --query) is forwarded verbatim — overlays never
-restrict the input contract, only enrich the output.
+For get-parameter, get-parameters, get-parameters-by-path, describe-parameters,
+and get-command-invocation: any flag accepted by the underlying \`aws ssm\`
+operation (e.g. --recursive, --filters, --with-decryption, --query) is forwarded
+verbatim — overlays never restrict the input contract, only enrich the output.
+
+Exception: \`ssm run\` is a composite operation (send-command + poll). It has
+its own flag set below; --query is rejected with USAGE_ERROR (see note below).
 
 subcommands (enriched overlays):
   run                                Send command + poll to completion + return output (NEW)
@@ -288,8 +292,14 @@ flags (ssm run — optional):
   --timeout <secs>       Max seconds to wait for completion (default: 60)
                          On timeout, exits non-zero and prints the CommandId to resume with
                          get-command-invocation --command-id <id> --wait
-  (any other flag is forwarded verbatim to aws ssm send-command; --query is not supported
-   on ssm run since it is a composite operation with no single underlying aws call)
+  <any other flag>       Forwarded verbatim to aws ssm send-command (e.g. --comment,
+                         --output-s3-bucket-name, --timeout-seconds, --cloud-watch-output-config)
+
+  NOTE: --query is NOT accepted by ssm run. ssm run is a composite operation
+  (send-command + get-command-invocation) and has no single aws response to
+  target with JMESPath. This is a deliberate USAGE_ERROR, not a silent drop.
+  Use --query on the follow-up call instead:
+    aws-axi ssm get-command-invocation --command-id <id> --instance-id <id> --query <expr>
 
 flags (get-command-invocation):
   --command-id <id>      SSM CommandId to query
@@ -297,11 +307,10 @@ flags (get-command-invocation):
   --wait                 Poll to terminal state before returning (default: single call)
   --query <expr>         JMESPath; bypasses overlay projection, returns raw result
 
-flags (overlay-specific):
+flags (overlay-specific, all subcommands):
   --profile <name>       AWS profile (inherited from global --profile)
   --region <region>      AWS region  (inherited from global --region)
   --reveal               Show actual parameter values (default: redacted; alias for --with-decryption)
-  --query <expr>         JMESPath; bypasses overlay projection, returns raw result
   --output               stripped (aws-axi always uses --output json internally)
 
 flags (list operations):
@@ -318,8 +327,11 @@ exit codes (ssm run / get-command-invocation):
   0       = success (remote exit 0); also non-terminal status (InProgress, Pending…) for
             get-command-invocation without --wait — command still running, not an error
   1..249  = remote shell exit code propagated verbatim (ssh / docker exec semantics)
+            Note: remote exit 127 ("command not found") and aws-axi exit 127 ("aws not
+            installed") are numerically identical; stdout disambiguates (remote 127 returns
+            structured TOON output with stdout/stderr; aws-not-installed errors on stderr).
   250     = SSM -1 sentinel in an unexpected terminal context (safety net; rare in practice)
-  252     = USAGE_ERROR — missing required flag
+  252     = USAGE_ERROR — missing required flag, or --query on ssm run
   254     = delivery failure — AWS never ran the command (TimedOut, Undeliverable, Cancelled…)
 
 examples:
@@ -327,6 +339,7 @@ examples:
   aws-axi ssm run --instance-ids i-0abc123 --commands "systemctl status nginx" --timeout 30
   aws-axi ssm get-command-invocation --command-id <id> --instance-id i-0abc123
   aws-axi ssm get-command-invocation --command-id <id> --instance-id i-0abc123 --wait
+  aws-axi ssm get-command-invocation --command-id <id> --instance-id i-0abc123 --query Status
   aws-axi ssm
   aws-axi ssm get-parameter /my/app/db-password
   aws-axi ssm get-parameter /my/app/db-password --reveal
@@ -531,10 +544,19 @@ async function pollInvocation(
 
       // Fatal error (auth, network, etc.) — re-throw with CommandId so the
       // operator can locate the running command.
+      //
+      // Preserve the original error CODE so the caller's exit-code mapping
+      // remains correct: AccessDenied stays SERVICE_CLIENT_ERROR (254), an
+      // expired token stays AUTH_EXPIRED (253), etc. Hardcoding "UNKNOWN" here
+      // would map all fatal poll errors to exit 255, defeating the taxonomy.
       const origMsg = err instanceof Error ? err.message : String(err);
+      const origCode: string =
+        err instanceof AxiError
+          ? String((err as unknown as { code: string }).code)
+          : "UNKNOWN";
       throw new AxiError(
         `${origMsg} [CommandId: ${commandId}]`,
-        "UNKNOWN",
+        origCode,
         [
           `CommandId: ${commandId}`,
           `Resume with: aws-axi ssm get-command-invocation --command-id ${commandId} --instance-id ${instanceId} --wait`,
@@ -587,14 +609,11 @@ function projectInvocation(
  * Sends AWS-RunShellScript via send-command, polls to a terminal state, and
  * returns structured stdout/stderr/remoteExitCode.
  *
- * Exit code mapping (set by ssmCommand after inspecting the result):
- *   remoteExitCode = 0  → aws-axi exits 0 (clean success)
- *   remoteExitCode ≠ 0  → aws-axi exits 1 (REMOTE_EXEC_ERROR; not 254)
- *
- * `--query` is NOT forwarded to send-command because ssm run is a composite
- * operation (two AWS calls). Passing --query would break CommandId extraction
- * from the send-command response. Pipe `ssm run` output to `--query` via a
- * second aws-axi call if JMESPath projection is needed.
+ * `--query` is rejected with a USAGE_ERROR (not silently dropped, not forwarded).
+ * ssm run is a composite operation (send-command + poll); there is no single
+ * underlying aws response whose shape JMESPath could target, and aws-axi has no
+ * local JMESPath engine. Use `ssm get-command-invocation --query` instead —
+ * that overlay already supports the full --query bypass.
  */
 async function runSsmRun(
   options: SsmRunOptions,
@@ -625,6 +644,21 @@ async function runSsmRun(
     );
   }
 
+  // Reject --query loudly before touching any AWS API.
+  // Silent drop (adding --query to ownedFlagNames) is the bug class that caused
+  // unencrypted S3 writes and no-op deletes reported as success (#33). Fail fast.
+  if (hasFlag(options.args, "--query")) {
+    throw new AxiError(
+      "ssm run does not support --query (composite operation — no single underlying aws response to project)",
+      "USAGE_ERROR",
+      [
+        "Use --query on the get-command-invocation call instead:",
+        `  aws-axi ssm get-command-invocation --command-id <id> --instance-id ${instanceId} --query <expr>`,
+        "ssm run always emits commandId in its result — use that as the --command-id value.",
+      ],
+    );
+  }
+
   const timeoutSecs = parseInt(timeoutStr, 10);
   if (isNaN(timeoutSecs) || timeoutSecs < 0) {
     throw new AxiError(
@@ -635,20 +669,18 @@ async function runSsmRun(
   }
 
   // Collect passthrough for send-command.
-  //
-  // --query is added to ownedFlagNames so it is consumed here (not forwarded).
-  // ssm run is a composite operation (send-command + poll); if --query were
-  // forwarded to send-command, the aws CLI would apply JMESPath and return a
-  // scalar instead of the full Command object, breaking CommandId extraction.
-  //
-  // --instance-ids, --commands, --timeout are overlay-owned value flags.
+  // --instance-ids, --commands, --timeout are overlay-owned value flags; they
+  // are consumed here and re-emitted as positional / named args below.
+  // --query was already rejected above — it is NOT in ownedFlagNames (that
+  // would be a silent drop). All other unknown flags are forwarded verbatim
+  // to send-command per ADR-0002.
   const rawPassthrough = collectPassthroughFlags(
     options.args,
-    ["--instance-ids", "--commands", "--timeout", "--query"],
+    ["--instance-ids", "--commands", "--timeout"],
     [],
     { service: "ssm", operation: "send-command" },
   );
-  // buildPassthrough strips --output; --query is already absent (consumed above).
+  // buildPassthrough strips --output; --query is absent (already guarded above).
   const { passthrough } = buildPassthrough(rawPassthrough);
 
   // Deadline set BEFORE send-command so the total clock starts immediately.
