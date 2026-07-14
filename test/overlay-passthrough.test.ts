@@ -94,6 +94,39 @@ function createArgGuardStub(spec: {
 }
 
 /**
+ * Create a stub that exits 1 (with a diagnostic) if `bannedArg` IS present in
+ * its argv. Proves that a flag was NOT forwarded when the test passes.
+ *
+ * Use this as the inverse of createArgGuardStub to assert cap-bypass: the stub
+ * exits 1 when the banned flag is in the child argv, so:
+ *   - RED (before fix): banned flag IS forwarded → stub exits 1 → test fails.
+ *   - GREEN (after fix): banned flag absent     → stub exits 0 → test passes.
+ */
+function createArgBanStub(spec: {
+  bannedArg: string;
+  validStdout: string;
+}): string {
+  const dir = mkdtempSync(join(tmpdir(), "aws-axi-argban-"));
+  tempDirs.push(dir);
+  const p = join(dir, "aws");
+  const script = [
+    "#!/bin/sh",
+    "found=0",
+    'for arg in "$@"; do',
+    `  [ "$arg" = ${shellQuote(spec.bannedArg)} ] && found=1`,
+    "done",
+    'if [ "$found" = "1" ]; then',
+    `  printf 'BANNED_FLAG: %s must not be forwarded when --query is active\\n' ${shellQuote(spec.bannedArg)} >&2`,
+    "  exit 1",
+    "fi",
+    `printf '%s' ${shellQuote(spec.validStdout)}`,
+  ].join("\n");
+  writeFileSync(p, script);
+  chmodSync(p, 0o755);
+  return p;
+}
+
+/**
  * Stub that fails when --output appears more than once in argv.
  * The exec seam always appends --output json; user-supplied --output must be
  * stripped from passthrough before forwarding to avoid duplication.
@@ -1376,5 +1409,220 @@ describe("s3 head-object flag guard — #38", () => {
     expect(exitCode).toBeDefined();
     expect(output).toContain("--recursive");
     expect(output).not.toContain("Unknown options");
+  });
+});
+
+// ── s3 ls --starting-token on no-URI (list-buckets) path — issue #44 ─────────
+//
+// `aws s3api list-buckets` is a genuine paginated operation: botocore ships a
+// ListBuckets paginator with ContinuationToken as both input and output token,
+// and `aws s3api list-buckets help` shows `[--starting-token <value>]` in the
+// SYNOPSIS. S3_HELP advertises --starting-token for all ls paths. Before the
+// fix, the token was extracted in s3Command but never forwarded to the child
+// aws process on the no-URI path — a silent drop.
+//
+// Pagination contract (engine.ts rule): --starting-token engages the botocore
+// client-side paginator, which auto-pages to the end and emits a synthesized
+// NextToken ONLY when --max-items truncates. ContinuationToken is stripped by
+// botocore and NEVER appears in the child's stdout. Truncation is gated on
+// NextToken (the botocore-synthesized field), never on ContinuationToken.
+//
+// The fix adds:
+//   1. --max-items S3_PAGE_SIZE to the list-buckets args (caps the response)
+//   2. --starting-token forwarding (bug fix for issue #44)
+//   3. Truncation gated on NextToken (honest, fireable)
+//
+// The tests drive the FULL CLI adapter (captureMain) through PATH-injected
+// stubs. Only captureMain exercises the full s3Command→s3LsRun chain.
+//
+// Revert-proof coverage:
+//   A. Remove --starting-token push → guard stub exits 1 → FAILS
+//   B. Remove --max-items push → cap guard stub exits 1 → FAILS
+//   C. Remove NextToken gate → no truncated/nextToken in output → FAILS
+
+/** Realistic list-buckets response when --starting-token is present (no more pages). */
+const LIST_BUCKETS_WITH_PAGINATION = JSON.stringify({
+  Buckets: [
+    { Name: "my-bucket", CreationDate: "2024-01-01T00:00:00+00:00" },
+  ],
+  Owner: { DisplayName: "me", ID: "abc" },
+});
+
+/**
+ * list-buckets response with a synthesized NextToken — what botocore emits
+ * when --max-items truncates the result. ContinuationToken is NOT present:
+ * botocore strips the native output token and emits NextToken instead.
+ */
+const LIST_BUCKETS_TRUNCATED = JSON.stringify({
+  Buckets: [
+    { Name: "my-bucket", CreationDate: "2024-01-01T00:00:00+00:00" },
+  ],
+  Owner: { DisplayName: "me", ID: "abc" },
+  NextToken: "eyJDb250aW51YXRpb25Ub2tlbiI6ICJuZXh0cGFnZTQ1NiJ9",
+});
+
+describe("s3 ls --starting-token on no-URI path — issue #44", () => {
+  it("s3 ls --starting-token TOKEN123 (no URI): --starting-token IS forwarded to s3api list-buckets child", async () => {
+    // Stub requires --starting-token in argv; exits 1 if absent.
+    // Before fix: no --starting-token forwarded → stub exits 1 → captureMain exits
+    //   with non-zero code → expect(exitCode).toBeUndefined() FAILS → test RED.
+    // After fix:  --starting-token TOKEN123 forwarded → stub exits 0 with valid JSON
+    //   → output contains "my-bucket" → test GREEN.
+    const binary = createArgGuardStub({
+      requiredArg: "--starting-token",
+      validStdout: LIST_BUCKETS_WITH_PAGINATION,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "--starting-token", "TOKEN123"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    // No rejection error — the token was forwarded and the stub accepted it.
+    expect(exitCode).toBeUndefined();
+    // Output must include bucket data (not an error or MISSING_FLAG diagnostic).
+    expect(output).toContain("my-bucket");
+    expect(output).not.toContain("MISSING_FLAG");
+  });
+
+  it("s3 ls --starting-token TOKEN123 (no URI): enriched bucket listing returned (not empty, not error)", async () => {
+    // Secondary check: the overlay must still apply its curated projection
+    // (buckets[] with name + creationDate) even when --starting-token is present.
+    const binary = createArgGuardStub({
+      requiredArg: "--starting-token",
+      validStdout: LIST_BUCKETS_WITH_PAGINATION,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "--starting-token", "TOKEN123"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    // Enriched projection: buckets[] with name/creationDate fields.
+    expect(output).toContain("buckets");
+    expect(output).toContain("2024-01-01");
+    expect(output).not.toContain("No buckets found");
+  });
+
+  it("s3 ls (no URI): --max-items IS forwarded to s3api list-buckets child (cap enforcement)", async () => {
+    // Stub exits 1 if --max-items is absent from child argv.
+    // Revert-proof: remove the "--max-items" push from lsBucketsArgs →
+    //   child never receives --max-items → stub exits 1 → exitCode non-zero →
+    //   expect(exitCode).toBeUndefined() FAILS → test RED.
+    // After fix: --max-items S3_PAGE_SIZE forwarded → stub exits 0 → GREEN.
+    const binary = createArgGuardStub({
+      requiredArg: "--max-items",
+      validStdout: LIST_BUCKETS_WITH_PAGINATION,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("my-bucket");
+    expect(output).not.toContain("MISSING_FLAG");
+  });
+
+  it("s3 ls (no URI): truncated: true + nextToken reported when stub emits NextToken (--max-items cap fired)", async () => {
+    // Stub returns LIST_BUCKETS_TRUNCATED — a realistic response shape for when
+    // botocore's --max-items paginator fires: Buckets + Owner + synthesized NextToken.
+    // ContinuationToken is NOT present (botocore strips it).
+    //
+    // Revert-proof: remove the `if (resp.NextToken !== undefined)` gate →
+    //   overlay returns { buckets } with no truncated/nextToken fields →
+    //   expect(output).toContain("truncated") FAILS → test RED.
+    const binary = createStub({ stdout: LIST_BUCKETS_TRUNCATED });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("my-bucket");
+    expect(output).toContain("truncated");
+    expect(output).toContain("nextToken");
+    // Confirm the synthesized base64 token (not a raw ContinuationToken) is surfaced.
+    expect(output).toContain("eyJDb250aW51YXRpb25Ub2tlbiI6ICJuZXh0cGFnZTQ1NiJ9");
+  });
+});
+
+// ── --query cap bypass: --max-items must NOT be forwarded when --query is active ──
+//
+// When --query is active, the aws CLI applies JMESPath to the response before
+// returning it. JMESPath projects NextToken away — so if --max-items were still
+// forwarded, the overlay would silently truncate the result at S3_PAGE_SIZE with
+// zero indication that anything was missing.
+//
+// The fix: skip --max-items when hasQuery === true on both ls paths. Without the
+// cap, botocore auto-pages the complete result (same semantics as real `aws`).
+//
+// Revert-proof (both tests):
+//   - Restore --max-items push inside lsBucketsArgs (or args for objects) before the
+//     hasQuery check → ban stub receives --max-items → exits 1 → exitCode non-zero
+//     → expect(exitCode).toBeUndefined() FAILS → test RED.
+//   - With fix in place: --max-items absent from child argv → ban stub exits 0 → GREEN.
+
+/** Simulated --query 'Buckets[].Name' output: 25 names (more than S3_PAGE_SIZE=20). */
+const QUERY_BUCKETS_NAMES = JSON.stringify(
+  Array.from({ length: 25 }, (_, i) => `bucket-${String(i).padStart(3, "0")}`),
+);
+
+/** Simulated --query 'Contents[].Key' output: 25 keys (more than S3_PAGE_SIZE=20). */
+const QUERY_OBJECTS_KEYS = JSON.stringify(
+  Array.from({ length: 25 }, (_, i) => `file-${String(i).padStart(3, "0")}.txt`),
+);
+
+describe("s3 ls --query cap bypass — --max-items NOT forwarded when --query active", () => {
+  it("s3 ls --query (no URI): --max-items is NOT forwarded to s3api list-buckets child", async () => {
+    // Ban stub: exits 1 with a diagnostic if --max-items appears in child argv.
+    //
+    // RED  (before fix): lsBucketsArgs always contains --max-items → ban stub exits 1
+    //        → captureMain sets exitCode → expect(exitCode).toBeUndefined() FAILS.
+    // GREEN (after  fix): --max-items skipped when hasQuery → ban stub exits 0 → PASSES.
+    //
+    // The stub also returns 25 bucket names — more than S3_PAGE_SIZE(20) — proving
+    // the full result is returned without silent truncation when the cap is absent.
+    const binary = createArgBanStub({
+      bannedArg: "--max-items",
+      validStdout: QUERY_BUCKETS_NAMES,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "--query", "Buckets[].Name"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    // Ban stub exited 0 — --max-items was not in child argv.
+    expect(exitCode).toBeUndefined();
+    // Raw JMESPath result is returned (not the curated buckets[] projection).
+    expect(output).toContain("bucket-000");
+    expect(output).toContain("bucket-024"); // index 24 = the 25th item, past the old cap
+    expect(output).not.toContain("BANNED_FLAG");
+  });
+
+  it("s3 ls s3://b/ --query (objects path): --max-items is NOT forwarded to s3api list-objects-v2 child", async () => {
+    // Identical guard on the objects path. Both paths had the same silent-truncation
+    // hole since 0.2.0 (the objects path is the older seam); fixed together.
+    //
+    // RED  (before fix): args always contains --max-items → ban stub exits 1 → FAILS.
+    // GREEN (after  fix): --max-items skipped when hasQuery → ban stub exits 0 → PASSES.
+    const binary = createArgBanStub({
+      bannedArg: "--max-items",
+      validStdout: QUERY_OBJECTS_KEYS,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "s3://b/", "--query", "Contents[].Key"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("file-000.txt");
+    expect(output).toContain("file-024.txt"); // 25th item, past the old cap
+    expect(output).not.toContain("BANNED_FLAG");
   });
 });

@@ -2,8 +2,8 @@
  * `aws-axi s3` — S3 overlay: ls / cp / rm / head-object / create-bucket.
  *
  * Design choices:
- *   - ls (no URI)    → s3api list-buckets          (JSON)
- *   - ls s3://…      → s3api list-objects-v2        (JSON, capped at S3_PAGE_SIZE)
+ *   - ls (no URI)    → s3api list-buckets          (JSON, capped at S3_PAGE_SIZE; bypass with --query)
+ *   - ls s3://…      → s3api list-objects-v2        (JSON, capped at S3_PAGE_SIZE; bypass with --query)
  *   - cp / rm        → s3 high-level verbs          (text; --output json ignored by aws s3)
  *   - head-object    → s3api head-object            (JSON)
  *   - create-bucket  → s3api create-bucket          (JSON, idempotent: BucketAlreadyOwnedByYou = success)
@@ -131,6 +131,14 @@ interface AwsBucket {
 interface ListBucketsResponse {
   readonly Buckets?: readonly AwsBucket[];
   readonly Owner?: unknown;
+  /**
+   * Botocore-synthesized pagination token. Present only when --max-items
+   * truncates the result. The underlying ListBuckets paginator uses
+   * ContinuationToken as its native input/output token, but the aws CLI
+   * strips it and emits this synthesized NextToken instead (engine.ts
+   * contract: NEVER gate truncation on native flags).
+   */
+  readonly NextToken?: string;
 }
 
 interface AwsS3Object {
@@ -230,7 +238,8 @@ export interface S3LsRunOptions {
 /**
  * List S3 buckets (no prefix) or objects under an S3 URI prefix (with cap).
  *
- * - No prefix → s3api list-buckets
+ * - No prefix → s3api list-buckets, capped at S3_PAGE_SIZE with honest
+ *   truncation reporting and a --starting-token continuation hint.
  * - With prefix → s3api list-objects-v2, capped at S3_PAGE_SIZE with honest
  *   truncation reporting and a --starting-token continuation hint.
  */
@@ -239,9 +248,30 @@ export async function s3LsRun(
 ): Promise<S3LsResult | Record<string, unknown>> {
   // ── list all buckets ──────────────────────────────────────────────────────
   if (options.prefix === undefined) {
-    const lsBucketsArgs = ["s3api", "list-buckets", ...(options.passthrough ?? [])];
+    // s3api list-buckets is a genuine paginated operation. The botocore
+    // ListBuckets paginator uses ContinuationToken as both input and output
+    // token (botocore model), but the aws CLI strips that field from the
+    // response — truncation surfaces only as a synthesized NextToken under
+    // --max-items (engine.ts pagination contract). Cap at S3_PAGE_SIZE to
+    // bound the TOON blast; forward --starting-token when the caller resumes.
+    //
+    // --query bypass: when --query is active, JMESPath projects NextToken away,
+    // which would cause silent truncation at S3_PAGE_SIZE. The caller opted
+    // out of the overlay's curation — skip the cap too. Without --max-items,
+    // botocore auto-pages the complete result (same semantics as real `aws`).
+    const lsBucketsArgs: string[] = ["s3api", "list-buckets"];
+    if (options.hasQuery !== true) {
+      lsBucketsArgs.push("--max-items", String(S3_PAGE_SIZE));
+    }
+    if (options.startingToken !== undefined) {
+      lsBucketsArgs.push("--starting-token", options.startingToken);
+    }
+    if (options.passthrough !== undefined) {
+      lsBucketsArgs.push(...options.passthrough);
+    }
     if (options.hasQuery === true) {
-      // --query: aws CLI applies JMESPath; bypass curated projection.
+      // --query: aws CLI applies JMESPath; bypass curated projection and page cap.
+      // Without --max-items, botocore auto-pages to the complete result (all pages).
       return awsJson<Record<string, unknown>>(lsBucketsArgs, {
         binary: options.binary,
         context: options.context,
@@ -266,20 +296,36 @@ export async function s3LsRun(
       };
     }
 
+    // Gate truncation ONLY on the botocore-synthesized NextToken — the engine.ts
+    // contract. ContinuationToken is stripped by the --max-items paginator and
+    // never appears in the child's stdout; gating on it would be dead code.
+    if (resp.NextToken !== undefined) {
+      return {
+        buckets,
+        truncated: true,
+        nextToken: resp.NextToken,
+        hint: `Showing ${buckets.length} buckets (more available). Use --starting-token ${resp.NextToken} to continue.`,
+      };
+    }
+
     return { buckets };
   }
 
   // ── list objects under prefix ─────────────────────────────────────────────
   const { bucket, prefix } = parseS3Uri(options.prefix);
 
+  // --query bypass: same reasoning as the buckets path — JMESPath projects
+  // NextToken away, so the cap would cause silent truncation when --query is active.
+  // Skip --max-items in that case; botocore auto-pages the complete result.
   const args: string[] = [
     "s3api",
     "list-objects-v2",
     "--bucket",
     bucket,
-    "--max-items",
-    String(S3_PAGE_SIZE),
   ];
+  if (options.hasQuery !== true) {
+    args.push("--max-items", String(S3_PAGE_SIZE));
+  }
   if (prefix) {
     args.push("--prefix", prefix);
   }
@@ -298,7 +344,8 @@ export async function s3LsRun(
   }
 
   if (options.hasQuery === true) {
-    // --query: aws CLI applies JMESPath; bypass curated projection.
+    // --query: aws CLI applies JMESPath; bypass curated projection and page cap.
+    // Without --max-items, botocore auto-pages to the complete result (all pages).
     return awsJson<Record<string, unknown>>(args, {
       binary: options.binary,
       context: options.context,
@@ -643,10 +690,17 @@ flags (overlay-specific):
   --profile <name>        AWS profile (inherited from global --profile)
   --region <region>       AWS region  (inherited from global --region)
   --dryrun                Preview without mutating (cp/rm)
-  --starting-token <tok>  Resume a paginated ls call
+  --starting-token <tok>  Resume a paginated ls call (both paths: list-buckets and list-objects-v2).
+                          ls is capped at 20 items per page; when more are available, truncated: true
+                          and nextToken are emitted. Pass nextToken as --starting-token to continue.
+                          Use --query to bypass the cap: output is unbounded (botocore auto-pages all
+                          results), but nextToken is projected away so pagination state is not surfaced.
+                          To bound output size when using --query, pass --max-items N (forwarded via
+                          passthrough; last-wins over the overlay default).
 
 examples:
   aws-axi s3 ls
+  aws-axi s3 ls --starting-token TOKEN              # resume a paginated list-buckets call
   aws-axi s3 ls s3://my-bucket/prefix/
   aws-axi s3 ls s3://my-bucket/ --starting-token TOKEN
   aws-axi s3 head-object --bucket my-bucket --key path/to/file.txt

@@ -110,6 +110,8 @@ Two deliberate named exceptions exist for `s3 ls` (see below).
 > | `--request-payer` | USAGE_ERROR (invalid for list-buckets) | forwarded |
 > | `--bucket-name-prefix` | **Translated** to `--prefix` | USAGE_ERROR |
 > | `--bucket-region` | forwarded | USAGE_ERROR |
+> | `--query` | **Cap bypassed** (JMESPath projects `NextToken` away; botocore auto-pages complete result); curated projection skipped | Same: cap bypassed, curated projection skipped |
+> | `--starting-token` | forwarded; `list-buckets` capped at `S3_PAGE_SIZE` — truncation reported via synthesized `NextToken` (not native `ContinuationToken`, which botocore strips) | forwarded |
 >
 > Default: `s3 ls s3://b/` adds `--delimiter /` (matching real `aws s3 ls` behavior) and surfaces
 > `CommonPrefixes` as `prefixes[]`. Folder-only buckets are never reported as empty.
@@ -160,12 +162,13 @@ apart from the `aws-axi` prefix. Where the ergonomics differ, here is the map bo
 | `aws iam list-roles --query 'Roles[].RoleName'`        | `aws-axi iam list-roles --query 'Roles[].RoleName'`   | `--query` forwarded; JMESPath applied by aws CLI; overlay projection bypassed |
 | `aws sts get-caller-identity`                          | `aws-axi whoami`                                       | Fused with profile, region, and credential source                          |
 | *(no equivalent)*                                      | `aws-axi`                                              | No-arg dashboard: current identity + region                                |
-| `aws s3 ls s3://bucket/`                               | `aws-axi s3 ls s3://bucket/`                           | Same; `--delimiter /` added (matches real non-recursive behavior); output capped + TOON |
+| `aws s3 ls s3://bucket/`                               | `aws-axi s3 ls s3://bucket/`                           | Same; `--delimiter /` added (matches real non-recursive behavior); output capped + TOON (use `--starting-token` to page; `--query` bypasses cap) |
 | `aws s3 ls s3://bucket/ --recursive`                   | `aws-axi s3 ls s3://bucket/ --recursive`               | `--recursive` translated: drops `--delimiter /` so all nested keys are returned |
 | `aws s3 ls s3://bucket/ --page-size 5`                 | `aws-axi s3 ls s3://bucket/ --page-size 5`             | `--page-size` forwarded verbatim to `s3api list-objects-v2`                |
 | `aws s3 ls s3://bucket/ --human-readable`              | `aws-axi s3 ls s3://bucket/` (drop the flag)           | `--human-readable` → clean USAGE_ERROR (named exception; silent absorb misleads) |
 | `aws s3 ls --bucket-name-prefix foo`                   | `aws-axi s3 ls --bucket-name-prefix foo`               | `--bucket-name-prefix` translated to `--prefix` on `list-buckets`          |
-| `aws s3api list-buckets`                               | `aws-axi s3 ls`                                        | High-level `s3 ls` with no target lists buckets                            |
+| `aws s3api list-buckets`                               | `aws-axi s3 ls`                                        | High-level `s3 ls` with no target lists buckets; output capped at 20 + TOON (use `--starting-token` to page; `--query` bypasses cap) |
+| `aws s3api list-buckets --starting-token TOK`          | `aws-axi s3 ls --starting-token TOK`                   | `--starting-token` forwarded on both paths (`list-buckets` is genuinely paginated); output capped + TOON |
 | `aws logs tail <group> --since 1h`                     | `aws-axi logs tail <group> --since 1h`                | Same flag; snapshot (no `--follow`), capped with `--limit`                  |
 | `aws logs filter-log-events --log-group-name <g> --filter-pattern ERROR` | `aws-axi logs filter <g> ERROR`     | Positional group + pattern                                                  |
 | `aws ssm send-command … && sleep 12 && aws ssm get-command-invocation …` | `aws-axi ssm run --instance-ids i-… --commands "docker ps"` | One call: sends, polls, returns unescaped stdout/stderr/remoteExitCode. Exit codes: remote shell exit propagated verbatim (1..249); delivery failure (TimedOut/Undeliverable/Cancelled) → 254; InProgress → 0 (no false failure for polling loops); `--query` → USAGE_ERROR (no single underlying response to target — use `get-command-invocation --query` instead) |

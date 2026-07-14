@@ -37,7 +37,7 @@ invocation. Two flag classes are handled specially:
 | Flag | Behavior |
 |---|---|
 | `--output <value>` / `--output=<value>` | **Stripped.** The exec seam (`awsJson`) always appends `--output json`; a duplicate `--output` from passthrough would conflict. |
-| `--query <expr>` / `--query=<expr>` | **Kept in passthrough, projection bypassed.** JMESPath is applied by the aws CLI before the response reaches the overlay; the overlay CANNOT safely project a JMESPath result of unknown shape. `hasQuery=true` tells the overlay's `*Run` helper to skip its curated projection. The CLI adapter (`logsCommand`, `s3Command`, etc.) must also bypass its record-builder wrappers when `hasQuery=true` — if the adapter re-wraps a raw result, all fields become null. |
+| `--query <expr>` / `--query=<expr>` | **Kept in passthrough, projection bypassed, page cap bypassed on `s3 ls`.** JMESPath is applied by the aws CLI before the response reaches the overlay; the overlay CANNOT safely project a JMESPath result of unknown shape. `hasQuery=true` tells the overlay's `*Run` helper to skip its curated projection. On the `s3 ls` paths (both list-buckets and list-objects-v2), `hasQuery=true` also suppresses `--max-items`: JMESPath projects `NextToken` away, so the cap would cause silent truncation with no signal to the caller. Without the cap, botocore auto-pages the complete result. The CLI adapter (`logsCommand`, `s3Command`, etc.) must also bypass its record-builder wrappers when `hasQuery=true` — if the adapter re-wraps a raw result, all fields become null. |
 
 Positionals owned by the overlay (e.g. `<key-id>` for `kms describe-key`,
 `<group-name>` for `logs filter`) are never leaked into passthrough.
@@ -93,6 +93,8 @@ are deliberate, named exceptions — not scope boundaries:
 | `--request-payer` | USAGE_ERROR (`list-buckets` does not accept this param) | Forwarded verbatim (valid `list-objects-v2` flag) |
 | `--bucket-name-prefix` | **Translate** to `--prefix` (the `list-buckets` param name) | USAGE_ERROR (this flag filters bucket names, not objects) |
 | `--bucket-region` | Forwarded verbatim (valid `list-buckets` filter) | USAGE_ERROR (this flag filters the bucket list) |
+| `--query` | **Cap bypassed**: `--max-items` is omitted from the child args when `--query` is active. JMESPath projects `NextToken` away; forwarding the cap would silently truncate the result at `S3_PAGE_SIZE` with no signal to the caller. Without `--max-items`, botocore auto-pages the complete result (same semantics as real `aws`). Curated projection skipped per the general `hasQuery` contract. | Same: cap bypassed, curated projection skipped. |
+| `--starting-token` | Forwarded; `list-buckets` call capped at `S3_PAGE_SIZE` with `--max-items` (unless `--query` is also active — see row above). Truncation surfaces as a synthesized `NextToken` (botocore strips the native `ContinuationToken`; gating on it is dead code per `engine.ts` contract — issue #44). | Forwarded verbatim (valid `list-objects-v2` pagination flag) |
 
 **`s3 ls` default delimiter behavior.** Real `aws s3 ls s3://b/` sends
 `?delimiter=%2F`, grouping objects by common prefix ("folders"). Without
