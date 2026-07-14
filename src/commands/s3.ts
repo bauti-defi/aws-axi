@@ -2,8 +2,8 @@
  * `aws-axi s3` — S3 overlay: ls / cp / rm / head-object / create-bucket.
  *
  * Design choices:
- *   - ls (no URI)    → s3api list-buckets          (JSON)
- *   - ls s3://…      → s3api list-objects-v2        (JSON, capped at S3_PAGE_SIZE)
+ *   - ls (no URI)    → s3api list-buckets          (JSON, capped at S3_PAGE_SIZE; bypass with --query)
+ *   - ls s3://…      → s3api list-objects-v2        (JSON, capped at S3_PAGE_SIZE; bypass with --query)
  *   - cp / rm        → s3 high-level verbs          (text; --output json ignored by aws s3)
  *   - head-object    → s3api head-object            (JSON)
  *   - create-bucket  → s3api create-bucket          (JSON, idempotent: BucketAlreadyOwnedByYou = success)
@@ -254,10 +254,15 @@ export async function s3LsRun(
     // response — truncation surfaces only as a synthesized NextToken under
     // --max-items (engine.ts pagination contract). Cap at S3_PAGE_SIZE to
     // bound the TOON blast; forward --starting-token when the caller resumes.
-    const lsBucketsArgs: string[] = [
-      "s3api", "list-buckets",
-      "--max-items", String(S3_PAGE_SIZE),
-    ];
+    //
+    // --query bypass: when --query is active, JMESPath projects NextToken away,
+    // which would cause silent truncation at S3_PAGE_SIZE. The caller opted
+    // out of the overlay's curation — skip the cap too. Without --max-items,
+    // botocore auto-pages the complete result (same semantics as real `aws`).
+    const lsBucketsArgs: string[] = ["s3api", "list-buckets"];
+    if (options.hasQuery !== true) {
+      lsBucketsArgs.push("--max-items", String(S3_PAGE_SIZE));
+    }
     if (options.startingToken !== undefined) {
       lsBucketsArgs.push("--starting-token", options.startingToken);
     }
@@ -265,7 +270,8 @@ export async function s3LsRun(
       lsBucketsArgs.push(...options.passthrough);
     }
     if (options.hasQuery === true) {
-      // --query: aws CLI applies JMESPath; bypass curated projection.
+      // --query: aws CLI applies JMESPath; bypass curated projection and page cap.
+      // Without --max-items, botocore auto-pages to the complete result (all pages).
       return awsJson<Record<string, unknown>>(lsBucketsArgs, {
         binary: options.binary,
         context: options.context,
@@ -308,14 +314,18 @@ export async function s3LsRun(
   // ── list objects under prefix ─────────────────────────────────────────────
   const { bucket, prefix } = parseS3Uri(options.prefix);
 
+  // --query bypass: same reasoning as the buckets path — JMESPath projects
+  // NextToken away, so the cap would cause silent truncation when --query is active.
+  // Skip --max-items in that case; botocore auto-pages the complete result.
   const args: string[] = [
     "s3api",
     "list-objects-v2",
     "--bucket",
     bucket,
-    "--max-items",
-    String(S3_PAGE_SIZE),
   ];
+  if (options.hasQuery !== true) {
+    args.push("--max-items", String(S3_PAGE_SIZE));
+  }
   if (prefix) {
     args.push("--prefix", prefix);
   }
@@ -334,7 +344,8 @@ export async function s3LsRun(
   }
 
   if (options.hasQuery === true) {
-    // --query: aws CLI applies JMESPath; bypass curated projection.
+    // --query: aws CLI applies JMESPath; bypass curated projection and page cap.
+    // Without --max-items, botocore auto-pages to the complete result (all pages).
     return awsJson<Record<string, unknown>>(args, {
       binary: options.binary,
       context: options.context,
@@ -679,7 +690,11 @@ flags (overlay-specific):
   --profile <name>        AWS profile (inherited from global --profile)
   --region <region>       AWS region  (inherited from global --region)
   --dryrun                Preview without mutating (cp/rm)
-  --starting-token <tok>  Resume a paginated ls call (both paths: list-buckets and list-objects-v2)
+  --starting-token <tok>  Resume a paginated ls call (both paths: list-buckets and list-objects-v2).
+                          ls is capped at 20 items per page; when more are available, truncated: true
+                          and nextToken are emitted. Pass nextToken as --starting-token to continue.
+                          Use --query to bypass the cap: output is unbounded (botocore auto-pages all
+                          results), but nextToken is projected away so pagination state is not surfaced.
 
 examples:
   aws-axi s3 ls
