@@ -108,9 +108,10 @@ describe("setupRun — writes all targets for the .ts bin path shape", () => {
     const hookEntry = (groups as Array<{ hooks?: Array<{ command?: string; type?: string }> }>)[0]
       ?.hooks?.[0];
     expect(hookEntry?.type).toBe("command");
-    // Command must use "bun run" (not a bare .ts path that would fail with permission denied).
+    // Command must use "bun --no-env-file run" (not a bare .ts path, and not "bun run"
+    // which would let Bun auto-load cwd .env — issue #32).
     expect(hookEntry?.command).toContain("aws-axi");
-    expect(hookEntry?.command).toMatch(/^bun run .+aws-axi\.ts$/);
+    expect(hookEntry?.command).toMatch(/^bun --no-env-file run .+aws-axi\.ts$/);
   });
 
   it("Codex hooks.json is written with bun-run hook command", () => {
@@ -131,7 +132,7 @@ describe("setupRun — writes all targets for the .ts bin path shape", () => {
     expect(groups.length).toBeGreaterThan(0);
 
     const cmd = (groups as Array<{ hooks?: Array<{ command?: string }> }>)[0]?.hooks?.[0]?.command;
-    expect(cmd).toMatch(/^bun run .+aws-axi\.ts$/);
+    expect(cmd).toMatch(/^bun --no-env-file run .+aws-axi\.ts$/);
   });
 
   it("Codex config.toml is written with hooks = true", () => {
@@ -160,9 +161,10 @@ describe("setupRun — writes all targets for the .ts bin path shape", () => {
     expect(plugin).toContain("axi-sdk-js managed opencode plugin: aws-axi");
     expect(plugin).toContain("experimental.chat.system.transform");
     expect(plugin).toContain("AxiAwsAxiAmbientContextPlugin");
-    // Must use split-args spawn so Node spawn with shell:false works correctly.
-    // A single-string "bun run /path/aws-axi.ts" would fail for shell:false.
-    expect(plugin).toContain('"bun", ["run",');
+    // Must use split-args spawn with --no-env-file so:
+    //   1. Node spawn with shell:false works correctly (no single-string "bun run /path/ts").
+    //   2. Bun does not auto-load cwd .env (issue #32 guard).
+    expect(plugin).toContain('"bun", ["--no-env-file", "run",');
     // Must reference the actual bin path
     expect(plugin).toContain("aws-axi.ts");
   });
@@ -259,7 +261,7 @@ describe("setupRun — path repair", () => {
         hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string }> }> };
       }
     ).hooks?.SessionStart?.[0]?.hooks?.[0]?.command;
-    expect(staleCmd).toBe(`bun run ${oldBin}`);
+    expect(staleCmd).toBe(`bun --no-env-file run ${oldBin}`);
 
     // Re-run with a new execPath — must repair the hook command in-place.
     const newBinDir = join(tmp, "v2", "bin");
@@ -276,8 +278,8 @@ describe("setupRun — path repair", () => {
     ).hooks?.SessionStart?.[0]?.hooks?.[0]?.command;
 
     // Must be updated to the new path, not the old one
-    expect(repairedCmd).toBe(`bun run ${newBin}`);
-    expect(repairedCmd).toMatch(/^bun run .+aws-axi\.ts$/);
+    expect(repairedCmd).toBe(`bun --no-env-file run ${newBin}`);
+    expect(repairedCmd).toMatch(/^bun --no-env-file run .+aws-axi\.ts$/);
   });
 
   it("exactly one managed hook group after repair", () => {
@@ -358,6 +360,89 @@ describe("setupRun — honest error reporting", () => {
 });
 
 // ---------------------------------------------------------------------------
+// AWS_AXI_BIN preference — setup hooks must write the LAUNCHER, not the .js
+//
+// When aws-axi is invoked via the POSIX sh launcher, process.argv[1] is the
+// bundled .js module (dist/bin/aws-axi.js), not the launcher.  Running the
+// .js path directly would bypass --no-env-file and re-open issue #32 on the
+// agent surface.  The launcher exports AWS_AXI_BIN=$_dir/aws-axi (the
+// launcher itself); setupRun must prefer that over process.argv[1].
+//
+// The test sets AWS_AXI_BIN to a fake launcher path, calls setupRun({}) with
+// no execPath override (simulating a real installed-CLI invocation), and asserts
+// the written hook command equals the fake launcher path.  FAILS IF REVERTED:
+// without the AWS_AXI_BIN preference, setupRun would fall through to
+// process.argv[1] (the bun test runner path), which is not the fake launcher.
+// ---------------------------------------------------------------------------
+
+describe("setupRun — prefers AWS_AXI_BIN over process.argv[1] for hook command", () => {
+  const FAKE_LAUNCHER = "/usr/local/lib/node_modules/aws-axi/dist/bin/aws-axi";
+
+  it("writes the launcher path (from AWS_AXI_BIN) to Claude Code settings, not the .js module path", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-bin-"));
+    tempDirs.push(tmp);
+    const home = makeHome(tmp);
+
+    // Simulate a real installed-CLI invocation: the launcher exports AWS_AXI_BIN,
+    // then execs bun aws-axi.js.  We set AWS_AXI_BIN here and call setupRun
+    // without execPath — setupRun must pick up the env var.
+    const savedEnvBin = process.env["AWS_AXI_BIN"];
+    process.env["AWS_AXI_BIN"] = FAKE_LAUNCHER;
+    try {
+      setupRun({ homeDir: home }); // no execPath — must use AWS_AXI_BIN
+    } finally {
+      if (savedEnvBin === undefined) {
+        delete process.env["AWS_AXI_BIN"];
+      } else {
+        process.env["AWS_AXI_BIN"] = savedEnvBin;
+      }
+    }
+
+    expect(existsSync(claudeSettingsPath(home))).toBe(true);
+    const settings = readJson(claudeSettingsPath(home));
+    const cmd = (
+      settings as {
+        hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string }> }> };
+      }
+    ).hooks?.SessionStart?.[0]?.hooks?.[0]?.command;
+
+    // Must be the launcher path, not the .js module.
+    expect(cmd).toBe(FAKE_LAUNCHER);
+    expect(cmd).not.toMatch(/\.js$/);
+  });
+
+  it("options.execPath still wins over AWS_AXI_BIN (explicit override has highest priority)", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-bin-priority-"));
+    tempDirs.push(tmp);
+    const home = makeHome(tmp);
+
+    const savedEnvBin = process.env["AWS_AXI_BIN"];
+    process.env["AWS_AXI_BIN"] = FAKE_LAUNCHER;
+    try {
+      // REAL_BIN (the .ts file) takes priority over the env var.
+      setupRun({ homeDir: home, execPath: REAL_BIN });
+    } finally {
+      if (savedEnvBin === undefined) {
+        delete process.env["AWS_AXI_BIN"];
+      } else {
+        process.env["AWS_AXI_BIN"] = savedEnvBin;
+      }
+    }
+
+    const settings = readJson(claudeSettingsPath(home));
+    const cmd = (
+      settings as {
+        hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string }> }> };
+      }
+    ).hooks?.SessionStart?.[0]?.hooks?.[0]?.command;
+
+    // execPath wins — must be the .ts bin, not the fake launcher.
+    expect(cmd).toBe(`bun --no-env-file run ${REAL_BIN}`);
+    expect(cmd).not.toBe(FAKE_LAUNCHER);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // setupCommand — CLI adapter validation
 // ---------------------------------------------------------------------------
 
@@ -398,5 +483,52 @@ describe("setupCommand — argument validation", () => {
         },
       },
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Residual #2 regression guard — bun --no-env-file required for dev (.ts) path
+//
+// Before this fix, buildHookCommand emitted `bun run <path>`.  Bun without
+// --no-env-file auto-loads .env from cwd on startup, so any repo with
+// AWS_ENDPOINT_URL=http://localhost:4566 in its .env would silently retarget
+// every aws call at LocalStack (issue #32).  This block guards against
+// accidental regression to the no-flag form.
+//
+// FAILS IF REVERTED: removing --no-env-file from buildHookCommand causes both
+// tests below to fail on the "not.toMatch(/^bun run /)" assertion.
+// ---------------------------------------------------------------------------
+
+describe("buildHookCommand — emits --no-env-file for .ts dev path (residual #2)", () => {
+  it("Claude Code hook command uses bun --no-env-file run, not bare bun run", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-nodotenv-"));
+    tempDirs.push(tmp);
+    const home = makeHome(tmp);
+    setupRun({ homeDir: home, execPath: REAL_BIN });
+
+    const settings = readJson(claudeSettingsPath(home));
+    const cmd = (
+      settings as {
+        hooks?: { SessionStart?: Array<{ hooks?: Array<{ command?: string }> }> };
+      }
+    ).hooks?.SessionStart?.[0]?.hooks?.[0]?.command;
+
+    // FAILS IF REVERTED: without the fix, cmd would be "bun run <path>".
+    expect(cmd).toMatch(/^bun --no-env-file run /);
+    expect(cmd).not.toMatch(/^bun run /);
+  });
+
+  it("OpenCode plugin spawn args include --no-env-file, not bare run", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "aws-axi-setup-nodotenv-"));
+    tempDirs.push(tmp);
+    const home = makeHome(tmp);
+    setupRun({ homeDir: home, execPath: REAL_BIN });
+
+    const plugin = readFileSync(openCodePluginPath(home), "utf-8");
+
+    // FAILS IF REVERTED: without the fix, spawn args would be ["run", execPath]
+    // and this assertion fails while the not-assertion passes.
+    expect(plugin).toContain('"bun", ["--no-env-file", "run",');
+    expect(plugin).not.toContain('"bun", ["run",');
   });
 });

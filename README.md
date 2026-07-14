@@ -143,6 +143,7 @@ apart from the `aws-axi` prefix. Where the ergonomics differ, here is the map bo
 | `aws lambda invoke --function-name f --payload '<json>' --cli-binary-format raw-in-base64-out out.json` | `aws-axi lambda invoke --function-name f --payload '<json>'` | `--cli-binary-format` handled automatically; result returned inline |
 | `aws ec2 wait instance-running --instance-ids i-…`     | `aws-axi wait ec2 instance-running --instance-ids i-…`| `wait` is a top-level verb; waiter names stay kebab-case; adds a polling budget |
 | `aws <svc> <op> ...` (auto-paginates everything)       | `aws-axi <svc> <op> --max-items N --next-token <tok>` | Capped by default with an honest `count`; resume with the emitted token    |
+| `aws` never reads `.env` from cwd                      | installed `aws-axi` never reads `.env` from cwd       | The distributed launcher honors only exported shell env vars and `~/.aws/*`; a repo's `.env` (e.g. `AWS_ENDPOINT_URL=http://localhost:4566` for LocalStack) is ignored |
 
 **Conventions that apply everywhere:**
 
@@ -153,6 +154,10 @@ apart from the `aws-axi` prefix. Where the ergonomics differ, here is the map bo
   `253` no credentials, `254` service/client error, `255` general (`0` for a `DryRunOperation`).
 - **Redaction** — `ssm` and `secretsmanager` overlays redact values unless `--reveal` is passed.
 - **Idempotency** — overlay mutations (e.g. `s3 create-bucket`) report what changed and are safe to re-run.
+- **No `.env` loading (installed CLI)** — the distributed launcher never reads `.env` from the current
+  directory. Only genuinely-exported shell environment variables and `~/.aws/*` config are honored,
+  matching the `aws` CLI exactly. (If you run `bun run bin/aws-axi.ts` directly in a repo that has a
+  `.env`, use `bun --no-env-file bin/aws-axi.ts` to get the same isolation.)
 
 ## Reporting issues
 

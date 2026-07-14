@@ -238,6 +238,17 @@ export async function main(options: {
   argv?: string[];
   stdout?: Pick<NodeJS.WriteStream, "write">;
 } = {}): Promise<void> {
+  // Patch process.argv[1] so axi-sdk-js's homeHeaderOutput banner shows the
+  // POSIX sh launcher (dist/bin/aws-axi) rather than the .js module path
+  // (dist/bin/aws-axi.js) that Bun receives after `exec bun --no-env-file`.
+  // Without this, the banner's `bin:` field would advertise aws-axi.js —
+  // teaching downstream agents to invoke it directly, which bypasses
+  // --no-env-file and re-opens issue #32.  The launcher sets AWS_AXI_BIN to
+  // its own resolved path before exec-ing Bun; we consume it here.
+  const _launcherBin = process.env["AWS_AXI_BIN"];
+  if (_launcherBin !== undefined && _launcherBin.length > 0) {
+    process.argv[1] = _launcherBin;
+  }
   await runAxiCli<AwsContext>({
     ...(options.argv ? { argv: options.argv } : {}),
     ...(options.stdout ? { stdout: options.stdout } : {}),

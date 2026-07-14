@@ -25,9 +25,15 @@ Release automation options:
 **Option (a): Bun-native build + option (x): manual local release.**
 
 `bun build ./bin/aws-axi.ts --outdir ./dist/bin --target bun --packages external`
-bundles the first-party source into a single `dist/bin/aws-axi.js` (runtime deps stay
-in `node_modules`, installed by the consumer via npm). The entry shebang is
-`#!/usr/bin/env bun`. Published to npm via `npm publish` run locally by a human.
+bundles the first-party source into a single `dist/bin/aws-axi.js` (the Bun module).
+The user-facing entry point is **`dist/bin/aws-axi`** — a POSIX sh launcher written by
+`scripts/write-launcher.ts` as part of the build step. Published to npm via `npm publish`
+run locally by a human.
+
+The `package.json` `bin.aws-axi` field points at the launcher, not the `.js` module.
+When npm/bun links the package globally, it symlinks `dist/bin/aws-axi` into the user's
+`bin/` directory. The launcher resolves that symlink at runtime, then execs Bun on the
+sibling `aws-axi.js` with `--no-env-file` (see Consequences below).
 
 Release workflow:
 1. Bump `version` in `package.json` by hand.
@@ -56,6 +62,28 @@ This mirrors DAMM-sdk's release pattern exactly.
 Consumers need Bun installed. This is the only runtime requirement. This is intentional
 and accepted — aws-axi is part of the AXI toolchain which universally assumes Bun.
 
+## Consequences — the launcher is load-bearing (do not remove `--no-env-file`)
+
+The `dist/bin/aws-axi` launcher is **not cosmetic**. Bun auto-loads `.env` from the
+process cwd on startup (Node does not). Any repo that ships
+`AWS_ENDPOINT_URL=http://localhost:4566` in its `.env` (e.g. for LocalStack integration
+tests) will silently retarget every real-AWS call at localhost, producing a misleading
+"Could not connect to the endpoint URL" error — with no indication that a dotfile is
+responsible (see issue #32).
+
+The launcher passes `--no-env-file` to Bun, suppressing the auto-load so the installed
+CLI mirrors the `aws` CLI: only genuinely-exported shell environment variables and
+`~/.aws/*` config are honored. Removing `--no-env-file` from the launcher reopens this
+footgun. `scripts/verify-dist.ts` and `test/no-dotenv.test.ts` both guard this: CI will
+catch any regression.
+
+**Why a POSIX sh launcher instead of `#!/usr/bin/env -S bun --no-env-file`:**
+`env -S` (which allows passing flags via the shebang) is unsupported on BusyBox.
+Alpine Linux 3.20+ ships BusyBox's `env`, making the `-S` form produce
+`/usr/bin/env: unrecognized option: S` and rendering the CLI completely unrunnable.
+A `#!/bin/sh` launcher works on macOS, glibc Linux, AND Alpine/BusyBox with no extra
+dependencies, so we chose it for universal portability.
+
 ## Alternative: bun compile (c)
 
 Per-platform standalone binaries eliminate the runtime dependency entirely but require a
@@ -64,21 +92,25 @@ Homebrew tap or GitHub release download flow. Defer to a future slice if demand 
 
 ## Impact on slice #14 (setup hooks)
 
-`setup.ts` already handles both the development (`.ts` bin) and packaged forms:
+`setup.ts` handles both the development (`.ts` bin) and installed (launcher) forms:
 
 ```typescript
 function buildHookCommand(execPath: string): string {
   if (execPath.endsWith(".ts")) {
     return `bun run ${execPath}`;   // dev: bun run /abs/path/aws-axi.ts
   }
-  return execPath;                   // packaged: /abs/path/dist/bin/aws-axi.js
+  return execPath;                   // packaged: /abs/path/dist/bin/aws-axi (the launcher)
 }
 ```
 
-After npm install, `process.argv[1]` is the npm shim (e.g., `/usr/local/bin/aws-axi`),
-which does not end with `.ts` → `buildHookCommand` returns it directly → hooks store
-`/usr/local/bin/aws-axi`, which IS executable and valid for Claude Code, Codex, and
-OpenCode. No changes to `setup.ts` are needed for the packaged case.
+After npm install, when a user runs `aws-axi setup hooks`:
+- The launcher exports `AWS_AXI_BIN=$_dir/aws-axi` (its own resolved path).
+- `setupRun` prefers `AWS_AXI_BIN` over `process.argv[1]` (which is the `.js` module).
+- `buildHookCommand(launcherPath)` returns the launcher path directly (no `.ts` → no `bun run` prefix).
+- The persisted hook command is the launcher — which passes `--no-env-file` to Bun.
+
+This closes the previously-noted gap: the hook now benefits from the same `.env` isolation
+as a direct invocation. `test/setup.test.ts` asserts this invariant and fails if reverted.
 
 ## Operator-only steps to complete this slice
 

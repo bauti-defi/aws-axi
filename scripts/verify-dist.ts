@@ -3,10 +3,12 @@
  * Verify that the built dist/ output is complete and runnable.
  *
  * Checks:
- *   1. dist/bin/aws-axi.js exists
- *   2. Its first line is exactly "#!/usr/bin/env bun"
- *   3. It has the owner-execute bit set
- *   4. Running it with --version prints the version from package.json
+ *   1. dist/bin/aws-axi.js exists (the bundled Bun module)
+ *   2. dist/bin/aws-axi (the POSIX sh launcher) exists
+ *   3. Launcher first line is exactly "#!/bin/sh"
+ *   4. Launcher has the owner-execute bit set
+ *   5. Launcher contains "--no-env-file" (the .env isolation guard — do not remove)
+ *   6. Running dist/bin/aws-axi with --version prints the version from package.json
  *
  * Exit 0 on success, exit 1 on any failure.
  *
@@ -21,7 +23,8 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(fileURLToPath(import.meta.url), "..", "..");
-const DIST_BIN = join(ROOT, "dist", "bin", "aws-axi.js");
+const DIST_JS = join(ROOT, "dist", "bin", "aws-axi.js");
+const DIST_LAUNCHER = join(ROOT, "dist", "bin", "aws-axi");
 const PACKAGE_JSON = join(ROOT, "package.json");
 
 const pkg = JSON.parse(readFileSync(PACKAGE_JSON, "utf-8")) as {
@@ -40,39 +43,56 @@ function fail(msg: string): void {
   allPassed = false;
 }
 
-// 1. File exists
-if (existsSync(DIST_BIN)) {
+// 1. Bundled JS module exists
+if (existsSync(DIST_JS)) {
   pass(`dist/bin/aws-axi.js exists`);
 } else {
   fail(`dist/bin/aws-axi.js does not exist — run \`bun run build\` first`);
 }
 
-if (existsSync(DIST_BIN)) {
-  const contents = readFileSync(DIST_BIN, "utf-8");
+// 2–5. Launcher checks
+if (existsSync(DIST_LAUNCHER)) {
+  pass(`dist/bin/aws-axi (launcher) exists`);
+
+  const contents = readFileSync(DIST_LAUNCHER, "utf-8");
   const firstLine = contents.split("\n")[0] ?? "";
 
-  // 2. Shebang is exactly #!/usr/bin/env bun
-  const expectedShebang = "#!/usr/bin/env bun";
+  // 3. Launcher shebang is exactly #!/bin/sh (portable; no env -S dependency)
+  const expectedShebang = "#!/bin/sh";
   if (firstLine === expectedShebang) {
-    pass(`shebang is "${expectedShebang}"`);
+    pass(`launcher shebang is "${expectedShebang}"`);
   } else {
     fail(
-      `shebang mismatch — expected "${expectedShebang}", got "${firstLine}"`,
+      `launcher shebang mismatch — expected "${expectedShebang}", got "${firstLine}"`,
     );
   }
 
-  // 3. Owner-execute bit (mode & 0o100)
-  const mode = statSync(DIST_BIN).mode;
+  // 4. Owner-execute bit (mode & 0o100)
+  const mode = statSync(DIST_LAUNCHER).mode;
   if (mode & 0o100) {
-    pass(`dist/bin/aws-axi.js is executable (mode 0${(mode & 0o777).toString(8)})`);
+    pass(`dist/bin/aws-axi is executable (mode 0${(mode & 0o777).toString(8)})`);
   } else {
     fail(
-      `dist/bin/aws-axi.js is not executable (mode 0${(mode & 0o777).toString(8)})`,
+      `dist/bin/aws-axi is not executable (mode 0${(mode & 0o777).toString(8)})`,
     );
   }
 
-  // 4. --version prints the package version
-  const result = spawnSync("bun", ["run", DIST_BIN, "--version"], {
+  // 5. Launcher passes --no-env-file to Bun — load-bearing; prevents cwd .env
+  //    from silently retargeting real-AWS calls (see issue #32 / ADR-0001).
+  if (contents.includes("--no-env-file")) {
+    pass(`launcher contains --no-env-file`);
+  } else {
+    fail(
+      `launcher is missing --no-env-file — cwd .env files would silently leak into aws calls`,
+    );
+  }
+} else {
+  fail(`dist/bin/aws-axi (launcher) does not exist — run \`bun run build\` first`);
+}
+
+// 6. Launcher --version prints the package version
+if (existsSync(DIST_LAUNCHER)) {
+  const result = spawnSync(DIST_LAUNCHER, ["--version"], {
     encoding: "utf-8",
     timeout: 10_000,
   });
