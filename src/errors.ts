@@ -10,7 +10,12 @@ export { AxiError };
  *   254 = service-client-error
  *   255 = general / unknown
  *   127 = aws CLI not installed
+ *     1 = remote-exec-error (remote shell exited non-zero; SSM API itself succeeded)
  *     0 = DryRunOperation (success signal)
+ *
+ * REMOTE_EXEC_ERROR (exit 1) is distinct from SERVICE_CLIENT_ERROR (exit 254):
+ * the AWS SSM API call succeeded; the *remote shell command* failed.
+ * An agent must distinguish "AWS denied my call" from "command ran but bombed".
  */
 export type AwsErrorCode =
   | "USAGE_ERROR"
@@ -19,6 +24,7 @@ export type AwsErrorCode =
   | "SERVICE_CLIENT_ERROR"
   | "AWS_NOT_INSTALLED"
   | "DRY_RUN_SUCCESS"
+  | "REMOTE_EXEC_ERROR"
   | "UNKNOWN";
 
 export interface ParsedAwsError {
@@ -157,6 +163,9 @@ export function awsExitCode(code: AwsErrorCode): number {
       return 0;
     case "AWS_NOT_INSTALLED":
       return 127;
+    case "REMOTE_EXEC_ERROR":
+      // exit 1 = conventional "command failed"; distinct from 254 (AWS API error)
+      return 1;
     default:
       return 255;
   }

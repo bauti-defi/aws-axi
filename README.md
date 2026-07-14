@@ -108,7 +108,7 @@ bypasses the overlay's curated projection, returning the raw JMESPath result as-
 | CloudWatch Logs  | `logs`             | `tail`, `filter`, `describe-log-groups`                                                       | → generic engine                   |
 | KMS              | `kms`              | `list-keys`, `list-aliases`, `describe-key`, `get-key-policy`                                 | → generic engine                   |
 | Lambda           | `lambda`           | `list-functions`, `get-function`, `get-function-configuration`, `invoke`                      | → generic engine                   |
-| SSM              | `ssm`              | `describe-parameters`, `get-parameter`, `get-parameters`, `get-parameters-by-path` (redacted) | → generic engine                   |
+| SSM              | `ssm`              | **`run`** (send+wait+unescaped output in one call), **`get-command-invocation`** (unescaped, `--wait`), `describe-parameters`, `get-parameter`, `get-parameters`, `get-parameters-by-path` (redacted) | → generic engine                   |
 | Secrets Manager  | `secretsmanager` (alias `secrets`) | `list-secrets`, `get-secret-value` (redacted), `describe-secret`             | → generic engine                   |
 | Waiters          | `wait`             | any botocore waiter, e.g. `wait ec2 instance-running`, `wait s3 bucket-exists`                | —                                  |
 | **Any other service** | *(service name)* | —                                                                                        | **fully served by the generic engine** |
@@ -146,6 +146,8 @@ apart from the `aws-axi` prefix. Where the ergonomics differ, here is the map bo
 | `aws s3api list-buckets`                               | `aws-axi s3 ls`                                        | High-level `s3 ls` with no target lists buckets                            |
 | `aws logs tail <group> --since 1h`                     | `aws-axi logs tail <group> --since 1h`                | Same flag; snapshot (no `--follow`), capped with `--limit`                  |
 | `aws logs filter-log-events --log-group-name <g> --filter-pattern ERROR` | `aws-axi logs filter <g> ERROR`     | Positional group + pattern                                                  |
+| `aws ssm send-command … && sleep 12 && aws ssm get-command-invocation …` | `aws-axi ssm run --instance-ids i-… --commands "docker ps"` | One call: sends command, polls to terminal state, returns unescaped stdout/stderr/remoteExitCode; non-zero remote exit → exit 1 |
+| `aws ssm get-command-invocation --command-id … --instance-id …` (output has `\n`-escaped blobs) | `aws-axi ssm get-command-invocation --command-id … --instance-id … [--wait]` | `--wait` polls until terminal; stdout/stderr rendered as line arrays (unescaped) |
 | `aws ssm get-parameter --name <n> --with-decryption`   | `aws-axi ssm get-parameter <n> --reveal`              | Redacted by default; `--reveal` opts in (adds `--with-decryption`)         |
 | `aws secretsmanager get-secret-value --secret-id <id>` | `aws-axi secretsmanager get-secret-value <id> --reveal` | Redacted by default; `--reveal` opts in                                   |
 | `aws kms describe-key --key-id alias/foo`              | `aws-axi kms describe-key alias/foo`                   | Positional id; accepts id, ARN, or alias                                    |
