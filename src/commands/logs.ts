@@ -20,6 +20,7 @@ import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import { awsJson, type AwsRunOptions } from "../aws.js";
 import { fallThroughToEngine } from "../engine.js";
+import { collectPassthroughFlags, buildPassthrough } from "../overlay-args.js";
 
 // ─── Defaults ─────────────────────────────────────────────────────────────────
 
@@ -167,6 +168,17 @@ export interface TailRunOptions {
   readonly pattern?: string;
   /** CLI pagination token from a previous response's `next` field. */
   readonly nextToken?: string;
+  /**
+   * Unknown flags to forward verbatim to the underlying aws invocation
+   * (superset contract: overlay never restricts input, only enriches output).
+   * --output is stripped; --query is kept for JMESPath passthrough.
+   */
+  readonly passthrough?: readonly string[];
+  /**
+   * When true, --query was present in the CLI args. tailRun bypasses its
+   * curated projection and returns the raw aws CLI response directly.
+   */
+  readonly hasQuery?: boolean;
   readonly context?: AwsContext;
   readonly binary?: string;
 }
@@ -197,7 +209,7 @@ export interface TailResult {
  * Projects events to compact TOON: timestamp (ISO 8601), stream, message.
  * Surfaces the CLI pagination token when more results are available.
  */
-export async function tailRun(options: TailRunOptions): Promise<TailResult> {
+export async function tailRun(options: TailRunOptions): Promise<TailResult | Record<string, unknown>> {
   const now = Date.now();
   const sinceStr = options.since ?? DEFAULT_SINCE;
   const sinceMs = parseSince(sinceStr, now);
@@ -227,6 +239,15 @@ export async function tailRun(options: TailRunOptions): Promise<TailResult> {
   }
   if (options.nextToken !== undefined) {
     awsArgs.push("--starting-token", options.nextToken);
+  }
+  // Superset contract: forward unknown flags verbatim.
+  if (options.passthrough !== undefined && options.passthrough.length > 0) {
+    awsArgs.push(...options.passthrough);
+  }
+
+  if (options.hasQuery === true) {
+    // --query: aws CLI applies JMESPath; response shape is unknown — bypass projection.
+    return awsJson<Record<string, unknown>>(awsArgs, runOpts);
   }
 
   const response = await awsJson<AwsFilterLogEventsResponse>(awsArgs, runOpts);
@@ -275,6 +296,16 @@ export interface FilterRunOptions {
   readonly limit?: number;
   /** CLI pagination token from a previous response's `next` field. */
   readonly nextToken?: string;
+  /**
+   * Unknown flags to forward verbatim to the underlying aws invocation
+   * (superset contract).
+   */
+  readonly passthrough?: readonly string[];
+  /**
+   * When true, --query was present in the CLI args. filterRun (via tailRun)
+   * bypasses its curated projection and returns the raw aws CLI response.
+   */
+  readonly hasQuery?: boolean;
   readonly context?: AwsContext;
   readonly binary?: string;
 }
@@ -283,13 +314,15 @@ export interface FilterRunOptions {
  * Filter log events by a CloudWatch Logs filter pattern.
  * Delegates to tailRun with the pattern forwarded.
  */
-export async function filterRun(options: FilterRunOptions): Promise<TailResult> {
+export async function filterRun(options: FilterRunOptions): Promise<TailResult | Record<string, unknown>> {
   return tailRun({
     logGroupName: options.logGroupName,
     since: options.since,
     limit: options.limit,
     pattern: options.pattern,
     nextToken: options.nextToken,
+    passthrough: options.passthrough,
+    hasQuery: options.hasQuery,
     context: options.context,
     binary: options.binary,
   });
@@ -302,6 +335,16 @@ export interface DescribeLogGroupsRunOptions {
   readonly prefix?: string;
   /** Maximum groups to return. Default: 20. */
   readonly limit?: number;
+  /**
+   * Unknown flags to forward verbatim to the underlying aws invocation
+   * (superset contract: e.g. --log-group-name-prefix, --include-linked-accounts).
+   */
+  readonly passthrough?: readonly string[];
+  /**
+   * When true, --query was present in the CLI args. describeLogGroupsRun bypasses
+   * its curated projection and returns the raw aws CLI response directly.
+   */
+  readonly hasQuery?: boolean;
   readonly context?: AwsContext;
   readonly binary?: string;
 }
@@ -329,7 +372,7 @@ export interface LogGroupsResult {
  */
 export async function describeLogGroupsRun(
   options: DescribeLogGroupsRunOptions,
-): Promise<LogGroupsResult> {
+): Promise<LogGroupsResult | Record<string, unknown>> {
   const limit = options.limit ?? DEFAULT_GROUPS_LIMIT;
 
   const runOpts: AwsRunOptions = {
@@ -346,6 +389,15 @@ export async function describeLogGroupsRun(
 
   if (options.prefix !== undefined && options.prefix.length > 0) {
     awsArgs.push("--log-group-name-prefix", options.prefix);
+  }
+  // Superset contract: forward unknown flags verbatim.
+  if (options.passthrough !== undefined && options.passthrough.length > 0) {
+    awsArgs.push(...options.passthrough);
+  }
+
+  if (options.hasQuery === true) {
+    // --query: aws CLI applies JMESPath; response shape is unknown — bypass projection.
+    return awsJson<Record<string, unknown>>(awsArgs, runOpts);
   }
 
   const response = await awsJson<AwsDescribeLogGroupsResponse>(awsArgs, runOpts);
@@ -382,6 +434,10 @@ export async function describeLogGroupsRun(
 export const LOGS_HELP = `usage: aws-axi logs <sub-command> [args] [flags]
 Read CloudWatch Logs events and log groups. Capped output with honest totals.
 
+Any flag accepted by the underlying \`aws logs\` operation (e.g.
+--log-group-name-prefix, --include-linked-accounts, --query) is forwarded
+verbatim — overlays never restrict the input contract, only enrich the output.
+
 sub-commands (enriched overlays):
   tail <log-group-name>                    Fetch recent events (default: last 15m)
   filter <log-group-name> <pattern>        Filter events by CloudWatch Logs filter pattern
@@ -394,6 +450,8 @@ flags (tail / filter):
   --stream <name>       Restrict to a specific log stream (tail only)
   --pattern <p>         CloudWatch Logs filter pattern (tail only; filter takes it positionally)
   --next-token <tok>    Resume from a previous --next-token value
+  --query <expr>        JMESPath; bypasses overlay projection, returns raw result
+  --output              stripped (aws-axi always uses --output json internally)
 
 flags (describe-log-groups):
   --prefix <name>       Filter by log group name prefix
@@ -408,6 +466,7 @@ examples:
   aws-axi logs tail /aws/lambda/my-function --since 1h --limit 100
   aws-axi logs filter /aws/lambda/my-function "ERROR" --since 2h
   aws-axi logs describe-log-groups --prefix /aws/lambda
+  aws-axi logs describe-log-groups --log-group-name-prefix /aws/lambda  # forwarded verbatim
   aws-axi logs describe-log-groups --prefix /aws --limit 5 --profile prod
 `;
 
@@ -437,16 +496,25 @@ export async function logsCommand(
 
   const rest = args.slice(1);
 
+  // When --query is present the *Run helper already returns the raw JMESPath
+  // result (shape unknown). Wrapping it in buildTailRecord / buildGroupsRecord
+  // would re-project all fields to null. Detect --query here at the adapter
+  // layer and bypass the record builders entirely.
+  const hasQuery = args.some((a) => a === "--query" || a.startsWith("--query="));
+
   if (subCommand === "tail") {
-    return buildTailRecord(await parseTailArgs(rest, context));
+    const raw = await parseTailArgs(rest, context);
+    return hasQuery ? (raw as Record<string, unknown>) : buildTailRecord(raw as TailResult);
   }
 
   if (subCommand === "filter") {
-    return buildTailRecord(await parseFilterArgs(rest, context));
+    const raw = await parseFilterArgs(rest, context);
+    return hasQuery ? (raw as Record<string, unknown>) : buildTailRecord(raw as TailResult);
   }
 
   if (subCommand === "describe-log-groups") {
-    return buildGroupsRecord(await parseDescribeLogGroupsArgs(rest, context));
+    const raw = await parseDescribeLogGroupsArgs(rest, context);
+    return hasQuery ? (raw as Record<string, unknown>) : buildGroupsRecord(raw as LogGroupsResult);
   }
 
   // Not in the overlay's hot-path — delegate to the model-driven engine.
@@ -559,28 +627,44 @@ export function _extractFilterArgs(args: readonly string[]): FilterArgs {
 async function parseTailArgs(
   args: string[],
   context: AwsContext | undefined,
-): Promise<TailResult> {
+): Promise<TailResult | Record<string, unknown>> {
   const { logGroupName, since, limit, streamName, pattern, nextToken } =
     _extractTailArgs(args);
-  return tailRun({ logGroupName, since, limit, streamName, pattern, nextToken, context });
+  const passthrough = collectPassthroughFlags(
+    args,
+    ["--since", "--limit", "--stream", "--pattern", "--next-token"],
+    undefined,
+    { service: "logs", operation: "filter-log-events" },
+  );
+  const { passthrough: fwd, hasQuery } = buildPassthrough(passthrough);
+  return tailRun({ logGroupName, since, limit, streamName, pattern, nextToken, passthrough: fwd, hasQuery, context });
 }
 
 async function parseFilterArgs(
   args: string[],
   context: AwsContext | undefined,
-): Promise<TailResult> {
+): Promise<TailResult | Record<string, unknown>> {
   const { logGroupName, pattern, since, limit, nextToken } =
     _extractFilterArgs(args);
-  return filterRun({ logGroupName, pattern, since, limit, nextToken, context });
+  const passthrough = collectPassthroughFlags(
+    args,
+    ["--since", "--limit", "--next-token"],
+    undefined,
+    { service: "logs", operation: "filter-log-events" },
+  );
+  const { passthrough: fwd, hasQuery } = buildPassthrough(passthrough);
+  return filterRun({ logGroupName, pattern, since, limit, nextToken, passthrough: fwd, hasQuery, context });
 }
 
 async function parseDescribeLogGroupsArgs(
   args: string[],
   context: AwsContext | undefined,
-): Promise<LogGroupsResult> {
+): Promise<LogGroupsResult | Record<string, unknown>> {
   const [prefix, r1] = pullFlag([...args], "--prefix");
   const [limitStr] = pullFlag(r1, "--limit");
-  return describeLogGroupsRun({ prefix, limit: parseLimit(limitStr), context });
+  const passthrough = collectPassthroughFlags(args, ["--prefix", "--limit"], undefined, { service: "logs", operation: "describe-log-groups" });
+  const { passthrough: fwd, hasQuery } = buildPassthrough(passthrough);
+  return describeLogGroupsRun({ prefix, limit: parseLimit(limitStr), passthrough: fwd, hasQuery, context });
 }
 
 // ─── Record builders (widen typed results to Record<string, unknown>) ─────────

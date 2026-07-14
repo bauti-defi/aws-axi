@@ -21,6 +21,7 @@ import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import { awsJson } from "../aws.js";
 import { fallThroughToEngine } from "../engine.js";
+import { buildPassthrough, stripOutputFlag } from "../overlay-args.js";
 import { resolveSg } from "../resolve/sg.js";
 import { resolveSubnet } from "../resolve/subnet.js";
 import { resolveRole } from "../resolve/role.js";
@@ -155,6 +156,22 @@ export interface Ec2RunOptions {
   readonly context?: AwsContext;
   /** Override the aws binary path — for testing via real stub scripts. */
   readonly binary?: string;
+  /**
+   * Unknown flags (and their values) collected from the user's argv AFTER the
+   * overlay has consumed its own known flags (--max-items, --next-token).
+   * Forwarded verbatim to the underlying aws invocation — never rejected.
+   *
+   * Examples: ["--filters", "Name=tag:Name,Values=foo"]
+   *           ["--filters=Name=instance-state-name,Values=running"]
+   *           ["--dry-run"]
+   */
+  readonly passthrough?: readonly string[];
+  /**
+   * True when --query was present in the user's argv.
+   * When set, the overlay bypasses its curated projection and returns the raw
+   * queried result from the aws CLI (JMESPath is applied by aws, not by us).
+   */
+  readonly hasQuery?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,26 +180,38 @@ export interface Ec2RunOptions {
 
 export const EC2_HELP = `usage: aws-axi ec2 <operation> [--profile <name>] [--region <region>] [flags]
 
-operations[4] (enriched overlays):
+operations[4] (enriched overlays — curated output with resolved names):
   describe-vpcs, describe-subnets, describe-security-groups, describe-instances
   (any other ec2 operation falls through to the generic engine — run \`aws ec2 help\` to list all)
 
-flags:
-  --profile <name>     AWS profile to use (default: AWS_PROFILE env or "default")
-  --region <region>    AWS region to use (default: AWS_REGION / AWS_DEFAULT_REGION env)
+overlay-specific flags:
   --max-items <n>      Max items to return per page (default: 50)
   --next-token <tok>   Resume pagination from this token
+
+passthrough flags:
+  Any flag the real \`aws ec2\` CLI accepts for an operation is accepted and
+  forwarded to the underlying aws invocation. Server-side filtering + enriched
+  output work together: --filters, --instance-ids, --dry-run, etc. all pass through.
+
+  --query <jmespath>   JMESPath expression applied by aws CLI; the overlay's curated
+                       projection is bypassed when --query is present and the raw
+                       queried result is returned instead.
+  --output <format>    Stripped (output is always TOON; --output has no effect).
+
+global flags:
+  --profile <name>     AWS profile to use (default: AWS_PROFILE env or "default")
+  --region <region>    AWS region to use (default: AWS_REGION / AWS_DEFAULT_REGION env)
 
 examples:
   aws-axi ec2 describe-vpcs
   aws-axi ec2 describe-vpcs --profile prod --region us-west-2
   aws-axi ec2 describe-subnets
   aws-axi ec2 describe-subnets --max-items 10
-  aws-axi ec2 describe-subnets --next-token <token>
   aws-axi ec2 describe-security-groups
   aws-axi ec2 describe-instances
-  aws-axi ec2 describe-instances --max-items 10
-  aws-axi ec2 describe-instances --next-token <token>
+  aws-axi ec2 describe-instances --filters "Name=instance-state-name,Values=running"
+  aws-axi ec2 describe-instances --filters "Name=tag:Name,Values=my-server-*" --max-items 10
+  aws-axi ec2 describe-instances --query 'Reservations[].Instances[].InstanceId'
   aws-axi ec2 describe-regions
   aws-axi ec2 describe-availability-zones
 `;
@@ -220,6 +249,7 @@ async function describeVpcs(
       "ec2",
       "describe-vpcs",
       ...buildPaginationArgs({ maxItems, nextToken: options.nextToken }),
+      ...(options.passthrough ?? []),
     ],
     { binary: options.binary, context: options.context },
   );
@@ -272,6 +302,7 @@ async function describeSubnets(
       "ec2",
       "describe-subnets",
       ...buildPaginationArgs({ maxItems, nextToken: options.nextToken }),
+      ...(options.passthrough ?? []),
     ],
     { binary: options.binary, context: options.context },
   );
@@ -327,6 +358,7 @@ async function describeSecurityGroups(
       "ec2",
       "describe-security-groups",
       ...buildPaginationArgs({ maxItems, nextToken: options.nextToken }),
+      ...(options.passthrough ?? []),
     ],
     { binary: options.binary, context: options.context },
   );
@@ -452,6 +484,7 @@ async function describeInstances(
       "ec2",
       "describe-instances",
       ...buildPaginationArgs({ maxItems, nextToken: options.nextToken }),
+      ...(options.passthrough ?? []),
     ],
     { binary: options.binary, context: options.context },
   );
@@ -543,6 +576,9 @@ async function describeInstances(
 /**
  * Run an EC2 operation and return the curated result object.
  *
+ * When `options.hasQuery` is true, bypasses the overlay's curated projection
+ * and returns the raw result from the aws CLI (JMESPath applied by aws CLI).
+ *
  * Throws AxiError (USAGE_ERROR) for unknown operations; propagates AxiError
  * from the exec seam for credential and service errors.
  */
@@ -562,15 +598,41 @@ export async function ec2Run(
     );
   }
 
-  switch (options.operation) {
+  // Normalize passthrough: strip --output so the exec seam (which always
+  // appends --output json) never sees a duplicate --output flag.
+  const normalizedOptions: Ec2RunOptions =
+    options.passthrough !== undefined
+      ? { ...options, passthrough: stripOutputFlag(options.passthrough) }
+      : options;
+
+  // --query bypass: JMESPath is applied by the aws CLI before we see the JSON,
+  // so the response shape is unknown and the overlay CANNOT safely project it.
+  // Forward everything to aws and return the raw queried result.
+  if (normalizedOptions.hasQuery === true) {
+    const awsArgs = [
+      "ec2",
+      op,
+      ...buildPaginationArgs({
+        maxItems: normalizedOptions.maxItems ?? DEFAULT_MAX_ITEMS,
+        nextToken: normalizedOptions.nextToken,
+      }),
+      ...(normalizedOptions.passthrough ?? []),
+    ];
+    return awsJson<Record<string, unknown>>(awsArgs, {
+      binary: normalizedOptions.binary,
+      context: normalizedOptions.context,
+    }) as Promise<Record<string, unknown>>;
+  }
+
+  switch (normalizedOptions.operation) {
     case "describe-vpcs":
-      return describeVpcs(options);
+      return describeVpcs(normalizedOptions);
     case "describe-subnets":
-      return describeSubnets(options);
+      return describeSubnets(normalizedOptions);
     case "describe-security-groups":
-      return describeSecurityGroups(options);
+      return describeSecurityGroups(normalizedOptions);
     case "describe-instances":
-      return describeInstances(options);
+      return describeInstances(normalizedOptions);
   }
 }
 
@@ -674,20 +736,17 @@ export async function ec2Command(
   const { maxItems, rest: afterMaxItems } = parseMaxItems(remainingArgs);
   const { nextToken, rest: afterNextToken } = parseNextToken(afterMaxItems);
 
-  // Guard: reject unrecognized flags
-  const unknownFlags = afterNextToken.filter((a) => a.startsWith("-"));
-  if (unknownFlags.length > 0) {
-    throw new AxiError(
-      `Unknown flag: ${unknownFlags[0] ?? ""}`,
-      "USAGE_ERROR",
-      ["Run `aws-axi ec2 --help` to see valid flags"],
-    );
-  }
+  // Collect passthrough: everything left after the overlay's own flags are consumed.
+  // Unrecognised flags are forwarded verbatim to the underlying aws invocation —
+  // never rejected. --output is stripped (exec seam always appends --output json).
+  const { passthrough, hasQuery } = buildPassthrough(afterNextToken);
 
   return ec2Run({
     operation: operation as Ec2Operation,
     maxItems,
     nextToken,
+    passthrough,
+    hasQuery,
     context,
   });
 }

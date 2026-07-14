@@ -21,6 +21,7 @@ import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import { awsJson } from "../aws.js";
 import { fallThroughToEngine } from "../engine.js";
+import { buildPassthrough, collectPassthroughFlags } from "../overlay-args.js";
 
 // ---------------------------------------------------------------------------
 // AWS raw response shapes (only fields we project or act on)
@@ -146,6 +147,10 @@ export interface IamRunOptions {
 export const IAM_HELP = `usage: aws-axi iam <operation> [args] [--profile <name>] [--region <region>]
 Operations mirror \`aws iam <operation>\` names 1:1.
 
+Any flag accepted by \`aws iam <operation>\` (e.g. --path-prefix, --filter,
+--query) is forwarded verbatim to the underlying aws invocation — overlays
+never restrict the input contract, only enrich the output.
+
 operations[5] (enriched overlays):
   list-roles                               list IAM roles (paginated, capped at 100)
   get-role <name>                          get a role by name
@@ -154,15 +159,19 @@ operations[5] (enriched overlays):
   list-attached-role-policies <role-name>  list policies attached to a role
   (any other iam operation falls through to the generic engine — run \`aws iam help\` to list all)
 
-flags:
+flags (overlay-specific):
   --profile <name>   AWS profile to use
   --region <region>  AWS region to use
   --next-token <tok> resume a truncated list (pass nextToken from prior result)
+  --query <expr>     JMESPath expression; bypasses overlay projection, returns raw result
+  --output           stripped (aws-axi always uses --output json internally)
 
 examples:
   aws-axi iam list-roles
+  aws-axi iam list-roles --path-prefix /engineering/   # forwarded to aws
   aws-axi iam list-roles --next-token <tok>
   aws-axi iam get-role my-role
+  aws-axi iam get-role my-role --query Role.Arn        # JMESPath bypass
   aws-axi iam list-policies
   aws-axi iam list-policies --scope AWS
   aws-axi iam get-policy arn:aws:iam::aws:policy/AdministratorAccess
@@ -266,19 +275,19 @@ async function runListRoles(
   context: AwsContext | undefined,
   binary: string | undefined,
 ): Promise<Record<string, unknown>> {
-  const { token, remaining: rest } = extractNextToken(args);
-  // Reject unknown positional args
-  const positional = rest.filter((a) => a !== "" && !a.startsWith("-"));
-  if (positional.length > 0) {
-    throw new AxiError(
-      `Unexpected argument for list-roles: ${positional[0] ?? ""}`,
-      "USAGE_ERROR",
-      ["Run `aws-axi iam --help` for valid flags"],
-    );
-  }
+  const { token } = extractNextToken(args);
+  // Forward unknown flags verbatim (superset contract: overlay never restricts input).
+  const rawPassthrough = collectPassthroughFlags(args, ["--next-token"], undefined, { service: "iam", operation: "list-roles" });
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   const awsArgs = ["iam", "list-roles", "--max-items", DEFAULT_MAX_ITEMS];
   if (token !== undefined) awsArgs.push("--starting-token", token);
+  awsArgs.push(...passthrough);
+
+  if (hasQuery) {
+    // --query: aws CLI applies JMESPath before we see the result; bypass projection.
+    return awsJson<Record<string, unknown>>(awsArgs, { binary, context });
+  }
 
   const response = await awsJson<IamListRolesResponse>(awsArgs, {
     binary,
@@ -322,10 +331,18 @@ async function runGetRole(
     );
   }
 
-  const response = await awsJson<IamGetRoleResponse>(
-    ["iam", "get-role", "--role-name", roleName],
-    { binary, context },
-  );
+  // Forward unknown flags from args after the positional (superset contract).
+  const rawPassthrough = collectPassthroughFlags(args.slice(1), [], undefined, { service: "iam", operation: "get-role" });
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+
+  const awsArgs = ["iam", "get-role", "--role-name", roleName, ...passthrough];
+
+  if (hasQuery) {
+    // --query: aws CLI applies JMESPath; bypass overlay projection.
+    return awsJson<Record<string, unknown>>(awsArgs, { binary, context });
+  }
+
+  const response = await awsJson<IamGetRoleResponse>(awsArgs, { binary, context });
 
   return { role: projectRole(response.Role) };
 }
@@ -337,10 +354,18 @@ async function runListPolicies(
 ): Promise<Record<string, unknown>> {
   const { scope, remaining: afterScope } = extractScope(args);
   const { token } = extractNextToken(afterScope);
+  // Forward unknown flags verbatim (superset contract).
+  const rawPassthrough = collectPassthroughFlags(args, ["--scope", "--next-token"], undefined, { service: "iam", operation: "list-policies" });
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   const awsArgs = ["iam", "list-policies", "--max-items", DEFAULT_MAX_ITEMS];
   if (scope !== undefined) awsArgs.push("--scope", scope);
   if (token !== undefined) awsArgs.push("--starting-token", token);
+  awsArgs.push(...passthrough);
+
+  if (hasQuery) {
+    return awsJson<Record<string, unknown>>(awsArgs, { binary, context });
+  }
 
   const response = await awsJson<IamListPoliciesResponse>(awsArgs, {
     binary,
@@ -392,10 +417,16 @@ async function runGetPolicy(
     );
   }
 
-  const response = await awsJson<IamGetPolicyResponse>(
-    ["iam", "get-policy", "--policy-arn", policyArn],
-    { binary, context },
-  );
+  const rawPassthrough = collectPassthroughFlags(args.slice(1), [], undefined, { service: "iam", operation: "get-policy" });
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+
+  const awsArgs = ["iam", "get-policy", "--policy-arn", policyArn, ...passthrough];
+
+  if (hasQuery) {
+    return awsJson<Record<string, unknown>>(awsArgs, { binary, context });
+  }
+
+  const response = await awsJson<IamGetPolicyResponse>(awsArgs, { binary, context });
 
   return { policy: projectPolicy(response.Policy) };
 }
@@ -415,6 +446,9 @@ async function runListAttachedRolePolicies(
   }
 
   const { token } = extractNextToken(args.slice(1));
+  const rawPassthrough = collectPassthroughFlags(args.slice(1), ["--next-token"], undefined, { service: "iam", operation: "list-attached-role-policies" });
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+
   const awsArgs = [
     "iam",
     "list-attached-role-policies",
@@ -424,6 +458,11 @@ async function runListAttachedRolePolicies(
     DEFAULT_MAX_ITEMS,
   ];
   if (token !== undefined) awsArgs.push("--starting-token", token);
+  awsArgs.push(...passthrough);
+
+  if (hasQuery) {
+    return awsJson<Record<string, unknown>>(awsArgs, { binary, context });
+  }
 
   const response = await awsJson<IamListAttachedRolePoliciesResponse>(awsArgs, {
     binary,
