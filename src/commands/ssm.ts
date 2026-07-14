@@ -357,9 +357,14 @@ examples:
 // ─── Arg-parsing helpers ──────────────────────────────────────────────────────
 
 /**
- * Boolean flags that take no separate value token.
+ * Boolean flags that take no separate value token in the default (bare) case.
  * Without this list, extractPositionals would incorrectly consume the first
  * positional after a boolean flag as that flag's value.
+ *
+ * These flags also support the two-arg form with a recognised boolean literal
+ * (e.g. `--reveal false`).  When the next token IS a recognised bool literal,
+ * it is consumed as the flag's value (not pushed to result).  This must be
+ * consistent with what `flagIsTrueStrict` / `flagIsTrue` do.
  */
 const BOOLEAN_FLAGS = new Set([
   "--reveal",
@@ -368,6 +373,9 @@ const BOOLEAN_FLAGS = new Set([
   "--recursive",
   "--no-recursive",
 ]);
+
+/** Recognised boolean literals accepted in two-arg flag form (case-insensitive). */
+const BOOL_LITERALS = new Set(["true", "false", "1", "0", "yes", "no"]);
 
 function extractPositionals(args: readonly string[]): string[] {
   const result: string[] = [];
@@ -379,7 +387,17 @@ function extractPositionals(args: readonly string[]): string[] {
     }
     if (arg.startsWith("--")) {
       if (BOOLEAN_FLAGS.has(arg)) {
-        // Boolean flag — no value token follows; skip only this token
+        // Two-arg form: if the next token is a recognised boolean literal,
+        // consume it as the flag's value (consistent with flagIsTrueStrict).
+        // Otherwise, no value token follows; skip only this token.
+        const next = args[i + 1];
+        if (
+          next !== undefined &&
+          !next.startsWith("--") &&
+          BOOL_LITERALS.has(next.toLowerCase())
+        ) {
+          i++; // consume the boolean value token
+        }
         continue;
       }
       // Value flag — skip this AND the following value token

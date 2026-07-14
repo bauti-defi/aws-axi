@@ -987,18 +987,45 @@ describe("--query bypass at captureMain level — ssm/kms/lambda/secrets/s3-head
     expect(output).toContain(MARKER);
   });
 
-  it("secretsmanager get-secret-value --query bypasses overlay projection, marker appears in output", async () => {
+  // secretsmanager get-secret-value is special: --query without --reveal is a
+  // hard USAGE_ERROR (PR #58 round-2).  AWS always returns SecretString in
+  // plaintext; forwarding --query without opt-in would bypass redaction silently.
+  //
+  // ADR-0002 carve-out: --reveal is aws-axi's own flag; gating on it does NOT
+  // violate the superset contract (we are guarding a confidentiality control
+  // we invented, not restricting an input real aws accepts).
+  //
+  // Two sub-cases:
+  //   (a) --query without --reveal → USAGE_ERROR 252
+  //   (b) --query WITH --reveal   → bypass still works (caller opted in)
+
+  it("secretsmanager get-secret-value --query without --reveal → USAGE_ERROR 252 (PR #58 round-2 guard)", async () => {
+    const binary = createArgGuardStub({
+      requiredArg: "--query",
+      validStdout: JSON.stringify("secret-value"),
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["secretsmanager", "get-secret-value", "--secret-id", "my-secret", "--query", "SecretString"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    // Must fail with a USAGE_ERROR — not expose any secret value.
+    expect(exitCode).toBe(252);
+    expect(output).toContain("USAGE_ERROR");
+    expect(output).toContain("--reveal");
+  });
+
+  it("secretsmanager get-secret-value --query WITH --reveal bypasses overlay projection, marker appears in output", async () => {
     const MARKER = "secret-bypass-ok";
-    // The primary get-secret-value call has --query. Without bypass a secondary
-    // describe-secret call would fire (no --query, so stub exits 1), but that
-    // secondary call is .catch'd, so only the projection failure exposes bypass absence.
+    // With --reveal: the caller has opted in; --query bypass is permitted.
     const binary = createArgGuardStub({
       requiredArg: "--query",
       validStdout: JSON.stringify(MARKER),
     });
 
     const { output, exitCode } = await captureMain(
-      ["secretsmanager", "get-secret-value", "--secret-id", "my-secret", "--query", "SecretString"],
+      ["secretsmanager", "get-secret-value", "--secret-id", "my-secret", "--reveal", "--query", "SecretString"],
       { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
     );
 

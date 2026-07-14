@@ -464,6 +464,70 @@ describe("ssmRun get-parameter --reveal value matrix (redaction-bypass fix #56)"
   });
 });
 
+// ─── get-parameter — two-arg --reveal form (PR #58 round-2 fix) ──────────────
+
+describe("ssmRun get-parameter — two-arg --reveal false (round-2 fix)", () => {
+  function stubForReveal(): string {
+    return createStub({ "ssm-get-parameter": { stdout: GET_PARAMETER_SECURE } });
+  }
+
+  it("--reveal false (two-arg, flag-last) REDACTS — was leaking before round-2 fix", async () => {
+    const result = await ssmRun({
+      subcommand: "get-parameter",
+      args: [PARAM_NAME_SECURE, "--reveal", "false"],
+      binary: stubForReveal(),
+    });
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    expect(result.parameter.value).toBe("<redacted>");
+  });
+
+  it("--reveal 0 (two-arg) REDACTS", async () => {
+    const result = await ssmRun({
+      subcommand: "get-parameter",
+      args: [PARAM_NAME_SECURE, "--reveal", "0"],
+      binary: stubForReveal(),
+    });
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    expect(result.parameter.value).toBe("<redacted>");
+  });
+
+  it("--reveal no (two-arg) REDACTS", async () => {
+    const result = await ssmRun({
+      subcommand: "get-parameter",
+      args: [PARAM_NAME_SECURE, "--reveal", "no"],
+      binary: stubForReveal(),
+    });
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    expect(result.parameter.value).toBe("<redacted>");
+  });
+
+  it("--reveal true (two-arg) still REVEALS", async () => {
+    const result = await ssmRun({
+      subcommand: "get-parameter",
+      args: [PARAM_NAME_SECURE, "--reveal", "true"],
+      binary: stubForReveal(),
+    });
+    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    expect(result.parameter.value).toBe(PARAM_VALUE_SECURE);
+  });
+
+  it("flag-first two-arg --reveal false resolves param name correctly", async () => {
+    // After extractPositionals fix, "false" is consumed as the flag value,
+    // so PARAM_NAME_SECURE is positionals[0] (correct param name).
+    const result = await ssmRun({
+      subcommand: "get-parameter",
+      args: ["--reveal", "false", PARAM_NAME_SECURE],
+      binary: stubForReveal(),
+    });
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    expect(result.parameter.name).toBe(PARAM_NAME_SECURE);
+  });
+});
+
 describe("ssmRun get-parameter — errors", () => {
   it("throws USAGE_ERROR when no name is provided", async () => {
     const stub = createStub({});

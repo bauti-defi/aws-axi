@@ -224,15 +224,19 @@ export function hasFlag(args: readonly string[], flag: string): boolean {
  * (currently: --dryrun and --recursive in s3).
  *
  * Accepted inputs and their interpretation:
- *   --flag          → true   (bare presence implies enabled)
- *   --flag=true     → true
- *   --flag=1        → true
- *   --flag=yes      → true
- *   --flag=<other>  → true   (any unrecognised value is treated as truthy)
- *   --flag=false    → false  (superset extension: real aws hard-errors here)
- *   --flag=0        → false
- *   --flag=no       → false
- *   (absent)        → false
+ *   --flag            → true   (bare presence implies enabled)
+ *   --flag true       → true   (two-arg form; recognised true literal)
+ *   --flag false      → false  (two-arg form; recognised false literal)
+ *   --flag 0 / no     → false  (two-arg form; recognised false literals)
+ *   --flag <other>    → true   (two-arg; unrecognised non-bool → bare-presence)
+ *   --flag=true       → true
+ *   --flag=1          → true
+ *   --flag=yes        → true
+ *   --flag=<other>    → true   (any unrecognised =value is treated as truthy)
+ *   --flag=false      → false  (superset extension: real aws hard-errors here)
+ *   --flag=0          → false
+ *   --flag=no         → false
+ *   (absent)          → false
  *
  * ADR-0002 contract: aws-axi is a strict SUPERSET of real aws — it accepts
  * input that real aws rejects and honours it sensibly.  `--flag=false` is
@@ -252,8 +256,24 @@ export function hasFlag(args: readonly string[], flag: string): boolean {
  */
 export function flagIsTrue(args: readonly string[], flag: string): boolean {
   const eqPrefix = `${flag}=`;
-  for (const a of args) {
-    if (a === flag) return true;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? "";
+    if (a === flag) {
+      // Two-arg form: peek at the next token.
+      //   Recognised false literals (false/0/no, case-insensitive) → false
+      //   Recognised true  literals (true/1/yes)                   → true
+      //   Absent, another --flag, or any non-bool positional        → bare-presence → true
+      //
+      // Only recognised boolean literals are consumed as the flag's value;
+      // non-bool positionals (e.g. a secret-id like "prod/db") are left alone.
+      const next = args[i + 1];
+      if (next !== undefined && !next.startsWith("--")) {
+        const v = next.toLowerCase();
+        if (v === "false" || v === "0" || v === "no") return false;
+        if (v === "true" || v === "1" || v === "yes") return true;
+      }
+      return true; // bare presence
+    }
     if (a.startsWith(eqPrefix)) {
       const v = a.slice(eqPrefix.length).toLowerCase();
       return v !== "false" && v !== "0" && v !== "no";
@@ -274,16 +294,25 @@ export function flagIsTrue(args: readonly string[], flag: string): boolean {
  * as FALSE (fail-safe for confidentiality: unrecognised ⇒ redact, not reveal).
  *
  * Accepted inputs and their interpretation:
- *   --flag          → true   (bare presence implies enabled)
- *   --flag=true     → true   (case-insensitive)
- *   --flag=1        → true
- *   --flag=yes      → true
- *   --flag=false    → false  (explicit opt-out)
- *   --flag=0        → false
- *   --flag=no       → false
- *   --flag=<other>  → false  (unrecognised → fail-safe: REDACT, not reveal)
- *   --flag=         → false  (empty value → fail-safe)
- *   (absent)        → false
+ *   --flag            → true   (bare presence implies enabled)
+ *   --flag true       → true   (two-arg form; recognised true literal)
+ *   --flag false      → false  (two-arg form; recognised false literal)
+ *   --flag 0 / no     → false  (two-arg form; recognised false literals)
+ *   --flag <other>    → true   (two-arg; unrecognised non-bool → bare-presence)
+ *   --flag=true       → true   (case-insensitive)
+ *   --flag=1          → true
+ *   --flag=yes        → true
+ *   --flag=false      → false  (explicit opt-out)
+ *   --flag=0          → false
+ *   --flag=no         → false
+ *   --flag=<other>    → false  (unrecognised =value → fail-safe: REDACT)
+ *   --flag=           → false  (empty value → fail-safe)
+ *   (absent)          → false
+ *
+ * FAIL-SAFE DIRECTION: the two helpers differ only in their `=`-form
+ * fallback.  For the two-arg form, both helpers treat unrecognised
+ * non-bool tokens as bare-presence (→ true), leaving non-bool positionals
+ * (e.g. a secret-id "prod/db") untouched.
  *
  * WHEN TO USE: whenever the flag controls secret or credential exposure.
  * Leaking on `--reveal=garbage` is a confidentiality violation; redacting is
@@ -294,14 +323,26 @@ export function flagIsTrue(args: readonly string[], flag: string): boolean {
  * boolean values for ALL boolean flags.  When that lands, both `flagIsTrue`
  * and `flagIsTrueStrict` will error before returning, making the fallback
  * difference moot.  Until then the two helpers serve different fail-safe
- * directions.
+ * directions for `=`-form values; remove `flagIsTrueStrict` when #57 lands.
  *
  * First-wins on repeated flags.  Same `=`-prefix guard as `flagIsTrue`.
  */
 export function flagIsTrueStrict(args: readonly string[], flag: string): boolean {
   const eqPrefix = `${flag}=`;
-  for (const a of args) {
-    if (a === flag) return true;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? "";
+    if (a === flag) {
+      // Two-arg form: same peek logic as flagIsTrue.
+      // (Fail-safe direction differs ONLY in the =-form: unrecognised
+      //  --flag=garbage → false here vs → true in flagIsTrue.)
+      const next = args[i + 1];
+      if (next !== undefined && !next.startsWith("--")) {
+        const v = next.toLowerCase();
+        if (v === "false" || v === "0" || v === "no") return false;
+        if (v === "true" || v === "1" || v === "yes") return true;
+      }
+      return true; // bare presence
+    }
     if (a.startsWith(eqPrefix)) {
       const v = a.slice(eqPrefix.length).toLowerCase();
       return v === "true" || v === "1" || v === "yes";

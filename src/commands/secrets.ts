@@ -183,15 +183,23 @@ examples:
 // ─── Arg-parsing helpers ──────────────────────────────────────────────────────
 
 /**
- * Boolean flags that take no separate value token.
+ * Boolean flags that take no separate value token in the default (bare) case.
  * Without this list, extractPositionals would incorrectly consume the first
  * positional after a boolean flag as that flag's value.
+ *
+ * These flags also support the two-arg form with a recognised boolean literal
+ * (e.g. `--reveal false`).  When the next token IS a recognised bool literal,
+ * it is consumed as the flag's value (not pushed to result).  This must be
+ * consistent with what `flagIsTrueStrict` / `flagIsTrue` do.
  */
 const BOOLEAN_FLAGS = new Set([
   "--reveal",
   "--include-planned-deletion",
   "--no-include-planned-deletion",
 ]);
+
+/** Recognised boolean literals accepted in two-arg flag form (case-insensitive). */
+const BOOL_LITERALS = new Set(["true", "false", "1", "0", "yes", "no"]);
 
 function extractPositionals(args: readonly string[]): string[] {
   const result: string[] = [];
@@ -203,7 +211,17 @@ function extractPositionals(args: readonly string[]): string[] {
     }
     if (arg.startsWith("--")) {
       if (BOOLEAN_FLAGS.has(arg)) {
-        // Boolean flag — no value token follows; skip only this token
+        // Two-arg form: if the next token is a recognised boolean literal,
+        // consume it as the flag's value (consistent with flagIsTrueStrict).
+        // Otherwise, no value token follows; skip only this token.
+        const next = args[i + 1];
+        if (
+          next !== undefined &&
+          !next.startsWith("--") &&
+          BOOL_LITERALS.has(next.toLowerCase())
+        ) {
+          i++; // consume the boolean value token
+        }
         continue;
       }
       // Value flag — skip this AND the following value token
@@ -299,6 +317,29 @@ async function runGetSecretValue(
   // Forward unknown flags verbatim (superset contract). --reveal is overlay-only.
   const rawPassthrough = collectPassthroughFlags(options.args, ["--secret-id"], ["--reveal"], { service: "secretsmanager", operation: "get-secret-value" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+
+  // --query bypass guard: GetSecretValue ALWAYS returns SecretString in plaintext
+  // from AWS — there is no server-side redaction.  --query with no --reveal would
+  // expose the plaintext via the JMESPath projection, bypassing redaction silently.
+  //
+  // ADR-0002 carve-out: --reveal is aws-axi's OWN flag (real aws has no such
+  // concept), so gating on it does NOT violate the superset input contract — we
+  // are guarding a confidentiality control we invented, not restricting an input
+  // that real aws accepts.
+  //
+  // Scope: ONLY get-secret-value.  SSM is NOT affected: --with-decryption is only
+  // appended when reveal=true, so an un-revealed SecureString is returned as
+  // ciphertext by the server — nothing to leak via --query.  list-secrets and
+  // describe-secret do not return secret values.
+  if (hasQuery && !reveal) {
+    throw new AxiError(
+      "--query on a secret-bearing operation would bypass redaction.",
+      "USAGE_ERROR",
+      [
+        "Pass --reveal to confirm you want the plaintext, or drop --query.",
+      ],
+    );
+  }
 
   if (hasQuery) {
     return awsJson<Record<string, unknown>>(
