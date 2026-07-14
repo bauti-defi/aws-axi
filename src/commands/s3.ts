@@ -131,6 +131,12 @@ interface AwsBucket {
 interface ListBucketsResponse {
   readonly Buckets?: readonly AwsBucket[];
   readonly Owner?: unknown;
+  /**
+   * Pagination continuation token. Present when the result is truncated.
+   * The botocore ListBuckets paginator uses ContinuationToken as both input
+   * and output token; the aws CLI --starting-token flag maps to it.
+   */
+  readonly ContinuationToken?: string;
 }
 
 interface AwsS3Object {
@@ -239,7 +245,17 @@ export async function s3LsRun(
 ): Promise<S3LsResult | Record<string, unknown>> {
   // ── list all buckets ──────────────────────────────────────────────────────
   if (options.prefix === undefined) {
-    const lsBucketsArgs = ["s3api", "list-buckets", ...(options.passthrough ?? [])];
+    // s3api list-buckets is a genuine paginated operation. The botocore
+    // ListBuckets paginator uses ContinuationToken as both input and output
+    // token, and `aws s3api list-buckets help` lists --starting-token in
+    // its SYNOPSIS. Forward it when the caller supplied one.
+    const lsBucketsArgs: string[] = ["s3api", "list-buckets"];
+    if (options.startingToken !== undefined) {
+      lsBucketsArgs.push("--starting-token", options.startingToken);
+    }
+    if (options.passthrough !== undefined) {
+      lsBucketsArgs.push(...options.passthrough);
+    }
     if (options.hasQuery === true) {
       // --query: aws CLI applies JMESPath; bypass curated projection.
       return awsJson<Record<string, unknown>>(lsBucketsArgs, {
@@ -263,6 +279,16 @@ export async function s3LsRun(
         buckets,
         empty: true,
         hint: "No buckets found. Create one with: aws-axi s3 create-bucket --bucket <name>",
+      };
+    }
+
+    // Report truncation when the API signals more pages are available.
+    if (resp.ContinuationToken !== undefined) {
+      return {
+        buckets,
+        truncated: true,
+        nextToken: resp.ContinuationToken,
+        hint: `Showing ${buckets.length} buckets (more available). Use --starting-token ${resp.ContinuationToken} to continue.`,
       };
     }
 
@@ -643,10 +669,11 @@ flags (overlay-specific):
   --profile <name>        AWS profile (inherited from global --profile)
   --region <region>       AWS region  (inherited from global --region)
   --dryrun                Preview without mutating (cp/rm)
-  --starting-token <tok>  Resume a paginated ls call
+  --starting-token <tok>  Resume a paginated ls call (both paths: list-buckets and list-objects-v2)
 
 examples:
   aws-axi s3 ls
+  aws-axi s3 ls --starting-token TOKEN              # resume a paginated list-buckets call
   aws-axi s3 ls s3://my-bucket/prefix/
   aws-axi s3 ls s3://my-bucket/ --starting-token TOKEN
   aws-axi s3 head-object --bucket my-bucket --key path/to/file.txt

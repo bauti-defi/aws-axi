@@ -93,6 +93,7 @@ are deliberate, named exceptions — not scope boundaries:
 | `--request-payer` | USAGE_ERROR (`list-buckets` does not accept this param) | Forwarded verbatim (valid `list-objects-v2` flag) |
 | `--bucket-name-prefix` | **Translate** to `--prefix` (the `list-buckets` param name) | USAGE_ERROR (this flag filters bucket names, not objects) |
 | `--bucket-region` | Forwarded verbatim (valid `list-buckets` filter) | USAGE_ERROR (this flag filters the bucket list) |
+| `--starting-token` | Forwarded verbatim (`list-buckets` is paginated: botocore `ListBuckets` paginator uses `ContinuationToken`; `aws s3api list-buckets help` lists this flag in its SYNOPSIS — issue #44) | Forwarded verbatim (valid `list-objects-v2` pagination flag) |
 
 **`s3 ls` default delimiter behavior.** Real `aws s3 ls s3://b/` sends
 `?delimiter=%2F`, grouping objects by common prefix ("folders"). Without

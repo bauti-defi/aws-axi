@@ -110,6 +110,7 @@ Two deliberate named exceptions exist for `s3 ls` (see below).
 > | `--request-payer` | USAGE_ERROR (invalid for list-buckets) | forwarded |
 > | `--bucket-name-prefix` | **Translated** to `--prefix` | USAGE_ERROR |
 > | `--bucket-region` | forwarded | USAGE_ERROR |
+> | `--starting-token` | forwarded (`list-buckets` is genuinely paginated) | forwarded |
 >
 > Default: `s3 ls s3://b/` adds `--delimiter /` (matching real `aws s3 ls` behavior) and surfaces
 > `CommonPrefixes` as `prefixes[]`. Folder-only buckets are never reported as empty.
@@ -166,6 +167,7 @@ apart from the `aws-axi` prefix. Where the ergonomics differ, here is the map bo
 | `aws s3 ls s3://bucket/ --human-readable`              | `aws-axi s3 ls s3://bucket/` (drop the flag)           | `--human-readable` → clean USAGE_ERROR (named exception; silent absorb misleads) |
 | `aws s3 ls --bucket-name-prefix foo`                   | `aws-axi s3 ls --bucket-name-prefix foo`               | `--bucket-name-prefix` translated to `--prefix` on `list-buckets`          |
 | `aws s3api list-buckets`                               | `aws-axi s3 ls`                                        | High-level `s3 ls` with no target lists buckets                            |
+| `aws s3api list-buckets --starting-token TOK`          | `aws-axi s3 ls --starting-token TOK`                   | `--starting-token` forwarded on both paths (`list-buckets` is genuinely paginated) |
 | `aws logs tail <group> --since 1h`                     | `aws-axi logs tail <group> --since 1h`                | Same flag; snapshot (no `--follow`), capped with `--limit`                  |
 | `aws logs filter-log-events --log-group-name <g> --filter-pattern ERROR` | `aws-axi logs filter <g> ERROR`     | Positional group + pattern                                                  |
 | `aws ssm send-command … && sleep 12 && aws ssm get-command-invocation …` | `aws-axi ssm run --instance-ids i-… --commands "docker ps"` | One call: sends, polls, returns unescaped stdout/stderr/remoteExitCode. Exit codes: remote shell exit propagated verbatim (1..249); delivery failure (TimedOut/Undeliverable/Cancelled) → 254; InProgress → 0 (no false failure for polling loops); `--query` → USAGE_ERROR (no single underlying response to target — use `get-command-invocation --query` instead) |

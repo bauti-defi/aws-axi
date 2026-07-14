@@ -1378,3 +1378,80 @@ describe("s3 head-object flag guard — #38", () => {
     expect(output).not.toContain("Unknown options");
   });
 });
+
+// ── s3 ls --starting-token on no-URI (list-buckets) path — issue #44 ─────────
+//
+// `aws s3api list-buckets` is a genuine paginated operation: botocore ships a
+// ListBuckets paginator with ContinuationToken as both input and output token,
+// and `aws s3api list-buckets help` shows `[--starting-token <value>]` in the
+// SYNOPSIS. S3_HELP advertises --starting-token for all ls paths. Before the
+// fix, the token was extracted in s3Command but never forwarded to the child
+// aws process on the no-URI path — a silent drop.
+//
+// The test drives the FULL CLI adapter (captureMain) through a stub that guards
+// on --starting-token appearing in the child argv. The stub returns a valid
+// list-buckets response only when the token is present.
+//
+// Revert-proof:
+//   Reverted (bug present): s3LsRun omits --starting-token from lsBucketsArgs →
+//   child never receives the flag → stub exits 1 ("MISSING_FLAG") → captureMain
+//   exits with non-zero exitCode → expect(exitCode).toBeUndefined() FAILS.
+//   Fixed: --starting-token TOKEN123 reaches the child → stub exits 0 with
+//   valid JSON → output contains "my-bucket" → test PASSES.
+//
+// This test is purposely NOT a unit test on s3LsRun: calling s3LsRun directly
+// with binary= would bypass the s3Command adapter where the extraction and
+// forwarding logic lives. Only captureMain exercises the full chain.
+
+const LIST_BUCKETS_WITH_PAGINATION = JSON.stringify({
+  Buckets: [
+    { Name: "my-bucket", CreationDate: "2024-01-01T00:00:00+00:00" },
+  ],
+  Owner: { DisplayName: "me", ID: "abc" },
+  ContinuationToken: "nextpage456",
+});
+
+describe("s3 ls --starting-token on no-URI path — issue #44", () => {
+  it("s3 ls --starting-token TOKEN123 (no URI): --starting-token IS forwarded to s3api list-buckets child", async () => {
+    // Stub requires --starting-token in argv; exits 1 if absent.
+    // Before fix: no --starting-token forwarded → stub exits 1 → captureMain exits
+    //   with non-zero code → expect(exitCode).toBeUndefined() FAILS → test RED.
+    // After fix:  --starting-token TOKEN123 forwarded → stub exits 0 with valid JSON
+    //   → output contains "my-bucket" → test GREEN.
+    const binary = createArgGuardStub({
+      requiredArg: "--starting-token",
+      validStdout: LIST_BUCKETS_WITH_PAGINATION,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "--starting-token", "TOKEN123"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    // No rejection error — the token was forwarded and the stub accepted it.
+    expect(exitCode).toBeUndefined();
+    // Output must include bucket data (not an error or MISSING_FLAG diagnostic).
+    expect(output).toContain("my-bucket");
+    expect(output).not.toContain("MISSING_FLAG");
+  });
+
+  it("s3 ls --starting-token TOKEN123 (no URI): enriched bucket listing returned (not empty, not error)", async () => {
+    // Secondary check: the overlay must still apply its curated projection
+    // (buckets[] with name + creationDate) even when --starting-token is present.
+    const binary = createArgGuardStub({
+      requiredArg: "--starting-token",
+      validStdout: LIST_BUCKETS_WITH_PAGINATION,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls", "--starting-token", "TOKEN123"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    // Enriched projection: buckets[] with name/creationDate fields.
+    expect(output).toContain("buckets");
+    expect(output).toContain("2024-01-01");
+    expect(output).not.toContain("No buckets found");
+  });
+});
