@@ -26,7 +26,7 @@ import type { AwsRunOptions } from "../aws.js";
 import { awsJson } from "../aws.js";
 import { resolveKey } from "../resolve/key.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough, extractFlag, hasFlag } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrue, flagIsTrueStrict, hasFlag } from "../overlay-args.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -714,7 +714,10 @@ async function runGetCommandInvocation(
 ): Promise<SsmGetCommandInvocationResult | Record<string, unknown>> {
   const commandId = extractFlag(options.args, "--command-id");
   const instanceId = extractFlag(options.args, "--instance-id");
-  const doWait = hasFlag(options.args, "--wait");
+  // flagIsTrue: value-aware — --wait=false must NOT wait.
+  // hasFlag was value-blind: --wait=false returned true and triggered polling.
+  // Unrecognised value → true (fail-safe: over-waiting is safer than missing completion).
+  const doWait = flagIsTrue(options.args, "--wait");
 
   if (commandId === undefined || commandId === "") {
     throw new AxiError(
@@ -794,7 +797,9 @@ async function runGetCommandInvocation(
 async function runGetParameter(
   options: SsmRunOptions,
 ): Promise<SsmGetParameterResult | Record<string, unknown>> {
-  const reveal = hasFlag(options.args, "--reveal");
+  // flagIsTrueStrict: fail-safe for confidentiality — unrecognised value → redact.
+  // hasFlag was value-blind: --reveal=false returned true and leaked the parameter value.
+  const reveal = flagIsTrueStrict(options.args, "--reveal");
   const positionals = extractPositionals(options.args);
   const nameArg =
     extractFlag(options.args, "--name") ?? positionals[0];
@@ -836,7 +841,9 @@ async function runGetParameter(
 async function runGetParameters(
   options: SsmRunOptions,
 ): Promise<{ parameterList: SsmGetParametersResult } | Record<string, unknown>> {
-  const reveal = hasFlag(options.args, "--reveal");
+  // flagIsTrueStrict: fail-safe for confidentiality — unrecognised value → redact.
+  // hasFlag was value-blind: --reveal=false returned true and leaked the parameter value.
+  const reveal = flagIsTrueStrict(options.args, "--reveal");
   const positionals = extractPositionals(options.args);
 
   // --names flag value (single space-separated string from CLI) or positionals
@@ -888,7 +895,9 @@ async function runGetParameters(
 async function runGetParametersByPath(
   options: SsmRunOptions,
 ): Promise<{ parametersByPath: SsmGetParametersByPathResult } | Record<string, unknown>> {
-  const reveal = hasFlag(options.args, "--reveal");
+  // flagIsTrueStrict: fail-safe for confidentiality — unrecognised value → redact.
+  // hasFlag was value-blind: --reveal=false returned true and leaked the parameter value.
+  const reveal = flagIsTrueStrict(options.args, "--reveal");
   const positionals = extractPositionals(options.args);
   const pathArg =
     extractFlag(options.args, "--path") ?? positionals[0];

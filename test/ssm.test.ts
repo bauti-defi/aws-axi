@@ -384,6 +384,86 @@ describe("ssmRun get-parameter --reveal — shows the actual value", () => {
   });
 });
 
+// ─── get-parameter — --reveal value matrix (redaction-bypass fix #56) ────────
+
+describe("ssmRun get-parameter --reveal value matrix (redaction-bypass fix #56)", () => {
+  function stubForReveal(): string {
+    return createStub({ "ssm-get-parameter": { stdout: GET_PARAMETER_SECURE } });
+  }
+
+  async function getWithFlag(flag: string): Promise<unknown> {
+    return ssmRun({
+      subcommand: "get-parameter",
+      args: [flag, PARAM_NAME_SECURE],
+      binary: stubForReveal(),
+    });
+  }
+
+  // RED before fix: hasFlag("--reveal=false") → true → reveals
+
+  it("--reveal=false REDACTS — was leaking before fix", async () => {
+    const result = await getWithFlag("--reveal=false");
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    expect(result.parameter.value).toBe("<redacted>");
+  });
+
+  it("--reveal=0 REDACTS", async () => {
+    const result = await getWithFlag("--reveal=0");
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    expect(result.parameter.value).toBe("<redacted>");
+  });
+
+  it("--reveal=no REDACTS", async () => {
+    const result = await getWithFlag("--reveal=no");
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    expect(result.parameter.value).toBe("<redacted>");
+  });
+
+  it("--reveal=garbage REDACTS (fail-safe: unrecognised → redact)", async () => {
+    const result = await getWithFlag("--reveal=garbage");
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    expect(result.parameter.value).toBe("<redacted>");
+  });
+
+  it("--reveal=off REDACTS (fail-safe)", async () => {
+    const result = await getWithFlag("--reveal=off");
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    expect(result.parameter.value).toBe("<redacted>");
+  });
+
+  it("--reveal= (empty) REDACTS (fail-safe)", async () => {
+    const result = await getWithFlag("--reveal=");
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    expect(result.parameter.value).toBe("<redacted>");
+  });
+
+  // GREEN sanity
+
+  it("--reveal=true still REVEALS", async () => {
+    const result = await getWithFlag("--reveal=true");
+    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    expect(result.parameter.value).toBe(PARAM_VALUE_SECURE);
+  });
+
+  it("--reveal=1 still REVEALS", async () => {
+    const result = await getWithFlag("--reveal=1");
+    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    expect(result.parameter.value).toBe(PARAM_VALUE_SECURE);
+  });
+
+  it("--reveal=yes still REVEALS", async () => {
+    const result = await getWithFlag("--reveal=yes");
+    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    expect(result.parameter.value).toBe(PARAM_VALUE_SECURE);
+  });
+});
+
 describe("ssmRun get-parameter — errors", () => {
   it("throws USAGE_ERROR when no name is provided", async () => {
     const stub = createStub({});
@@ -506,6 +586,58 @@ describe("ssmRun get-parameters --reveal", () => {
   });
 });
 
+// ─── get-parameters — --reveal value matrix (redaction-bypass fix #56) ───────
+
+describe("ssmRun get-parameters --reveal value matrix (redaction-bypass fix #56)", () => {
+  function stubForReveal(): string {
+    return createStub({ "ssm-get-parameters": { stdout: GET_PARAMETERS_TWO } });
+  }
+
+  async function getWithFlag(flag: string): Promise<unknown> {
+    return ssmRun({
+      subcommand: "get-parameters",
+      args: [flag, PARAM_NAME_SECURE, PARAM_NAME_STRING],
+      binary: stubForReveal(),
+    });
+  }
+
+  it("--reveal=false REDACTS all values — was leaking before fix", async () => {
+    const result = await getWithFlag("--reveal=false");
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parameterList" in result)) throw new Error("wrong discriminant");
+    for (const p of result.parameterList.parameters) {
+      expect(p.value).toBe("<redacted>");
+    }
+  });
+
+  it("--reveal=garbage REDACTS (fail-safe: unrecognised → redact)", async () => {
+    const result = await getWithFlag("--reveal=garbage");
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parameterList" in result)) throw new Error("wrong discriminant");
+    for (const p of result.parameterList.parameters) {
+      expect(p.value).toBe("<redacted>");
+    }
+  });
+
+  it("--reveal= (empty) REDACTS (fail-safe)", async () => {
+    const result = await getWithFlag("--reveal=");
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parameterList" in result)) throw new Error("wrong discriminant");
+    for (const p of result.parameterList.parameters) {
+      expect(p.value).toBe("<redacted>");
+    }
+  });
+
+  it("--reveal=true still REVEALS all values", async () => {
+    const result = await getWithFlag("--reveal=true");
+    if (!("parameterList" in result)) throw new Error("wrong discriminant");
+    const secure = result.parameterList.parameters.find(
+      (p) => p.name === PARAM_NAME_SECURE,
+    );
+    expect(secure?.value).toBe(PARAM_VALUE_SECURE);
+  });
+});
+
 // ─── get-parameters-by-path — redaction + pagination ─────────────────────────
 
 describe("ssmRun get-parameters-by-path — default REDACTS values", () => {
@@ -582,6 +714,60 @@ describe("ssmRun get-parameters-by-path --reveal", () => {
       binary: stub,
     });
 
+    if (!("parametersByPath" in result)) throw new Error("wrong discriminant");
+    const secure = result.parametersByPath.parameters.find(
+      (p) => p.name === "/my/app/db-password",
+    );
+    expect(secure?.value).toBe(PARAM_VALUE_SECURE);
+  });
+});
+
+// ─── get-parameters-by-path — --reveal value matrix (fix #56) ───────────────
+
+describe("ssmRun get-parameters-by-path --reveal value matrix (redaction-bypass fix #56)", () => {
+  function stubForReveal(): string {
+    return createStub({
+      "ssm-get-parameters-by-path": { stdout: GET_PARAMETERS_BY_PATH_TWO },
+    });
+  }
+
+  async function getWithFlag(flag: string): Promise<unknown> {
+    return ssmRun({
+      subcommand: "get-parameters-by-path",
+      args: ["/my/app", flag],
+      binary: stubForReveal(),
+    });
+  }
+
+  it("--reveal=false REDACTS — was leaking before fix", async () => {
+    const result = await getWithFlag("--reveal=false");
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parametersByPath" in result)) throw new Error("wrong discriminant");
+    for (const p of result.parametersByPath.parameters) {
+      expect(p.value).toBe("<redacted>");
+    }
+  });
+
+  it("--reveal=garbage REDACTS (fail-safe: unrecognised → redact)", async () => {
+    const result = await getWithFlag("--reveal=garbage");
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parametersByPath" in result)) throw new Error("wrong discriminant");
+    for (const p of result.parametersByPath.parameters) {
+      expect(p.value).toBe("<redacted>");
+    }
+  });
+
+  it("--reveal= (empty) REDACTS (fail-safe)", async () => {
+    const result = await getWithFlag("--reveal=");
+    expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
+    if (!("parametersByPath" in result)) throw new Error("wrong discriminant");
+    for (const p of result.parametersByPath.parameters) {
+      expect(p.value).toBe("<redacted>");
+    }
+  });
+
+  it("--reveal=true still REVEALS", async () => {
+    const result = await getWithFlag("--reveal=true");
     if (!("parametersByPath" in result)) throw new Error("wrong discriminant");
     const secure = result.parametersByPath.parameters.find(
       (p) => p.name === "/my/app/db-password",
@@ -1281,6 +1467,168 @@ describe("ssm get-command-invocation --wait — polling (captureMain)", () => {
     // Terminal state reached
     expect(output).toContain("Success");
     expect(output).not.toContain("InProgress");
+  });
+});
+
+// ─── ssm get-command-invocation --wait=false — value-blind bypass fix #56 ────
+//
+// BUG (pre-fix): hasFlag("--wait=false") returned true (flag token present) →
+// the overlay polled to terminal state even though the caller explicitly set
+// --wait=false.
+//
+// FIX: replace hasFlag with flagIsTrue, which honours the =false value.
+//
+// Test design: stateful stub — first call → InProgress, second → Success.
+//   Pre-fix: hasFlag sees --wait=false as "flag present" → polls → 2 calls →
+//     Success → result.status === "Success" → assertion below fails (RED).
+//   Post-fix: flagIsTrue returns false → single call → InProgress →
+//     result.status === "InProgress" → assertion passes (GREEN).
+//
+// Revert-proof: change flagIsTrue back to hasFlag on the doWait line →
+//   polls → Success → result.status !== "InProgress" → test fails.
+
+describe("ssm get-command-invocation --wait=false — no polling (fix #56)", () => {
+  it("--wait=false makes a single call and returns InProgress — was polling before fix", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-ssm-waitfalse-"));
+    tempDirs.push(dir);
+    const binary = join(dir, "aws");
+    const counterFile = join(dir, "counter");
+
+    // Stateful stub: first call → InProgress, second → Success.
+    // With --wait=false (after fix): only 1 call → InProgress.
+    // With --wait=false (before fix, hasFlag): polls → 2 calls → Success.
+    const script = [
+      "#!/bin/sh",
+      'case "$1-$2" in',
+      "  ssm-get-command-invocation)",
+      `    if [ -f '${counterFile}' ]; then`,
+      `      count=$(cat '${counterFile}')`,
+      `    else`,
+      `      count=0`,
+      `    fi`,
+      `    count=$((count + 1))`,
+      `    printf '%d' "$count" > '${counterFile}'`,
+      `    if [ "$count" -le 1 ]; then`,
+      `      printf '%s' ${shellQuote(GCI_IN_PROGRESS)}`,
+      `    else`,
+      `      printf '%s' ${shellQuote(GCI_SUCCESS)}`,
+      `    fi`,
+      `    exit 0;;`,
+      "  *)",
+      '    printf "Unexpected: %s %s\\n" "$1" "$2" >&2',
+      "    exit 254;;",
+      "esac",
+    ].join("\n");
+
+    writeFileSync(binary, script);
+    chmodSync(binary, 0o755);
+
+    const result = await ssmRun({
+      subcommand: "get-command-invocation",
+      args: [
+        "--command-id", TEST_COMMAND_ID,
+        "--instance-id", TEST_INSTANCE_ID,
+        "--wait=false",
+      ],
+      binary,
+    });
+
+    // Single call → InProgress status (the only response the first call returns).
+    // If polling occurred, the second call would return Success instead.
+    expect("status" in result).toBe(true);
+    expect((result as { status: string }).status).toBe("InProgress");
+  });
+
+  it("--wait=0 also does NOT poll", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-ssm-wait0-"));
+    tempDirs.push(dir);
+    const binary = join(dir, "aws");
+    const counterFile = join(dir, "counter");
+
+    const script = [
+      "#!/bin/sh",
+      'case "$1-$2" in',
+      "  ssm-get-command-invocation)",
+      `    if [ -f '${counterFile}' ]; then`,
+      `      count=$(cat '${counterFile}')`,
+      `    else`,
+      `      count=0`,
+      `    fi`,
+      `    count=$((count + 1))`,
+      `    printf '%d' "$count" > '${counterFile}'`,
+      `    if [ "$count" -le 1 ]; then`,
+      `      printf '%s' ${shellQuote(GCI_IN_PROGRESS)}`,
+      `    else`,
+      `      printf '%s' ${shellQuote(GCI_SUCCESS)}`,
+      `    fi`,
+      `    exit 0;;`,
+      "  *)",
+      '    printf "Unexpected: %s %s\\n" "$1" "$2" >&2',
+      "    exit 254;;",
+      "esac",
+    ].join("\n");
+
+    writeFileSync(binary, script);
+    chmodSync(binary, 0o755);
+
+    const result = await ssmRun({
+      subcommand: "get-command-invocation",
+      args: [
+        "--command-id", TEST_COMMAND_ID,
+        "--instance-id", TEST_INSTANCE_ID,
+        "--wait=0",
+      ],
+      binary,
+    });
+
+    expect("status" in result).toBe(true);
+    expect((result as { status: string }).status).toBe("InProgress");
+  });
+
+  it("bare --wait still polls to Success (unaffected by fix)", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-ssm-waitbare-"));
+    tempDirs.push(dir);
+    const binary = join(dir, "aws");
+    const counterFile = join(dir, "counter");
+
+    const script = [
+      "#!/bin/sh",
+      'case "$1-$2" in',
+      "  ssm-get-command-invocation)",
+      `    if [ -f '${counterFile}' ]; then`,
+      `      count=$(cat '${counterFile}')`,
+      `    else`,
+      `      count=0`,
+      `    fi`,
+      `    count=$((count + 1))`,
+      `    printf '%d' "$count" > '${counterFile}'`,
+      `    if [ "$count" -le 1 ]; then`,
+      `      printf '%s' ${shellQuote(GCI_IN_PROGRESS)}`,
+      `    else`,
+      `      printf '%s' ${shellQuote(GCI_SUCCESS)}`,
+      `    fi`,
+      `    exit 0;;`,
+      "  *)",
+      '    printf "Unexpected: %s %s\\n" "$1" "$2" >&2',
+      "    exit 254;;",
+      "esac",
+    ].join("\n");
+
+    writeFileSync(binary, script);
+    chmodSync(binary, 0o755);
+
+    const result = await ssmRun({
+      subcommand: "get-command-invocation",
+      args: [
+        "--command-id", TEST_COMMAND_ID,
+        "--instance-id", TEST_INSTANCE_ID,
+        "--wait",
+      ],
+      binary,
+    });
+
+    expect("status" in result).toBe(true);
+    expect((result as { status: string }).status).toBe("Success");
   });
 });
 

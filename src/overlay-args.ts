@@ -262,6 +262,54 @@ export function flagIsTrue(args: readonly string[], flag: string): boolean {
   return false;
 }
 
+// ── flagIsTrueStrict ──────────────────────────────────────────────────────────
+
+/**
+ * Return true ONLY if a named BOOLEAN flag is explicitly enabled in argv.
+ *
+ * This is the FAIL-SAFE variant of `flagIsTrue` for CONFIDENTIALITY flags
+ * (e.g. `--reveal`).  Where `flagIsTrue` treats any unrecognised value as
+ * truthy (fail-safe for write-guard flags: unrecognised ⇒ dry-run ⇒ no write),
+ * this helper uses a whitelist: anything not in the known-true set is treated
+ * as FALSE (fail-safe for confidentiality: unrecognised ⇒ redact, not reveal).
+ *
+ * Accepted inputs and their interpretation:
+ *   --flag          → true   (bare presence implies enabled)
+ *   --flag=true     → true   (case-insensitive)
+ *   --flag=1        → true
+ *   --flag=yes      → true
+ *   --flag=false    → false  (explicit opt-out)
+ *   --flag=0        → false
+ *   --flag=no       → false
+ *   --flag=<other>  → false  (unrecognised → fail-safe: REDACT, not reveal)
+ *   --flag=         → false  (empty value → fail-safe)
+ *   (absent)        → false
+ *
+ * WHEN TO USE: whenever the flag controls secret or credential exposure.
+ * Leaking on `--reveal=garbage` is a confidentiality violation; redacting is
+ * always safe.  For write-guard flags (`--dryrun`, `--recursive`) where the
+ * fail-safe is the opposite direction, use `flagIsTrue` instead.
+ *
+ * Interaction with #57: issue #57 proposes hard-erroring on unrecognised
+ * boolean values for ALL boolean flags.  When that lands, both `flagIsTrue`
+ * and `flagIsTrueStrict` will error before returning, making the fallback
+ * difference moot.  Until then the two helpers serve different fail-safe
+ * directions.
+ *
+ * First-wins on repeated flags.  Same `=`-prefix guard as `flagIsTrue`.
+ */
+export function flagIsTrueStrict(args: readonly string[], flag: string): boolean {
+  const eqPrefix = `${flag}=`;
+  for (const a of args) {
+    if (a === flag) return true;
+    if (a.startsWith(eqPrefix)) {
+      const v = a.slice(eqPrefix.length).toLowerCase();
+      return v === "true" || v === "1" || v === "yes";
+    }
+  }
+  return false;
+}
+
 // ── extractFlag ──────────────────────────────────────────────────────────────
 
 /**

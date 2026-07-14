@@ -26,7 +26,7 @@ import type { AwsRunOptions } from "../aws.js";
 import { awsJson } from "../aws.js";
 import { resolveKey } from "../resolve/key.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough, extractFlag, hasFlag } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrueStrict } from "../overlay-args.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -276,7 +276,9 @@ async function resolveAliasMap(
 async function runGetSecretValue(
   options: SecretsRunOptions,
 ): Promise<{ secret: SecretsGetValueResult; suggestion?: string } | Record<string, unknown>> {
-  const reveal = hasFlag(options.args, "--reveal");
+  // flagIsTrueStrict: fail-safe for confidentiality — unrecognised value → redact.
+  // hasFlag was value-blind: --reveal=false returned true and leaked the secret.
+  const reveal = flagIsTrueStrict(options.args, "--reveal");
   const positionals = extractPositionals(options.args);
   const secretId =
     extractFlag(options.args, "--secret-id") ?? positionals[0];
