@@ -110,7 +110,7 @@ Two deliberate named exceptions exist for `s3 ls` (see below).
 > | `--request-payer` | USAGE_ERROR (invalid for list-buckets) | forwarded |
 > | `--bucket-name-prefix` | **Translated** to `--prefix` | USAGE_ERROR |
 > | `--bucket-region` | forwarded | USAGE_ERROR |
-> | `--starting-token` | forwarded (`list-buckets` is genuinely paginated) | forwarded |
+> | `--starting-token` | forwarded; `list-buckets` capped at `S3_PAGE_SIZE` — truncation reported via synthesized `NextToken` (not native `ContinuationToken`, which botocore strips) | forwarded |
 >
 > Default: `s3 ls s3://b/` adds `--delimiter /` (matching real `aws s3 ls` behavior) and surfaces
 > `CommonPrefixes` as `prefixes[]`. Folder-only buckets are never reported as empty.

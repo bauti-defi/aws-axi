@@ -1388,27 +1388,44 @@ describe("s3 head-object flag guard — #38", () => {
 // fix, the token was extracted in s3Command but never forwarded to the child
 // aws process on the no-URI path — a silent drop.
 //
-// The test drives the FULL CLI adapter (captureMain) through a stub that guards
-// on --starting-token appearing in the child argv. The stub returns a valid
-// list-buckets response only when the token is present.
+// Pagination contract (engine.ts rule): --starting-token engages the botocore
+// client-side paginator, which auto-pages to the end and emits a synthesized
+// NextToken ONLY when --max-items truncates. ContinuationToken is stripped by
+// botocore and NEVER appears in the child's stdout. Truncation is gated on
+// NextToken (the botocore-synthesized field), never on ContinuationToken.
 //
-// Revert-proof:
-//   Reverted (bug present): s3LsRun omits --starting-token from lsBucketsArgs →
-//   child never receives the flag → stub exits 1 ("MISSING_FLAG") → captureMain
-//   exits with non-zero exitCode → expect(exitCode).toBeUndefined() FAILS.
-//   Fixed: --starting-token TOKEN123 reaches the child → stub exits 0 with
-//   valid JSON → output contains "my-bucket" → test PASSES.
+// The fix adds:
+//   1. --max-items S3_PAGE_SIZE to the list-buckets args (caps the response)
+//   2. --starting-token forwarding (bug fix for issue #44)
+//   3. Truncation gated on NextToken (honest, fireable)
 //
-// This test is purposely NOT a unit test on s3LsRun: calling s3LsRun directly
-// with binary= would bypass the s3Command adapter where the extraction and
-// forwarding logic lives. Only captureMain exercises the full chain.
+// The tests drive the FULL CLI adapter (captureMain) through PATH-injected
+// stubs. Only captureMain exercises the full s3Command→s3LsRun chain.
+//
+// Revert-proof coverage:
+//   A. Remove --starting-token push → guard stub exits 1 → FAILS
+//   B. Remove --max-items push → cap guard stub exits 1 → FAILS
+//   C. Remove NextToken gate → no truncated/nextToken in output → FAILS
 
+/** Realistic list-buckets response when --starting-token is present (no more pages). */
 const LIST_BUCKETS_WITH_PAGINATION = JSON.stringify({
   Buckets: [
     { Name: "my-bucket", CreationDate: "2024-01-01T00:00:00+00:00" },
   ],
   Owner: { DisplayName: "me", ID: "abc" },
-  ContinuationToken: "nextpage456",
+});
+
+/**
+ * list-buckets response with a synthesized NextToken — what botocore emits
+ * when --max-items truncates the result. ContinuationToken is NOT present:
+ * botocore strips the native output token and emits NextToken instead.
+ */
+const LIST_BUCKETS_TRUNCATED = JSON.stringify({
+  Buckets: [
+    { Name: "my-bucket", CreationDate: "2024-01-01T00:00:00+00:00" },
+  ],
+  Owner: { DisplayName: "me", ID: "abc" },
+  NextToken: "eyJDb250aW51YXRpb25Ub2tlbiI6ICJuZXh0cGFnZTQ1NiJ9",
 });
 
 describe("s3 ls --starting-token on no-URI path — issue #44", () => {
@@ -1453,5 +1470,49 @@ describe("s3 ls --starting-token on no-URI path — issue #44", () => {
     expect(output).toContain("buckets");
     expect(output).toContain("2024-01-01");
     expect(output).not.toContain("No buckets found");
+  });
+
+  it("s3 ls (no URI): --max-items IS forwarded to s3api list-buckets child (cap enforcement)", async () => {
+    // Stub exits 1 if --max-items is absent from child argv.
+    // Revert-proof: remove the "--max-items" push from lsBucketsArgs →
+    //   child never receives --max-items → stub exits 1 → exitCode non-zero →
+    //   expect(exitCode).toBeUndefined() FAILS → test RED.
+    // After fix: --max-items S3_PAGE_SIZE forwarded → stub exits 0 → GREEN.
+    const binary = createArgGuardStub({
+      requiredArg: "--max-items",
+      validStdout: LIST_BUCKETS_WITH_PAGINATION,
+    });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("my-bucket");
+    expect(output).not.toContain("MISSING_FLAG");
+  });
+
+  it("s3 ls (no URI): truncated: true + nextToken reported when stub emits NextToken (--max-items cap fired)", async () => {
+    // Stub returns LIST_BUCKETS_TRUNCATED — a realistic response shape for when
+    // botocore's --max-items paginator fires: Buckets + Owner + synthesized NextToken.
+    // ContinuationToken is NOT present (botocore strips it).
+    //
+    // Revert-proof: remove the `if (resp.NextToken !== undefined)` gate →
+    //   overlay returns { buckets } with no truncated/nextToken fields →
+    //   expect(output).toContain("truncated") FAILS → test RED.
+    const binary = createStub({ stdout: LIST_BUCKETS_TRUNCATED });
+
+    const { output, exitCode } = await captureMain(
+      ["s3", "ls"],
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("my-bucket");
+    expect(output).toContain("truncated");
+    expect(output).toContain("nextToken");
+    // Confirm the synthesized base64 token (not a raw ContinuationToken) is surfaced.
+    expect(output).toContain("eyJDb250aW51YXRpb25Ub2tlbiI6ICJuZXh0cGFnZTQ1NiJ9");
   });
 });

@@ -132,11 +132,13 @@ interface ListBucketsResponse {
   readonly Buckets?: readonly AwsBucket[];
   readonly Owner?: unknown;
   /**
-   * Pagination continuation token. Present when the result is truncated.
-   * The botocore ListBuckets paginator uses ContinuationToken as both input
-   * and output token; the aws CLI --starting-token flag maps to it.
+   * Botocore-synthesized pagination token. Present only when --max-items
+   * truncates the result. The underlying ListBuckets paginator uses
+   * ContinuationToken as its native input/output token, but the aws CLI
+   * strips it and emits this synthesized NextToken instead (engine.ts
+   * contract: NEVER gate truncation on native flags).
    */
-  readonly ContinuationToken?: string;
+  readonly NextToken?: string;
 }
 
 interface AwsS3Object {
@@ -236,7 +238,8 @@ export interface S3LsRunOptions {
 /**
  * List S3 buckets (no prefix) or objects under an S3 URI prefix (with cap).
  *
- * - No prefix → s3api list-buckets
+ * - No prefix → s3api list-buckets, capped at S3_PAGE_SIZE with honest
+ *   truncation reporting and a --starting-token continuation hint.
  * - With prefix → s3api list-objects-v2, capped at S3_PAGE_SIZE with honest
  *   truncation reporting and a --starting-token continuation hint.
  */
@@ -247,9 +250,14 @@ export async function s3LsRun(
   if (options.prefix === undefined) {
     // s3api list-buckets is a genuine paginated operation. The botocore
     // ListBuckets paginator uses ContinuationToken as both input and output
-    // token, and `aws s3api list-buckets help` lists --starting-token in
-    // its SYNOPSIS. Forward it when the caller supplied one.
-    const lsBucketsArgs: string[] = ["s3api", "list-buckets"];
+    // token (botocore model), but the aws CLI strips that field from the
+    // response — truncation surfaces only as a synthesized NextToken under
+    // --max-items (engine.ts pagination contract). Cap at S3_PAGE_SIZE to
+    // bound the TOON blast; forward --starting-token when the caller resumes.
+    const lsBucketsArgs: string[] = [
+      "s3api", "list-buckets",
+      "--max-items", String(S3_PAGE_SIZE),
+    ];
     if (options.startingToken !== undefined) {
       lsBucketsArgs.push("--starting-token", options.startingToken);
     }
@@ -282,13 +290,15 @@ export async function s3LsRun(
       };
     }
 
-    // Report truncation when the API signals more pages are available.
-    if (resp.ContinuationToken !== undefined) {
+    // Gate truncation ONLY on the botocore-synthesized NextToken — the engine.ts
+    // contract. ContinuationToken is stripped by the --max-items paginator and
+    // never appears in the child's stdout; gating on it would be dead code.
+    if (resp.NextToken !== undefined) {
       return {
         buckets,
         truncated: true,
-        nextToken: resp.ContinuationToken,
-        hint: `Showing ${buckets.length} buckets (more available). Use --starting-token ${resp.ContinuationToken} to continue.`,
+        nextToken: resp.NextToken,
+        hint: `Showing ${buckets.length} buckets (more available). Use --starting-token ${resp.NextToken} to continue.`,
       };
     }
 
