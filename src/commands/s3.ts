@@ -695,6 +695,8 @@ flags (overlay-specific):
                           and nextToken are emitted. Pass nextToken as --starting-token to continue.
                           Use --query to bypass the cap: output is unbounded (botocore auto-pages all
                           results), but nextToken is projected away so pagination state is not surfaced.
+                          To bound output size when using --query, pass --max-items N (forwarded via
+                          passthrough; last-wins over the overlay default).
 
 examples:
   aws-axi s3 ls

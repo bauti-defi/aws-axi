@@ -110,6 +110,7 @@ Two deliberate named exceptions exist for `s3 ls` (see below).
 > | `--request-payer` | USAGE_ERROR (invalid for list-buckets) | forwarded |
 > | `--bucket-name-prefix` | **Translated** to `--prefix` | USAGE_ERROR |
 > | `--bucket-region` | forwarded | USAGE_ERROR |
+> | `--query` | **Cap bypassed** (JMESPath projects `NextToken` away; botocore auto-pages complete result); curated projection skipped | Same: cap bypassed, curated projection skipped |
 > | `--starting-token` | forwarded; `list-buckets` capped at `S3_PAGE_SIZE` — truncation reported via synthesized `NextToken` (not native `ContinuationToken`, which botocore strips) | forwarded |
 >
 > Default: `s3 ls s3://b/` adds `--delimiter /` (matching real `aws s3 ls` behavior) and surfaces
@@ -161,7 +162,7 @@ apart from the `aws-axi` prefix. Where the ergonomics differ, here is the map bo
 | `aws iam list-roles --query 'Roles[].RoleName'`        | `aws-axi iam list-roles --query 'Roles[].RoleName'`   | `--query` forwarded; JMESPath applied by aws CLI; overlay projection bypassed |
 | `aws sts get-caller-identity`                          | `aws-axi whoami`                                       | Fused with profile, region, and credential source                          |
 | *(no equivalent)*                                      | `aws-axi`                                              | No-arg dashboard: current identity + region                                |
-| `aws s3 ls s3://bucket/`                               | `aws-axi s3 ls s3://bucket/`                           | Same; `--delimiter /` added (matches real non-recursive behavior); output capped + TOON |
+| `aws s3 ls s3://bucket/`                               | `aws-axi s3 ls s3://bucket/`                           | Same; `--delimiter /` added (matches real non-recursive behavior); output capped + TOON (use `--starting-token` to page; `--query` bypasses cap) |
 | `aws s3 ls s3://bucket/ --recursive`                   | `aws-axi s3 ls s3://bucket/ --recursive`               | `--recursive` translated: drops `--delimiter /` so all nested keys are returned |
 | `aws s3 ls s3://bucket/ --page-size 5`                 | `aws-axi s3 ls s3://bucket/ --page-size 5`             | `--page-size` forwarded verbatim to `s3api list-objects-v2`                |
 | `aws s3 ls s3://bucket/ --human-readable`              | `aws-axi s3 ls s3://bucket/` (drop the flag)           | `--human-readable` → clean USAGE_ERROR (named exception; silent absorb misleads) |
