@@ -550,10 +550,7 @@ async function pollInvocation(
       // expired token stays AUTH_EXPIRED (253), etc. Hardcoding "UNKNOWN" here
       // would map all fatal poll errors to exit 255, defeating the taxonomy.
       const origMsg = err instanceof Error ? err.message : String(err);
-      const origCode: string =
-        err instanceof AxiError
-          ? String((err as unknown as { code: string }).code)
-          : "UNKNOWN";
+      const origCode: string = err instanceof AxiError ? err.code : "UNKNOWN";
       throw new AxiError(
         `${origMsg} [CommandId: ${commandId}]`,
         origCode,
