@@ -147,8 +147,11 @@ function toISO(epochMs: number): string {
  *
  * Returns `[undefined, originalCopy]` when the flag is absent.
  *
- * Mirrors `extractFlag` in kms.ts so every flag form that agents commonly use
- * is handled correctly.
+ * Value-extraction contract: identical to the shared `extractFlag` in
+ * overlay-args.ts. This function stays private in logs.ts because it
+ * implements a SUPERSET of that contract: extract-and-remove vs extract-only.
+ * The removal is what lets `_extractTailArgs` find positionals by elimination
+ * after all named flags have been consumed.
  */
 function pullFlag(
   args: readonly string[],
