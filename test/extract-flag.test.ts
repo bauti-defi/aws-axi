@@ -5,21 +5,27 @@
  * ── Complete parser inventory (verified by grep, 2026-07-14) ─────────────────
  *
  * Value extractors (return a string or splice + return string):
- *   1. locateFlag   overlay-args.ts     — foundation; returns { value, start, span }
- *   2. extractFlag  overlay-args.ts     — delegates to locateFlag; returns value only
- *   3. pullFlag     logs.ts (private)   — delegates to locateFlag; returns [value, remaining]
- *   4. parseMaxItems ec2.ts (private)   — extract-and-remove with int validation
- *   5. parseNextToken ec2.ts (private)  — extract-and-remove; has empty-value guard asymmetry
- *   6. extractNextToken iam.ts (private) — extract-and-remove; both forms
- *   7. extractScope  iam.ts (private)   — extract-and-remove; both forms
+ *   1. locateFlag      overlay-args.ts     — foundation; returns { value, start, span }
+ *   2. extractFlag     overlay-args.ts     — delegates to locateFlag; returns value only
+ *   3. pullFlag        logs.ts (private)   — delegates to locateFlag; returns [value, remaining]
+ *   4. parseMaxItems   ec2.ts (private)    — extract-and-remove with int validation
+ *   5. parseNextToken  ec2.ts (private)    — extract-and-remove; has empty-value guard asymmetry
+ *   6. extractNextToken iam.ts (private)   — extract-and-remove; both forms
+ *   7. extractScope    iam.ts (private)    — extract-and-remove; both forms
+ *   8. stripContextArgs context.ts         — strips --profile/--region; rejects empty =; own loop
+ *   9. stripOutputFlag engine.ts           — strips --output; already re-exported from overlay-args
  *
- * Presence checkers (return boolean):
- *   8.  hasFlag         overlay-args.ts  — shared; correct form (a === flag || a.startsWith(flag=))
- *   9.  isParamPresent  engine.ts        — PascalCase input; different entry contract
- *   10. hasMaxItemsFlag engine.ts        — hardcoded flag; presence only
- *   11. hasQueryFlag    engine.ts        — hardcoded flag; presence only
+ * Presence / boolean checkers (return boolean):
+ *   10. hasFlag         overlay-args.ts  — presence-only; correct equals-form check
+ *   11. flagIsTrue      overlay-args.ts  — value-aware boolean; superset semantics for =false
+ *   12. isParamPresent  engine.ts        — PascalCase input; different entry contract
+ *   13. hasMaxItemsFlag engine.ts        — hardcoded flag; presence only
+ *   14. hasQueryFlag    engine.ts        — hardcoded flag; presence only
+ *   15. inline --query  overlay-args.ts:buildPassthrough — hasFlag(args,"--query") inlined
+ *       inline --query  logs.ts:~520     — same inline; two copies of a one-liner
+ *       (counted as one logical unit — same contract, trivial; filed as follow-up)
  *
- * Total: 11 distinct implementations after this PR's consolidation.
+ * Total: 15 distinct implementations after this PR's consolidation (down from 16+ pre-PR).
  *
  * Items 1–3 share the same core parsing contract (via locateFlag).
  * Items 4–7 are correct (handle both forms) but use independent loops — DRY
@@ -88,7 +94,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { extractFlag, locateFlag, hasFlag } from "../src/overlay-args.js";
+import { extractFlag, locateFlag, hasFlag, flagIsTrue } from "../src/overlay-args.js";
 import { _extractTailArgs, _extractFilterArgs } from "../src/commands/logs.js";
 
 // ── Reference implementation ────────────────────────────────────────────────
@@ -414,5 +420,121 @@ describe("hasFlag — presence detection", () => {
     // The eqPrefix guard prevents prefix collision.
     // hasFlag(["--bucket-name-prefix=foo"], "--bucket") must be false.
     expect(hasFlag(["--bucket-name-prefix=foo"], "--bucket")).toBe(false);
+  });
+});
+
+// ── flagIsTrue ────────────────────────────────────────────────────────────────
+//
+// flagIsTrue is the value-aware boolean helper introduced in PR #55 round-3
+// to fix the --dryrun=false inversion bug on s3 write paths.
+//
+// It replaces the three `hasFlag` calls at s3.ts:(recursive),(cp dryRun),(rm dryRun)
+// that were previously presence-only and therefore inverted the boolean when the
+// caller wrote --flag=false (the form LLM agents routinely emit from boolean schemas).
+//
+// Semantic decision (ADR-0002 superset): real aws hard-errors on --dryrun=false
+// ("argument --dryrun: ignored explicit argument 'false'").  aws-axi accepts it
+// and honours =false as false.  This is the only interpretation that does not
+// silently corrupt write paths.
+//
+// Revert-proof mutations applied during development:
+//   R1: Delete the `a === flag` branch entirely
+//       → bare `--flag` no longer detected → tests "bare flag" and "bare flag
+//         first-wins" go RED.
+//   R2: Swap the falsy-value list to `["true","1","yes"]` (invert logic)
+//       → "=true returns true" goes RED immediately.
+//   R3: Delete the `a.startsWith(eqPrefix)` branch
+//       → `--flag=false` not detected → "=false returns false" goes RED.
+//   R4: Change falsy list to omit "false" (only "0" and "no" remain)
+//       → "=false returns false" goes RED.
+// All 4 mutations are caught by the unit tests below.
+
+describe("flagIsTrue", () => {
+  // ── truthy inputs ───────────────────────────────────────────────────────────
+
+  it("bare --flag returns true (presence implies enabled)", () => {
+    expect(flagIsTrue(["--flag"], "--flag")).toBe(true);
+  });
+
+  it("--flag=true returns true", () => {
+    expect(flagIsTrue(["--flag=true"], "--flag")).toBe(true);
+  });
+
+  it("--flag=1 returns true", () => {
+    expect(flagIsTrue(["--flag=1"], "--flag")).toBe(true);
+  });
+
+  it("--flag=yes returns true", () => {
+    expect(flagIsTrue(["--flag=yes"], "--flag")).toBe(true);
+  });
+
+  it("unrecognised =value is treated as truthy (safe default)", () => {
+    // Any value not in the explicit falsy list is truthy.
+    expect(flagIsTrue(["--flag=maybe"], "--flag")).toBe(true);
+    expect(flagIsTrue(["--flag=TRUE"], "--flag")).toBe(true); // case-insensitive → truthy
+    // "true" lowercased → truthy; "True" lowercased → "true" → truthy
+  });
+
+  // ── falsy inputs ────────────────────────────────────────────────────────────
+
+  it("--flag=false returns false (superset: real aws rejects this; we honour it)", () => {
+    expect(flagIsTrue(["--flag=false"], "--flag")).toBe(false);
+  });
+
+  it("--flag=0 returns false", () => {
+    expect(flagIsTrue(["--flag=0"], "--flag")).toBe(false);
+  });
+
+  it("--flag=no returns false", () => {
+    expect(flagIsTrue(["--flag=no"], "--flag")).toBe(false);
+  });
+
+  it("absent flag returns false", () => {
+    expect(flagIsTrue(["--other", "value"], "--flag")).toBe(false);
+    expect(flagIsTrue([], "--flag")).toBe(false);
+  });
+
+  // ── case-insensitive falsy check ────────────────────────────────────────────
+
+  it("--flag=False and --flag=FALSE are both false (case-insensitive)", () => {
+    expect(flagIsTrue(["--flag=False"], "--flag")).toBe(false);
+    expect(flagIsTrue(["--flag=FALSE"], "--flag")).toBe(false);
+  });
+
+  it("--flag=NO and --flag=No are both false (case-insensitive)", () => {
+    expect(flagIsTrue(["--flag=NO"], "--flag")).toBe(false);
+    expect(flagIsTrue(["--flag=No"], "--flag")).toBe(false);
+  });
+
+  // ── first-wins on repeated flags ────────────────────────────────────────────
+
+  it("first occurrence wins: --flag=false --flag=true → false", () => {
+    expect(flagIsTrue(["--flag=false", "--flag=true"], "--flag")).toBe(false);
+  });
+
+  it("first occurrence wins: bare --flag before --flag=false → true", () => {
+    expect(flagIsTrue(["--flag", "--flag=false"], "--flag")).toBe(true);
+  });
+
+  // ── prefix guard ────────────────────────────────────────────────────────────
+
+  it("does NOT false-match --dryrun-mode=false when checking --dryrun", () => {
+    // The eqPrefix guard (${flag}=) ensures prefix-sharing flags are not confused.
+    expect(flagIsTrue(["--dryrun-mode=false"], "--dryrun")).toBe(false);
+    // "false" here is from the absent flag path, not the falsy-value path.
+  });
+
+  it("does NOT false-match --recursive-list-item when checking --recursive", () => {
+    expect(flagIsTrue(["--recursive-list-item"], "--recursive")).toBe(false);
+  });
+
+  // ── mixed-argv (non-first position) ─────────────────────────────────────────
+
+  it("detects --flag=false in a longer argv", () => {
+    expect(flagIsTrue(["s3://bucket/", "--other", "--flag=false", "--another"], "--flag")).toBe(false);
+  });
+
+  it("detects bare --flag in a longer argv", () => {
+    expect(flagIsTrue(["--other", "val", "--flag", "--next"], "--flag")).toBe(true);
   });
 });

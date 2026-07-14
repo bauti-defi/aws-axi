@@ -214,6 +214,54 @@ export function hasFlag(args: readonly string[], flag: string): boolean {
   return args.some((a) => a === flag || a.startsWith(eqPrefix));
 }
 
+// ── flagIsTrue ────────────────────────────────────────────────────────────────
+
+/**
+ * Return true if a named BOOLEAN flag is enabled in argv.
+ *
+ * Unlike `hasFlag` (presence-only), this helper is VALUE-AWARE and must be
+ * used for semantic booleans whose value must be respected on write paths
+ * (currently: --dryrun and --recursive in s3).
+ *
+ * Accepted inputs and their interpretation:
+ *   --flag          → true   (bare presence implies enabled)
+ *   --flag=true     → true
+ *   --flag=1        → true
+ *   --flag=yes      → true
+ *   --flag=<other>  → true   (any unrecognised value is treated as truthy)
+ *   --flag=false    → false  (superset extension: real aws hard-errors here)
+ *   --flag=0        → false
+ *   --flag=no       → false
+ *   (absent)        → false
+ *
+ * ADR-0002 contract: aws-axi is a strict SUPERSET of real aws — it accepts
+ * input that real aws rejects and honours it sensibly.  `--flag=false` is
+ * rejected by real aws (e.g. `aws s3 cp … --dryrun=false` →
+ * "argument --dryrun: ignored explicit argument 'false'"), but silently
+ * treating it as true (the `hasFlag` behaviour) would INVERT user intent on
+ * a write path and report success.  Treating it as false is the only option
+ * that does not silently corrupt behaviour.
+ *
+ * Use this ONLY for semantic booleans.  For guard call sites that throw
+ * regardless of the flag value (e.g. --bucket-name-prefix on the object
+ * listing path), `hasFlag` is correct — presence is all that matters there.
+ *
+ * First-wins on repeated flags (consistent with every other parser in this
+ * file).  The `=` prefix guard prevents false matches against flags sharing
+ * a name prefix (e.g. --dryrun vs --dryrun-mode).
+ */
+export function flagIsTrue(args: readonly string[], flag: string): boolean {
+  const eqPrefix = `${flag}=`;
+  for (const a of args) {
+    if (a === flag) return true;
+    if (a.startsWith(eqPrefix)) {
+      const v = a.slice(eqPrefix.length).toLowerCase();
+      return v !== "false" && v !== "0" && v !== "no";
+    }
+  }
+  return false;
+}
+
 // ── extractFlag ──────────────────────────────────────────────────────────────
 
 /**

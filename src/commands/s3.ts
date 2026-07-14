@@ -23,7 +23,7 @@ import { awsJson, awsRaw, awsExec } from "../aws.js";
 import type { AwsContext } from "../context.js";
 import { parseAwsError } from "../errors.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough, extractFlag, hasFlag } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrue, hasFlag } from "../overlay-args.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -807,7 +807,10 @@ export async function s3Command(
         );
       }
 
-      const recursive = hasFlag(rest, "--recursive");
+      // flagIsTrue: value-aware boolean — --recursive=false means false (not dry-run
+      // inversion).  hasFlag would treat --recursive=false as true (ADR-0002 write
+      // path bug introduced in ca9a326, fixed here).
+      const recursive = flagIsTrue(rest, "--recursive");
       // Strip the s3:// URI positional before collecting passthrough so the
       // heuristic cannot consume it as a boolean flag's value.
       const argsForPassthrough = stripPositionals(rest, prefix);
@@ -830,7 +833,10 @@ export async function s3Command(
           ["Usage: aws-axi s3 cp <source> <destination> [flags]"],
         );
       }
-      const dryRun = hasFlag(rest, "--dryrun");
+      // flagIsTrue: value-aware boolean — --dryrun=false means "do not dry-run"
+      // (i.e. perform the real copy).  hasFlag would treat --dryrun=false as true,
+      // silently performing a dry-run and reporting success with no copy on the wire.
+      const dryRun = flagIsTrue(rest, "--dryrun");
       // Strip identified positionals first. Once bare positionals are absent,
       // the heuristic safely identifies all remaining bare tokens as flag values.
       // --dryrun is a boolean overlay flag (no value follows); pass in ownedBoolFlags.
@@ -854,7 +860,10 @@ export async function s3Command(
           ["Usage: aws-axi s3 rm s3://bucket/key [--dryrun]"],
         );
       }
-      const dryRun = hasFlag(rest, "--dryrun");
+      // flagIsTrue: value-aware boolean — --dryrun=false means "do not dry-run"
+      // (i.e. perform the real delete).  hasFlag would treat --dryrun=false as true,
+      // silently skipping the delete and reporting success (fails safe but still wrong).
+      const dryRun = flagIsTrue(rest, "--dryrun");
       // Strip the target URI positional to prevent heuristic from eating it.
       const argsForPassthrough = stripPositionals(rest, target);
       const rawPassthrough = collectPassthroughFlags(argsForPassthrough, [], ["--dryrun"]);

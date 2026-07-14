@@ -704,6 +704,7 @@ describe("s3Command — equals-form flag parsing (ADR-0002 compliance)", () => {
     expect(result["buckets"]).toHaveLength(1);
   });
 
+  // ── ls s3://b/ --starting-token=TOK (guard path: equals form) ──────────────
   // ── ls s3://b/ --bucket-name-prefix=foo ─────────────────────────────────────
   it("ls s3://b/ --bucket-name-prefix=foo raises curated USAGE_ERROR (equals form)", async () => {
     // --bucket-name-prefix is invalid on the object-listing (prefix) path.
@@ -720,5 +721,177 @@ describe("s3Command — equals-form flag parsing (ADR-0002 compliance)", () => {
     }
     expect(thrown).toBeInstanceOf(AxiError);
     expect((thrown as AxiError).code).toBe("USAGE_ERROR");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// s3Command — boolean flags respect =false (ADR-0002 superset, PR #55 round-3)
+//
+// Bug introduced in ca9a326: replacing the old s3-private hasFlag (includes-only)
+// with the shared hasFlag (presence-only) made `--dryrun=false` match as true,
+// silently inverting the boolean on the write path.
+//
+//   PRE-FIX (ca9a326): s3 cp f.txt s3://b/ --dryrun=false → no wire call, exit 0
+//   POST-FIX:          s3 cp f.txt s3://b/ --dryrun=false → real copy, dryRun: false
+//
+// Real `aws` hard-errors on --dryrun=false ("argument --dryrun: ignored explicit
+// argument 'false'").  aws-axi accepts it as a superset extension and honours
+// =false as false (flagIsTrue semantics, ADR-0002).
+//
+// These tests are WIRE-LEVEL: the stub binary is a real subprocess that inspects
+// its own argv and exits 1 if the invariant is violated.  They prove behaviour,
+// not just internal field values.
+// ---------------------------------------------------------------------------
+
+describe("s3Command — --flag=false honours explicit false on write paths", () => {
+  // ── cp --dryrun=false → real copy (--dryrun must NOT reach aws) ─────────────
+  it("cp --dryrun=false does NOT pass --dryrun to aws (file is copied)", async () => {
+    // Stub: fails with exit 1 if `--dryrun` appears anywhere in its argv.
+    // Pre-fix (ca9a326): hasFlag("--dryrun=false") → true → --dryrun forwarded → stub exits 1.
+    // Post-fix:          flagIsTrue("--dryrun=false") → false → --dryrun NOT forwarded → stub exits 0.
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-dryrun-cp-"));
+    tempDirs.push(dir);
+    const p = join(dir, "aws");
+    writeFileSync(
+      p,
+      `#!/bin/sh
+if echo "$@" | grep -q -- '--dryrun'; then
+  printf 'FAIL: --dryrun was forwarded, but --dryrun=false was given' >&2
+  exit 1
+fi
+printf 'copy: f.txt to s3://b/f.txt\n'
+exit 0
+`,
+    );
+    chmodSync(p, 0o755);
+
+    const result = await s3Command(
+      ["cp", "f.txt", "s3://b/f.txt", "--dryrun=false"],
+      undefined,
+      p,
+    );
+
+    // The field must be false and the copy must have proceeded (stub exited 0).
+    expect(result["dryRun"]).toBe(false);
+    expect(result["source"]).toBe("f.txt");
+    expect(result["destination"]).toBe("s3://b/f.txt");
+  });
+
+  it("cp --dryrun (bare) still forwards --dryrun to aws (existing behaviour unchanged)", async () => {
+    // Regression guard: bare --dryrun must still set dryRun=true.
+    // Stub: fails if --dryrun is NOT in argv (proves it was forwarded).
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-dryrun-bare-"));
+    tempDirs.push(dir);
+    const p = join(dir, "aws");
+    writeFileSync(
+      p,
+      `#!/bin/sh
+if echo "$@" | grep -q -- '--dryrun'; then
+  printf '(dryrun) copy: f.txt to s3://b/f.txt\n'
+  exit 0
+fi
+printf 'FAIL: --dryrun was NOT forwarded' >&2
+exit 1
+`,
+    );
+    chmodSync(p, 0o755);
+
+    const result = await s3Command(["cp", "f.txt", "s3://b/f.txt", "--dryrun"], undefined, p);
+    expect(result["dryRun"]).toBe(true);
+  });
+
+  // ── rm --dryrun=false → real delete (--dryrun must NOT reach aws) ───────────
+  it("rm --dryrun=false does NOT pass --dryrun to aws (object is deleted)", async () => {
+    // Pre-fix: hasFlag → true → --dryrun forwarded → stub exits 1 (FAIL).
+    // Post-fix: flagIsTrue → false → --dryrun NOT forwarded → stub exits 0.
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-dryrun-rm-"));
+    tempDirs.push(dir);
+    const p = join(dir, "aws");
+    writeFileSync(
+      p,
+      `#!/bin/sh
+if echo "$@" | grep -q -- '--dryrun'; then
+  printf 'FAIL: --dryrun was forwarded, but --dryrun=false was given' >&2
+  exit 1
+fi
+printf 'delete: s3://b/old.txt\n'
+exit 0
+`,
+    );
+    chmodSync(p, 0o755);
+
+    const result = await s3Command(["rm", "s3://b/old.txt", "--dryrun=false"], undefined, p);
+    expect(result["dryRun"]).toBe(false);
+    expect(result["target"]).toBe("s3://b/old.txt");
+  });
+
+  // ── ls s3://b/ --recursive=false → delimiter applied (NOT recursive) ─────────
+  it("ls s3://b/ --recursive=false passes --delimiter / to aws (non-recursive listing)", async () => {
+    // s3LsRun with recursive=false adds --delimiter / to the aws call.
+    // Pre-fix: hasFlag("--recursive=false") → true → recursive=true → --delimiter OMITTED → recurses.
+    // Post-fix: flagIsTrue("--recursive=false") → false → recursive=false → --delimiter / present.
+    //
+    // Stub: fails if --delimiter is absent from its argv.
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-recursive-"));
+    tempDirs.push(dir);
+    const p = join(dir, "aws");
+    // Use an ETag without embedded double-quotes so printf does not swallow
+    // the backslash escapes that JSON.stringify would otherwise introduce.
+    const objResponse = JSON.stringify({
+      Contents: [{ Key: "a.txt", Size: 1, LastModified: "2024-01-01T00:00:00+00:00", ETag: "abc123", StorageClass: "STANDARD" }],
+      KeyCount: 1,
+      MaxKeys: 20,
+      IsTruncated: false,
+      Name: "b",
+      Prefix: "",
+    });
+    writeFileSync(
+      p,
+      `#!/bin/sh
+if echo "$@" | grep -q -- '--delimiter'; then
+  printf '${objResponse}'
+  exit 0
+fi
+printf 'FAIL: --delimiter was NOT passed; listing recurses (expected non-recursive)' >&2
+exit 1
+`,
+    );
+    chmodSync(p, 0o755);
+
+    const result = await s3Command(["ls", "s3://b/", "--recursive=false"], undefined, p);
+    // Listing succeeded with --delimiter present; objects projected correctly.
+    expect(result["objects"]).toBeDefined();
+  });
+
+  it("ls s3://b/ --recursive (bare) omits --delimiter / from aws (recursive listing)", async () => {
+    // Regression guard: bare --recursive must still set recursive=true → no --delimiter.
+    // Stub: fails if --delimiter IS in argv.
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-recursive-bare-"));
+    tempDirs.push(dir);
+    const p = join(dir, "aws");
+    // Use an ETag without embedded double-quotes (same reason as above).
+    const objResponse = JSON.stringify({
+      Contents: [{ Key: "a/b.txt", Size: 2, LastModified: "2024-01-01T00:00:00+00:00", ETag: "def456", StorageClass: "STANDARD" }],
+      KeyCount: 1,
+      MaxKeys: 20,
+      IsTruncated: false,
+      Name: "b",
+      Prefix: "",
+    });
+    writeFileSync(
+      p,
+      `#!/bin/sh
+if echo "$@" | grep -q -- '--delimiter'; then
+  printf 'FAIL: --delimiter was passed; expected recursive (no delimiter)' >&2
+  exit 1
+fi
+printf '${objResponse}'
+exit 0
+`,
+    );
+    chmodSync(p, 0o755);
+
+    const result = await s3Command(["ls", "s3://b/", "--recursive"], undefined, p);
+    expect(result["objects"]).toBeDefined();
   });
 });
