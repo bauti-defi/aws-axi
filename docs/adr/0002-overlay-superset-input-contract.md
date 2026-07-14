@@ -67,27 +67,49 @@ even without a botocore model. Each sub-operation forwards the collected passthr
 to the underlying `aws s3api` (for `ls`, `head-object`, `create-bucket`) or
 `aws s3` (for `cp`, `rm`) invocation.
 
-**S3 flag contract:** `s3 cp` and `s3 rm` use `aws s3` high-level commands, so
+**S3 flag contract.** `s3 cp` and `s3 rm` use `aws s3` high-level commands, so
 `aws s3`-level flags (`--recursive`, `--sse`, `--storage-class`, `--exclude`,
 `--include`) are valid passthrough for those sub-commands.
 
-`s3 ls` and `s3 head-object` rewrite to `s3api` operations. Each `aws s3`-level
-flag is handled explicitly so it is never blindly forwarded into a child that
-will reject it:
+`s3 ls` and `s3 head-object` rewrite to `s3api` operations. The superset invariant
+holds for every flag that the underlying `s3api` operation accepts. Two categories
+are deliberate, named exceptions — not scope boundaries:
 
-| Flag | Sub-cmd | Disposition |
+**Named exceptions (deliberate input restrictions):**
+
+| Flag | Exception path | Reason |
 |---|---|---|
-| `--recursive` | `s3 ls` | **Absorbed** (owned bool flag). `list-objects-v2` already returns all objects by default — no `--delimiter` means recursive by construction. |
-| `--human-readable` | `s3 ls` | **USAGE_ERROR**. Display-only flag, no `s3api` equivalent. Clean overlay-level error with a hint. |
-| `--summarize` | `s3 ls` | **USAGE_ERROR**. Display-only flag, no `s3api` equivalent. Hint: use `--query 'length(Contents)'`. |
-| `--page-size` | `s3 ls` | **Forwarded verbatim**. Valid `s3api list-objects-v2` flag. |
-| `--request-payer` | `s3 ls` | **Forwarded verbatim**. Valid `s3api list-objects-v2` flag. |
-| `--recursive` | `s3 head-object` | **USAGE_ERROR**. `head-object` fetches metadata for a single key; recursion is not applicable. |
+| `--human-readable` | all `s3 ls` | Display-formatting flag with no `s3api` equivalent. Silently absorbing it would let an agent believe it received human-readable sizes when it did not. USAGE_ERROR is the honest choice. |
+| `--summarize` | all `s3 ls` | Same — display-only, silent absorption misleads. |
 
-This closes the scope boundary that was disclosed in PR #36 (issue #38). The
-superset invariant now holds for all `s3 ls` and `s3 head-object` inputs: any
-command the real CLI accepts either passes through, translates faithfully, or
-fails with a clean USAGE_ERROR — never an opaque child exit 252.
+**Full per-flag × per-path table for `s3 ls`:**
+
+| Flag | No-URI path (`list-buckets`) | Prefix path (`list-objects-v2`) |
+|---|---|---|
+| `--recursive` | USAGE_ERROR (bucket listing has no recursion concept) | **Translate**: drops `--delimiter /` so all nested keys are returned, matching real `aws s3 ls --recursive` semantics. Not forwarded to `s3api`. |
+| `--human-readable` | USAGE_ERROR (display-only; named exception) | USAGE_ERROR (display-only; named exception) |
+| `--summarize` | USAGE_ERROR (display-only; named exception) | USAGE_ERROR (display-only; named exception) |
+| `--page-size` | Forwarded verbatim | Forwarded verbatim (valid `list-objects-v2` flag) |
+| `--request-payer` | USAGE_ERROR (`list-buckets` does not accept this param) | Forwarded verbatim (valid `list-objects-v2` flag) |
+| `--bucket-name-prefix` | **Translate** to `--prefix` (the `list-buckets` param name) | USAGE_ERROR (this flag filters bucket names, not objects) |
+| `--bucket-region` | Forwarded verbatim (valid `list-buckets` filter) | USAGE_ERROR (this flag filters the bucket list) |
+
+**`s3 ls` default delimiter behavior.** Real `aws s3 ls s3://b/` sends
+`?delimiter=%2F`, grouping objects by common prefix ("folders"). Without
+`--recursive`, `list-objects-v2` is called with `--delimiter /` and the response's
+`CommonPrefixes` are surfaced as `prefixes[]` in the projection. With `--recursive`,
+the delimiter is omitted and all nested keys are returned directly.
+
+**`s3 head-object` flag guard:**
+
+| Flag | Disposition |
+|---|---|
+| `--recursive` | USAGE_ERROR (`head-object` fetches a single key; recursion is not applicable) |
+| All native `s3api head-object` flags | Forwarded verbatim |
+
+This closes the scope boundary disclosed in PR #36 (issue #38). Where the invariant
+does not hold (the two named exceptions above), the exception is deliberate and
+documented here, not silently violated.
 
 Both helpers are composed: `collectPassthroughFlags` produces the raw passthrough
 list; `buildPassthrough` strips `--output` and detects `--query`.

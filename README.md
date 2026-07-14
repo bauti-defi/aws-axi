@@ -97,15 +97,25 @@ real `aws` CLI's. Any flag the underlying `aws` operation accepts is forwarded v
 `aws` invocation. The overlay changes the *output*, never restricts the *input*. Two flags are handled
 specially: `--output` is stripped (the exec seam always appends `--output json`); `--query` is
 forwarded but bypasses the overlay's curated projection, returning the raw JMESPath result as-is.
+Two deliberate named exceptions exist for `s3 ls` (see below).
 
-> **S3 `ls` flag note.** `s3 ls` rewrites to the `s3api list-objects-v2` API internally. Each
-> `aws s3 ls` flag is handled explicitly:
-> `--recursive` is **absorbed** (`list-objects-v2` already lists all objects without a delimiter, so
-> this flag is a semantic no-op — not forwarded to `s3api`, which does not accept it);
-> `--page-size` and `--request-payer` are **forwarded verbatim** (valid `s3api` flags);
-> `--human-readable` and `--summarize` produce a clean **USAGE_ERROR** (display-only flags with no
-> `s3api` equivalent). `s3 cp` and `s3 rm` use the high-level `aws s3` commands, so `--recursive`,
-> `--exclude`, `--include`, `--sse`, and `--storage-class` are valid passthrough for those.
+> **S3 `ls` flag handling.** `s3 ls` rewrites to `s3api` internally. Dispositions per flag × path:
+>
+> | Flag | No URI (list-buckets) | With URI (list-objects-v2) |
+> |---|---|---|
+> | `--recursive` | USAGE_ERROR | **Translated**: drops `--delimiter /`, returning all nested keys |
+> | `--human-readable` | USAGE_ERROR | USAGE_ERROR *(named exception: display-only; silent absorb would mislead)* |
+> | `--summarize` | USAGE_ERROR | USAGE_ERROR *(named exception: same reason)* |
+> | `--page-size` | forwarded | forwarded |
+> | `--request-payer` | USAGE_ERROR (invalid for list-buckets) | forwarded |
+> | `--bucket-name-prefix` | **Translated** to `--prefix` | USAGE_ERROR |
+> | `--bucket-region` | forwarded | USAGE_ERROR |
+>
+> Default: `s3 ls s3://b/` adds `--delimiter /` (matching real `aws s3 ls` behavior) and surfaces
+> `CommonPrefixes` as `prefixes[]`. Folder-only buckets are never reported as empty.
+>
+> `s3 cp` and `s3 rm` use the high-level `aws s3` commands, so `--recursive`, `--exclude`,
+> `--include`, `--sse`, and `--storage-class` are valid passthrough for those.
 
 | Service          | Command            | Enriched overlay operations                                                                  | Everything else                    |
 | ---------------- | ------------------ | -------------------------------------------------------------------------------------------- | ---------------------------------- |
@@ -150,10 +160,11 @@ apart from the `aws-axi` prefix. Where the ergonomics differ, here is the map bo
 | `aws iam list-roles --query 'Roles[].RoleName'`        | `aws-axi iam list-roles --query 'Roles[].RoleName'`   | `--query` forwarded; JMESPath applied by aws CLI; overlay projection bypassed |
 | `aws sts get-caller-identity`                          | `aws-axi whoami`                                       | Fused with profile, region, and credential source                          |
 | *(no equivalent)*                                      | `aws-axi`                                              | No-arg dashboard: current identity + region                                |
-| `aws s3 ls s3://bucket/`                               | `aws-axi s3 ls s3://bucket/`                           | Same; output capped + TOON                                                  |
-| `aws s3 ls s3://bucket/ --recursive`                   | `aws-axi s3 ls s3://bucket/ --recursive`               | `--recursive` absorbed (already lists all objects); valid, no error         |
+| `aws s3 ls s3://bucket/`                               | `aws-axi s3 ls s3://bucket/`                           | Same; `--delimiter /` added (matches real non-recursive behavior); output capped + TOON |
+| `aws s3 ls s3://bucket/ --recursive`                   | `aws-axi s3 ls s3://bucket/ --recursive`               | `--recursive` translated: drops `--delimiter /` so all nested keys are returned |
 | `aws s3 ls s3://bucket/ --page-size 5`                 | `aws-axi s3 ls s3://bucket/ --page-size 5`             | `--page-size` forwarded verbatim to `s3api list-objects-v2`                |
-| `aws s3 ls s3://bucket/ --human-readable`              | `aws-axi s3 ls s3://bucket/` (drop the flag)           | `--human-readable` → clean USAGE_ERROR; aws-axi formats sizes automatically |
+| `aws s3 ls s3://bucket/ --human-readable`              | `aws-axi s3 ls s3://bucket/` (drop the flag)           | `--human-readable` → clean USAGE_ERROR (named exception; silent absorb misleads) |
+| `aws s3 ls --bucket-name-prefix foo`                   | `aws-axi s3 ls --bucket-name-prefix foo`               | `--bucket-name-prefix` translated to `--prefix` on `list-buckets`          |
 | `aws s3api list-buckets`                               | `aws-axi s3 ls`                                        | High-level `s3 ls` with no target lists buckets                            |
 | `aws logs tail <group> --since 1h`                     | `aws-axi logs tail <group> --since 1h`                | Same flag; snapshot (no `--follow`), capped with `--limit`                  |
 | `aws logs filter-log-events --log-group-name <g> --filter-pattern ERROR` | `aws-axi logs filter <g> ERROR`     | Positional group + pattern                                                  |
