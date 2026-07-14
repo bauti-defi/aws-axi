@@ -38,7 +38,7 @@ import { resolveSubnet } from "../resolve/subnet.js";
 import { resolveLogGroup } from "../resolve/log-group.js";
 import { resolveKey } from "../resolve/key.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, extractFlag } from "../overlay-args.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -227,25 +227,6 @@ examples:
 `;
 
 // ─── Arg-parsing helpers ──────────────────────────────────────────────────────
-
-/**
- * Extract the value of a named flag. Accepts both forms:
- *   --flag value     (space-separated)
- *   --flag=value     (equals-separated)
- */
-function extractFlag(args: readonly string[], flag: string): string | undefined {
-  const eqPrefix = `${flag}=`;
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] ?? "";
-    if (arg === flag && i + 1 < args.length) {
-      return args[i + 1];
-    }
-    if (arg.startsWith(eqPrefix)) {
-      return arg.slice(eqPrefix.length);
-    }
-  }
-  return undefined;
-}
 
 function extractMaxItems(args: readonly string[]): number {
   const raw = extractFlag(args, "--max-items");

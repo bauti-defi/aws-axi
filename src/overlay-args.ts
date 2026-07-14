@@ -147,6 +147,148 @@ function isModelBooleanFlag(
   return param.type === "boolean";
 }
 
+// ── locateFlag ───────────────────────────────────────────────────────────────
+
+/**
+ * Locate the first occurrence of a named flag in argv, returning its value and
+ * the range of tokens it occupies.
+ *
+ * Accepts both forms agents commonly use:
+ *   --flag value   → span 2 (flag token + separate value token)
+ *   --flag=value   → span 1 (single combined token)
+ *
+ * Returns the first match (first-wins on repeated flags).
+ * Returns `undefined` when the flag is absent OR when it is the final token
+ * with no following value in two-arg form.
+ *
+ * Contract notes:
+ *   - Does NOT mutate the input array.
+ *   - Does NOT reject values that start with `-` (e.g. --limit=-1 is valid).
+ *   - Does NOT check whether the next token is itself a flag in two-arg form;
+ *     `--flag --other` returns `{ value: "--other", span: 2 }`.
+ *   - The `=` suffix in the prefix check (`${flag}=`) prevents false matches
+ *     against flags that share a prefix (e.g. --limit vs --limit-type).
+ *
+ * This is the single-scan foundation used by both `extractFlag` (read-only)
+ * and `pullFlag` in logs.ts (extract-and-remove), ensuring a single parsing
+ * contract underlies all value-extraction needs.
+ */
+export function locateFlag(
+  args: readonly string[],
+  flag: string,
+): { readonly value: string; readonly start: number; readonly span: 1 | 2 } | undefined {
+  const eqPrefix = `${flag}=`;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] ?? "";
+    // Two-arg form: --flag value
+    if (arg === flag && i + 1 < args.length) {
+      return { value: args[i + 1] as string, start: i, span: 2 };
+    }
+    // Equals form: --flag=value (or --flag= for empty value)
+    if (arg.startsWith(eqPrefix)) {
+      return { value: arg.slice(eqPrefix.length), start: i, span: 1 };
+    }
+  }
+  return undefined;
+}
+
+// ── hasFlag ───────────────────────────────────────────────────────────────────
+
+/**
+ * Return true if a named flag is present anywhere in argv.
+ *
+ * Accepts both forms:
+ *   --flag          (boolean / presence-only use)
+ *   --flag=value    (equals form — still counts as present)
+ *   --flag value    (two-arg form — the flag token itself is present)
+ *
+ * The `=` suffix in the prefix check prevents false matches against flags that
+ * share a name prefix (e.g. --recursive vs --recursive-list-item, unlikely but
+ * safe by construction).
+ *
+ * This is the shared implementation that replaces the three private copies in
+ * secrets.ts / ssm.ts (correct form) and s3.ts (broken `includes`-only form).
+ */
+export function hasFlag(args: readonly string[], flag: string): boolean {
+  const eqPrefix = `${flag}=`;
+  return args.some((a) => a === flag || a.startsWith(eqPrefix));
+}
+
+// ── flagIsTrue ────────────────────────────────────────────────────────────────
+
+/**
+ * Return true if a named BOOLEAN flag is enabled in argv.
+ *
+ * Unlike `hasFlag` (presence-only), this helper is VALUE-AWARE and must be
+ * used for semantic booleans whose value must be respected on write paths
+ * (currently: --dryrun and --recursive in s3).
+ *
+ * Accepted inputs and their interpretation:
+ *   --flag          → true   (bare presence implies enabled)
+ *   --flag=true     → true
+ *   --flag=1        → true
+ *   --flag=yes      → true
+ *   --flag=<other>  → true   (any unrecognised value is treated as truthy)
+ *   --flag=false    → false  (superset extension: real aws hard-errors here)
+ *   --flag=0        → false
+ *   --flag=no       → false
+ *   (absent)        → false
+ *
+ * ADR-0002 contract: aws-axi is a strict SUPERSET of real aws — it accepts
+ * input that real aws rejects and honours it sensibly.  `--flag=false` is
+ * rejected by real aws (e.g. `aws s3 cp … --dryrun=false` →
+ * "argument --dryrun: ignored explicit argument 'false'"), but silently
+ * treating it as true (the `hasFlag` behaviour) would INVERT user intent on
+ * a write path and report success.  Treating it as false is the only option
+ * that does not silently corrupt behaviour.
+ *
+ * Use this ONLY for semantic booleans.  For guard call sites that throw
+ * regardless of the flag value (e.g. --bucket-name-prefix on the object
+ * listing path), `hasFlag` is correct — presence is all that matters there.
+ *
+ * First-wins on repeated flags (consistent with every other parser in this
+ * file).  The `=` prefix guard prevents false matches against flags sharing
+ * a name prefix (e.g. --dryrun vs --dryrun-mode).
+ */
+export function flagIsTrue(args: readonly string[], flag: string): boolean {
+  const eqPrefix = `${flag}=`;
+  for (const a of args) {
+    if (a === flag) return true;
+    if (a.startsWith(eqPrefix)) {
+      const v = a.slice(eqPrefix.length).toLowerCase();
+      return v !== "false" && v !== "0" && v !== "no";
+    }
+  }
+  return false;
+}
+
+// ── extractFlag ──────────────────────────────────────────────────────────────
+
+/**
+ * Extract the value of a named flag from argv (read-only).
+ *
+ * Delegates to `locateFlag` — same parsing contract, returns the value only.
+ *
+ * Accepts both forms:
+ *   --flag value   (space-separated)
+ *   --flag=value   (equals-separated, including --flag= for an empty value)
+ *
+ * Returns the first match (first-wins on repeated flags).
+ * Returns `undefined` when the flag is absent OR when it is the final token
+ * with no following value in two-arg form.
+ *
+ * This is the shared implementation that replaced the four identical private
+ * `extractFlag` copies in kms.ts / lambda.ts / secrets.ts / ssm.ts (PR #51).
+ * The logs.ts `pullFlag` uses `locateFlag` directly for its extract-and-remove
+ * contract (it must also return the remaining array with consumed tokens removed).
+ */
+export function extractFlag(
+  args: readonly string[],
+  flag: string,
+): string | undefined {
+  return locateFlag(args, flag)?.value;
+}
+
 // ── buildPassthrough ─────────────────────────────────────────────────────────
 
 /**
