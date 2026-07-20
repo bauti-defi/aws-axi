@@ -9,6 +9,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import type { S3LsResult } from "../src/commands/s3.js";
 import {
   s3LsRun,
   s3HeadObjectRun,
@@ -87,7 +88,9 @@ const EMPTY_BUCKETS_RESPONSE = JSON.stringify({
 describe("s3LsRun — list buckets (no S3 URI)", () => {
   it("returns a compact bucket listing with name and creationDate", async () => {
     const stub = createStub({ stdout: LIST_BUCKETS_RESPONSE, exitCode: 0 });
-    const result = await s3LsRun({ binary: stub });
+    // s3LsRun returns S3LsResult | Record<string,unknown> (--query path);
+    // tests without --query always receive S3LsResult.
+    const result = await s3LsRun({ binary: stub }) as S3LsResult;
 
     expect(result.buckets).toBeDefined();
     expect(result.buckets).toHaveLength(2);
@@ -150,7 +153,7 @@ describe("s3LsRun — list objects (with S3 URI)", () => {
     const result = await s3LsRun({
       prefix: "s3://my-bucket/logs/",
       binary: stub,
-    });
+    }) as S3LsResult;
 
     expect(result.objects).toHaveLength(2);
     expect(result.objects![0]).toMatchObject({

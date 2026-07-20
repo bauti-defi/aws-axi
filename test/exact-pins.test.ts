@@ -142,9 +142,6 @@ describe("checkExactPins", () => {
   it("the real aws-axi package.json passes the exact-pin check", () => {
     const packageJsonPath = join(import.meta.dir, "..", "package.json");
     const result = checkExactPins(packageJsonPath);
-    expect(result.ok).toBe(
-      true,
-      `Violations: ${JSON.stringify(result.violations, null, 2)}`,
-    );
+    expect(result.ok, `Violations: ${JSON.stringify(result.violations, null, 2)}`).toBe(true);
   });
 });

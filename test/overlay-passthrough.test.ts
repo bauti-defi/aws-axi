@@ -584,8 +584,9 @@ describe("logs overlay passthrough — silent-drop regression", () => {
     });
 
     expect(result).toHaveProperty("events");
-    expect((result.events as unknown[]).length).toBe(1);
-    expect((result.events[0] as { message: string }).message).toContain("ERROR");
+    const events = result.events as unknown[];
+    expect(events.length).toBe(1);
+    expect((events[0] as { message: string }).message).toContain("ERROR");
   });
 });
 

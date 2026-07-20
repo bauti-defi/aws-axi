@@ -236,7 +236,7 @@ function buildCommandsProxy(): Record<string, AxiCliCommand<AwsContext>> {
 
 export async function main(options: {
   argv?: string[];
-  stdout?: Pick<NodeJS.WriteStream, "write">;
+  stdout?: { write: (chunk: string) => unknown };
 } = {}): Promise<void> {
   // Patch process.argv[1] so axi-sdk-js's homeHeaderOutput banner shows the
   // POSIX sh launcher (dist/bin/aws-axi) rather than the .js module path

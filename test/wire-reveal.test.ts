@@ -54,7 +54,7 @@ const VERSION_ID = "aaaabbbb-cccc-dddd-eeee-ffffgggghhhh";
  * Routes by x-amz-target header.  Does NOT validate SIGv4 — any signed
  * request with fake credentials is accepted.
  */
-function buildFakeSecretsServer(): Server {
+function buildFakeSecretsServer(): Server<undefined> {
   return Bun.serve({
     port: 0, // OS assigns a free port
     fetch(req) {
@@ -145,7 +145,7 @@ async function captureMain(
 
 // ── Server lifecycle ──────────────────────────────────────────────────────────
 
-let server: Server;
+let server: Server<undefined>;
 let endpointUrl: string;
 
 // Fake credentials — real aws CLI requires these to attempt SIGv4; they are

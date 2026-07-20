@@ -13,6 +13,13 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import type {
+  SsmRunResult,
+  SsmGetParameterResult,
+  SsmGetParametersResult,
+  SsmGetParametersByPathResult,
+  SsmDescribeParametersResult,
+} from "../src/commands/ssm.js";
 import { ssmRun, ssmCommand } from "../src/commands/ssm.js";
 import { main } from "../src/cli.js";
 
@@ -275,6 +282,28 @@ function leaksValue(result: unknown, secret: string): boolean {
   return JSON.stringify(result).includes(secret);
 }
 
+// ─── Type-narrowing asserts ───────────────────────────────────────────────────
+// `SsmRunResult` includes `Record<string,unknown>` (the --query passthrough),
+// which defeats TypeScript's `in`-based union narrowing. These assert functions
+// wrap the same runtime guards the tests already use, giving TypeScript the
+// type information it cannot infer on its own.
+
+function assertParameter(r: SsmRunResult): asserts r is SsmGetParameterResult {
+  if (!("parameter" in r)) throw new Error("wrong discriminant");
+}
+
+function assertParameterList(r: SsmRunResult): asserts r is { readonly parameterList: SsmGetParametersResult } {
+  if (!("parameterList" in r)) throw new Error("wrong discriminant");
+}
+
+function assertParametersByPath(r: SsmRunResult): asserts r is { readonly parametersByPath: SsmGetParametersByPathResult } {
+  if (!("parametersByPath" in r)) throw new Error("wrong discriminant");
+}
+
+function assertParametersMeta(r: SsmRunResult): asserts r is { readonly parametersMeta: SsmDescribeParametersResult } {
+  if (!("parametersMeta" in r)) throw new Error("wrong discriminant");
+}
+
 // ─── get-parameter — redaction ────────────────────────────────────────────────
 
 describe("ssmRun get-parameter — default REDACTS the value", () => {
@@ -294,7 +323,7 @@ describe("ssmRun get-parameter — default REDACTS the value", () => {
 
     // The result must carry a structured parameter (not be empty)
     expect("parameter" in result).toBe(true);
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.name).toBe(PARAM_NAME_SECURE);
     expect(result.parameter.type).toBe("SecureString");
     expect(result.parameter.value).toBe("<redacted>");
@@ -312,7 +341,7 @@ describe("ssmRun get-parameter — default REDACTS the value", () => {
     });
 
     expect(leaksValue(result, PARAM_VALUE_STRING)).toBe(false);
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe("<redacted>");
   });
 
@@ -327,7 +356,7 @@ describe("ssmRun get-parameter — default REDACTS the value", () => {
       binary: stub,
     });
 
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.version).toBe(3);
     expect(result.parameter.dataType).toBe("text");
     expect(result.parameter.lastModified).toBeTruthy();
@@ -344,7 +373,7 @@ describe("ssmRun get-parameter — default REDACTS the value", () => {
       binary: stub,
     });
 
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.suggestion).toBeTruthy();
     expect(result.suggestion).toContain("--reveal");
   });
@@ -362,7 +391,7 @@ describe("ssmRun get-parameter --reveal — shows the actual value", () => {
       binary: stub,
     });
 
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe(PARAM_VALUE_SECURE);
     // When revealed, no suggestion is needed
     expect(result.suggestion).toBeUndefined();
@@ -379,7 +408,7 @@ describe("ssmRun get-parameter --reveal — shows the actual value", () => {
       binary: stub,
     });
 
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe(PARAM_VALUE_STRING);
   });
 });
@@ -391,7 +420,7 @@ describe("ssmRun get-parameter --reveal value matrix (redaction-bypass fix #56)"
     return createStub({ "ssm-get-parameter": { stdout: GET_PARAMETER_SECURE } });
   }
 
-  async function getWithFlag(flag: string): Promise<unknown> {
+  async function getWithFlag(flag: string): Promise<SsmRunResult> {
     return ssmRun({
       subcommand: "get-parameter",
       args: [flag, PARAM_NAME_SECURE],
@@ -404,42 +433,42 @@ describe("ssmRun get-parameter --reveal value matrix (redaction-bypass fix #56)"
   it("--reveal=false REDACTS — was leaking before fix", async () => {
     const result = await getWithFlag("--reveal=false");
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe("<redacted>");
   });
 
   it("--reveal=0 REDACTS", async () => {
     const result = await getWithFlag("--reveal=0");
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe("<redacted>");
   });
 
   it("--reveal=no REDACTS", async () => {
     const result = await getWithFlag("--reveal=no");
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe("<redacted>");
   });
 
   it("--reveal=garbage REDACTS (fail-safe: unrecognised → redact)", async () => {
     const result = await getWithFlag("--reveal=garbage");
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe("<redacted>");
   });
 
   it("--reveal=off REDACTS (fail-safe)", async () => {
     const result = await getWithFlag("--reveal=off");
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe("<redacted>");
   });
 
   it("--reveal= (empty) REDACTS (fail-safe)", async () => {
     const result = await getWithFlag("--reveal=");
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe("<redacted>");
   });
 
@@ -447,19 +476,19 @@ describe("ssmRun get-parameter --reveal value matrix (redaction-bypass fix #56)"
 
   it("--reveal=true still REVEALS", async () => {
     const result = await getWithFlag("--reveal=true");
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe(PARAM_VALUE_SECURE);
   });
 
   it("--reveal=1 still REVEALS", async () => {
     const result = await getWithFlag("--reveal=1");
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe(PARAM_VALUE_SECURE);
   });
 
   it("--reveal=yes still REVEALS", async () => {
     const result = await getWithFlag("--reveal=yes");
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe(PARAM_VALUE_SECURE);
   });
 });
@@ -478,7 +507,7 @@ describe("ssmRun get-parameter — two-arg --reveal false (round-2 fix)", () => 
       binary: stubForReveal(),
     });
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe("<redacted>");
   });
 
@@ -489,7 +518,7 @@ describe("ssmRun get-parameter — two-arg --reveal false (round-2 fix)", () => 
       binary: stubForReveal(),
     });
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe("<redacted>");
   });
 
@@ -500,7 +529,7 @@ describe("ssmRun get-parameter — two-arg --reveal false (round-2 fix)", () => 
       binary: stubForReveal(),
     });
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe("<redacted>");
   });
 
@@ -510,7 +539,7 @@ describe("ssmRun get-parameter — two-arg --reveal false (round-2 fix)", () => 
       args: [PARAM_NAME_SECURE, "--reveal", "true"],
       binary: stubForReveal(),
     });
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.value).toBe(PARAM_VALUE_SECURE);
   });
 
@@ -523,7 +552,7 @@ describe("ssmRun get-parameter — two-arg --reveal false (round-2 fix)", () => 
       binary: stubForReveal(),
     });
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.name).toBe(PARAM_NAME_SECURE);
   });
 });
@@ -558,7 +587,7 @@ describe("ssmRun get-parameter — errors", () => {
       binary: stub,
     });
 
-    if (!("parameter" in result)) throw new Error("wrong discriminant");
+    assertParameter(result);
     expect(result.parameter.name).toBe(PARAM_NAME_SECURE);
   });
 });
@@ -580,7 +609,7 @@ describe("ssmRun get-parameters — default REDACTS all values", () => {
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
     expect(leaksValue(result, PARAM_VALUE_STRING)).toBe(false);
 
-    if (!("parameterList" in result)) throw new Error("wrong discriminant");
+    assertParameterList(result);
     expect(result.parameterList.parameters).toHaveLength(2);
     for (const p of result.parameterList.parameters) {
       expect(p.value).toBe("<redacted>");
@@ -598,7 +627,7 @@ describe("ssmRun get-parameters — default REDACTS all values", () => {
       binary: stub,
     });
 
-    if (!("parameterList" in result)) throw new Error("wrong discriminant");
+    assertParameterList(result);
     expect(result.parameterList.invalidParameters).toContain("/nonexistent/param");
   });
 
@@ -613,7 +642,7 @@ describe("ssmRun get-parameters — default REDACTS all values", () => {
       binary: stub,
     });
 
-    if (!("parameterList" in result)) throw new Error("wrong discriminant");
+    assertParameterList(result);
     expect(result.parameterList.count).toContain("2");
   });
 
@@ -638,7 +667,7 @@ describe("ssmRun get-parameters --reveal", () => {
       binary: stub,
     });
 
-    if (!("parameterList" in result)) throw new Error("wrong discriminant");
+    assertParameterList(result);
     const secure = result.parameterList.parameters.find(
       (p) => p.name === PARAM_NAME_SECURE,
     );
@@ -657,7 +686,7 @@ describe("ssmRun get-parameters --reveal value matrix (redaction-bypass fix #56)
     return createStub({ "ssm-get-parameters": { stdout: GET_PARAMETERS_TWO } });
   }
 
-  async function getWithFlag(flag: string): Promise<unknown> {
+  async function getWithFlag(flag: string): Promise<SsmRunResult> {
     return ssmRun({
       subcommand: "get-parameters",
       args: [flag, PARAM_NAME_SECURE, PARAM_NAME_STRING],
@@ -668,7 +697,7 @@ describe("ssmRun get-parameters --reveal value matrix (redaction-bypass fix #56)
   it("--reveal=false REDACTS all values — was leaking before fix", async () => {
     const result = await getWithFlag("--reveal=false");
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parameterList" in result)) throw new Error("wrong discriminant");
+    assertParameterList(result);
     for (const p of result.parameterList.parameters) {
       expect(p.value).toBe("<redacted>");
     }
@@ -677,7 +706,7 @@ describe("ssmRun get-parameters --reveal value matrix (redaction-bypass fix #56)
   it("--reveal=garbage REDACTS (fail-safe: unrecognised → redact)", async () => {
     const result = await getWithFlag("--reveal=garbage");
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parameterList" in result)) throw new Error("wrong discriminant");
+    assertParameterList(result);
     for (const p of result.parameterList.parameters) {
       expect(p.value).toBe("<redacted>");
     }
@@ -686,7 +715,7 @@ describe("ssmRun get-parameters --reveal value matrix (redaction-bypass fix #56)
   it("--reveal= (empty) REDACTS (fail-safe)", async () => {
     const result = await getWithFlag("--reveal=");
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parameterList" in result)) throw new Error("wrong discriminant");
+    assertParameterList(result);
     for (const p of result.parameterList.parameters) {
       expect(p.value).toBe("<redacted>");
     }
@@ -694,7 +723,7 @@ describe("ssmRun get-parameters --reveal value matrix (redaction-bypass fix #56)
 
   it("--reveal=true still REVEALS all values", async () => {
     const result = await getWithFlag("--reveal=true");
-    if (!("parameterList" in result)) throw new Error("wrong discriminant");
+    assertParameterList(result);
     const secure = result.parameterList.parameters.find(
       (p) => p.name === PARAM_NAME_SECURE,
     );
@@ -719,7 +748,7 @@ describe("ssmRun get-parameters-by-path — default REDACTS values", () => {
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
     expect(leaksValue(result, PARAM_VALUE_STRING)).toBe(false);
 
-    if (!("parametersByPath" in result)) throw new Error("wrong discriminant");
+    assertParametersByPath(result);
     for (const p of result.parametersByPath.parameters) {
       expect(p.value).toBe("<redacted>");
     }
@@ -736,7 +765,7 @@ describe("ssmRun get-parameters-by-path — default REDACTS values", () => {
       binary: stub,
     });
 
-    if (!("parametersByPath" in result)) throw new Error("wrong discriminant");
+    assertParametersByPath(result);
     expect(result.parametersByPath.nextToken).toBe("AQECAHiGqSSMToken==");
     expect(result.parametersByPath.count).toContain("truncated");
     expect(result.parametersByPath.count).toContain("AQECAHiGqSSMToken==");
@@ -761,7 +790,7 @@ describe("ssmRun get-parameters-by-path — default REDACTS values", () => {
       binary: stub,
     });
 
-    if (!("parametersByPath" in result)) throw new Error("wrong discriminant");
+    assertParametersByPath(result);
     expect(result.parametersByPath.parameters).toHaveLength(2);
   });
 });
@@ -778,7 +807,7 @@ describe("ssmRun get-parameters-by-path --reveal", () => {
       binary: stub,
     });
 
-    if (!("parametersByPath" in result)) throw new Error("wrong discriminant");
+    assertParametersByPath(result);
     const secure = result.parametersByPath.parameters.find(
       (p) => p.name === "/my/app/db-password",
     );
@@ -795,7 +824,7 @@ describe("ssmRun get-parameters-by-path --reveal value matrix (redaction-bypass 
     });
   }
 
-  async function getWithFlag(flag: string): Promise<unknown> {
+  async function getWithFlag(flag: string): Promise<SsmRunResult> {
     return ssmRun({
       subcommand: "get-parameters-by-path",
       args: ["/my/app", flag],
@@ -806,7 +835,7 @@ describe("ssmRun get-parameters-by-path --reveal value matrix (redaction-bypass 
   it("--reveal=false REDACTS — was leaking before fix", async () => {
     const result = await getWithFlag("--reveal=false");
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parametersByPath" in result)) throw new Error("wrong discriminant");
+    assertParametersByPath(result);
     for (const p of result.parametersByPath.parameters) {
       expect(p.value).toBe("<redacted>");
     }
@@ -815,7 +844,7 @@ describe("ssmRun get-parameters-by-path --reveal value matrix (redaction-bypass 
   it("--reveal=garbage REDACTS (fail-safe: unrecognised → redact)", async () => {
     const result = await getWithFlag("--reveal=garbage");
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parametersByPath" in result)) throw new Error("wrong discriminant");
+    assertParametersByPath(result);
     for (const p of result.parametersByPath.parameters) {
       expect(p.value).toBe("<redacted>");
     }
@@ -824,7 +853,7 @@ describe("ssmRun get-parameters-by-path --reveal value matrix (redaction-bypass 
   it("--reveal= (empty) REDACTS (fail-safe)", async () => {
     const result = await getWithFlag("--reveal=");
     expect(leaksValue(result, PARAM_VALUE_SECURE)).toBe(false);
-    if (!("parametersByPath" in result)) throw new Error("wrong discriminant");
+    assertParametersByPath(result);
     for (const p of result.parametersByPath.parameters) {
       expect(p.value).toBe("<redacted>");
     }
@@ -832,7 +861,7 @@ describe("ssmRun get-parameters-by-path --reveal value matrix (redaction-bypass 
 
   it("--reveal=true still REVEALS", async () => {
     const result = await getWithFlag("--reveal=true");
-    if (!("parametersByPath" in result)) throw new Error("wrong discriminant");
+    assertParametersByPath(result);
     const secure = result.parametersByPath.parameters.find(
       (p) => p.name === "/my/app/db-password",
     );
@@ -856,7 +885,7 @@ describe("ssmRun describe-parameters — metadata and KMS alias enrichment", () 
       binary: stub,
     });
 
-    if (!("parametersMeta" in result)) throw new Error("wrong discriminant");
+    assertParametersMeta(result);
     expect(result.parametersMeta.parameters).toHaveLength(2);
 
     const secureParam = result.parametersMeta.parameters.find(
@@ -885,7 +914,7 @@ describe("ssmRun describe-parameters — metadata and KMS alias enrichment", () 
       binary: stub,
     });
 
-    if (!("parametersMeta" in result)) throw new Error("wrong discriminant");
+    assertParametersMeta(result);
     for (const p of result.parametersMeta.parameters) {
       // No value field on metadata entries
       expect("value" in p).toBe(false);
@@ -905,7 +934,7 @@ describe("ssmRun describe-parameters — metadata and KMS alias enrichment", () 
       binary: stub,
     });
 
-    if (!("parametersMeta" in result)) throw new Error("wrong discriminant");
+    assertParametersMeta(result);
     expect(result.parametersMeta.count).toContain("2");
     expect(result.parametersMeta.count).toContain("total");
     expect(result.parametersMeta.nextToken).toBeUndefined();
@@ -924,7 +953,7 @@ describe("ssmRun describe-parameters — metadata and KMS alias enrichment", () 
       binary: stub,
     });
 
-    if (!("parametersMeta" in result)) throw new Error("wrong discriminant");
+    assertParametersMeta(result);
     expect(result.parametersMeta.nextToken).toBe("AQECAHiGqDescribeToken==");
     expect(result.parametersMeta.count).toContain("truncated");
   });
@@ -940,7 +969,7 @@ describe("ssmRun describe-parameters — metadata and KMS alias enrichment", () 
       binary: stub,
     });
 
-    if (!("parametersMeta" in result)) throw new Error("wrong discriminant");
+    assertParametersMeta(result);
     expect(result.parametersMeta.parameters).toHaveLength(0);
     expect(result.parametersMeta.message).toBeTruthy();
     expect(result.parametersMeta.suggestion).toBeTruthy();
@@ -963,7 +992,7 @@ describe("ssmRun describe-parameters — metadata and KMS alias enrichment", () 
       binary: stub,
     });
 
-    if (!("parametersMeta" in result)) throw new Error("wrong discriminant");
+    assertParametersMeta(result);
     // SecureString param: KMS call failed → kmsKeyAlias shows raw keyId or undefined
     const secureParam = result.parametersMeta.parameters.find(
       (p) => p.name === PARAM_NAME_SECURE,
