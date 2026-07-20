@@ -26,7 +26,7 @@ import type { AwsRunOptions } from "../aws.js";
 import { awsJson } from "../aws.js";
 import { resolveKey } from "../resolve/key.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough, extractFlag, hasFlag } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrueStrict, extractPositionals } from "../overlay-args.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -183,37 +183,17 @@ examples:
 // ─── Arg-parsing helpers ──────────────────────────────────────────────────────
 
 /**
- * Boolean flags that take no separate value token.
- * Without this list, extractPositionals would incorrectly consume the first
- * positional after a boolean flag as that flag's value.
+ * Boolean flags for the secretsmanager overlay.
+ *
+ * These flags take no separate value token in the default (bare) case but
+ * accept a recognised boolean literal in two-arg form (e.g. `--reveal false`).
+ * Passed to the shared `extractPositionals` from `overlay-args.ts`.
  */
-const BOOLEAN_FLAGS = new Set([
+const SECRETS_BOOL_FLAGS = new Set([
   "--reveal",
   "--include-planned-deletion",
   "--no-include-planned-deletion",
 ]);
-
-function extractPositionals(args: readonly string[]): string[] {
-  const result: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] ?? "";
-    if (arg.startsWith("--") && arg.includes("=")) {
-      // --flag=value form: value embedded, no separate token
-      continue;
-    }
-    if (arg.startsWith("--")) {
-      if (BOOLEAN_FLAGS.has(arg)) {
-        // Boolean flag — no value token follows; skip only this token
-        continue;
-      }
-      // Value flag — skip this AND the following value token
-      i++;
-    } else if (arg !== "") {
-      result.push(arg);
-    }
-  }
-  return result;
-}
 
 function extractMaxItems(args: readonly string[]): number {
   const raw = extractFlag(args, "--max-items");
@@ -276,8 +256,10 @@ async function resolveAliasMap(
 async function runGetSecretValue(
   options: SecretsRunOptions,
 ): Promise<{ secret: SecretsGetValueResult; suggestion?: string } | Record<string, unknown>> {
-  const reveal = hasFlag(options.args, "--reveal");
-  const positionals = extractPositionals(options.args);
+  // flagIsTrueStrict: fail-safe for confidentiality — unrecognised value → redact.
+  // hasFlag was value-blind: --reveal=false returned true and leaked the secret.
+  const reveal = flagIsTrueStrict(options.args, "--reveal");
+  const positionals = extractPositionals(options.args, SECRETS_BOOL_FLAGS);
   const secretId =
     extractFlag(options.args, "--secret-id") ?? positionals[0];
 
@@ -297,6 +279,29 @@ async function runGetSecretValue(
   // Forward unknown flags verbatim (superset contract). --reveal is overlay-only.
   const rawPassthrough = collectPassthroughFlags(options.args, ["--secret-id"], ["--reveal"], { service: "secretsmanager", operation: "get-secret-value" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+
+  // --query bypass guard: GetSecretValue ALWAYS returns SecretString in plaintext
+  // from AWS — there is no server-side redaction.  --query with no --reveal would
+  // expose the plaintext via the JMESPath projection, bypassing redaction silently.
+  //
+  // ADR-0002 carve-out: --reveal is aws-axi's OWN flag (real aws has no such
+  // concept), so gating on it does NOT violate the superset input contract — we
+  // are guarding a confidentiality control we invented, not restricting an input
+  // that real aws accepts.
+  //
+  // Scope: ONLY get-secret-value.  SSM is NOT affected: --with-decryption is only
+  // appended when reveal=true, so an un-revealed SecureString is returned as
+  // ciphertext by the server — nothing to leak via --query.  list-secrets and
+  // describe-secret do not return secret values.
+  if (hasQuery && !reveal) {
+    throw new AxiError(
+      "--query on a secret-bearing operation would bypass redaction.",
+      "USAGE_ERROR",
+      [
+        "Pass --reveal to confirm you want the plaintext, or drop --query.",
+      ],
+    );
+  }
 
   if (hasQuery) {
     return awsJson<Record<string, unknown>>(
@@ -416,7 +421,7 @@ async function runListSecrets(
 async function runDescribeSecret(
   options: SecretsRunOptions,
 ): Promise<{ secretDetail: SecretsDetailResult } | Record<string, unknown>> {
-  const positionals = extractPositionals(options.args);
+  const positionals = extractPositionals(options.args, SECRETS_BOOL_FLAGS);
   const secretId =
     extractFlag(options.args, "--secret-id") ?? positionals[0];
 

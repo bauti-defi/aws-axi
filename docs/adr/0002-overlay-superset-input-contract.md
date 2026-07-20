@@ -39,6 +39,38 @@ invocation. Two flag classes are handled specially:
 | `--output <value>` / `--output=<value>` | **Stripped.** The exec seam (`awsJson`) always appends `--output json`; a duplicate `--output` from passthrough would conflict. |
 | `--query <expr>` / `--query=<expr>` | **Kept in passthrough; projection bypassed; page cap bypassed (repo-wide: all overlays + generic engine).** JMESPath is applied by the aws CLI before the response reaches the overlay; the overlay CANNOT safely project a JMESPath result of unknown shape. `hasQuery=true` tells the overlay's `*Run` helper to (1) skip its curated projection and (2) omit the default `--max-items` push. JMESPath projects `NextToken` away, so the cap would cause silent truncation with no signal to the caller; without it, botocore auto-pages the complete result. An explicit `--max-items` supplied by the caller is always honored (last-wins). The CLI adapter (`logsCommand`, `s3Command`, etc.) must also bypass its record-builder wrappers when `hasQuery=true` — if the adapter re-wraps a raw result, all fields become null. The generic engine (`engineRun` in `src/engine.ts`) applies the same two-part bypass for every paginated operation in the botocore model. |
 
+### `--query` carve-out for secret-bearing operations (PR #58)
+
+`--query` bypasses overlay *curation* (projection shape) — but it does **NOT**
+bypass overlay *redaction* on operations where the AWS API always returns secret
+values in plaintext.
+
+`--reveal` is an aws-axi-invented flag (real `aws` has no such concept).
+Gating on it does **not** violate the superset input contract: the superset
+contract prohibits restricting inputs that the real `aws` CLI accepts.
+`--reveal` is a confidentiality control we invented — the real `aws` ignores it
+entirely.
+
+**Affected operation: `secretsmanager get-secret-value` only.**
+
+`GetSecretValue` always returns `SecretString` in plaintext from AWS — there is
+no server-side redaction.  If `--query` were forwarded without checking
+`--reveal`, the JMESPath projection would print the plaintext secret regardless
+of the caller's intent.
+
+**Decision: `--query` without `--reveal` on `secretsmanager get-secret-value`
+is a `USAGE_ERROR` (exit 252).** With `--reveal` present, `--query` forwards
+normally and the JMESPath projection is applied to the raw response.
+
+Explicitly NOT affected:
+
+| Operation | Reason not guarded |
+|---|---|
+| `ssm get-parameter` / `get-parameters` / `get-parameters-by-path` | `--with-decryption` is only appended when `reveal=true`; an un-revealed `SecureString` is returned as ciphertext by AWS — nothing to leak via `--query`. |
+| `secretsmanager list-secrets` | Does not return `SecretString` values; response contains metadata only. |
+| `secretsmanager describe-secret` | Does not return `SecretString` values; response contains metadata only. |
+| All other services | Either no secret values in the response, or server-side redaction by omission. |
+
 Positionals owned by the overlay (e.g. `<key-id>` for `kms describe-key`,
 `<group-name>` for `logs filter`) are never leaked into passthrough.
 

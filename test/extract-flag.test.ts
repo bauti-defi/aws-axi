@@ -94,7 +94,7 @@
  */
 
 import { describe, it, expect } from "bun:test";
-import { extractFlag, locateFlag, hasFlag, flagIsTrue } from "../src/overlay-args.js";
+import { extractFlag, locateFlag, hasFlag, flagIsTrue, flagIsTrueStrict } from "../src/overlay-args.js";
 import { _extractTailArgs, _extractFilterArgs } from "../src/commands/logs.js";
 
 // ── Reference implementation ────────────────────────────────────────────────
@@ -536,5 +536,162 @@ describe("flagIsTrue", () => {
 
   it("detects bare --flag in a longer argv", () => {
     expect(flagIsTrue(["--other", "val", "--flag", "--next"], "--flag")).toBe(true);
+  });
+
+  // ── two-arg form (--flag false / --flag 0 / --flag no) ─────────────────────
+  //
+  // RED before fix: the loop short-circuited on `if (a === flag) return true`
+  // before ever inspecting the next token.  All two-arg forms returned true
+  // regardless of value — the same value-blind bug that `hasFlag` had for the
+  // equals form.
+
+  it("--flag false (two-arg) returns false — was leaking before fix", () => {
+    // RED on 52fc4ce (pre-fix): returned true (bare-presence short-circuit)
+    expect(flagIsTrue(["--flag", "false"], "--flag")).toBe(false);
+  });
+
+  it("--flag 0 (two-arg) returns false", () => {
+    expect(flagIsTrue(["--flag", "0"], "--flag")).toBe(false);
+  });
+
+  it("--flag no (two-arg) returns false", () => {
+    expect(flagIsTrue(["--flag", "no"], "--flag")).toBe(false);
+  });
+
+  it("--flag true (two-arg) returns true", () => {
+    expect(flagIsTrue(["--flag", "true"], "--flag")).toBe(true);
+  });
+
+  it("--flag 1 (two-arg) returns true", () => {
+    expect(flagIsTrue(["--flag", "1"], "--flag")).toBe(true);
+  });
+
+  it("--flag yes (two-arg) returns true", () => {
+    expect(flagIsTrue(["--flag", "yes"], "--flag")).toBe(true);
+  });
+
+  it("--flag garbage (two-arg): unrecognised non-bool → bare-presence → true", () => {
+    // 'garbage' is not a recognised bool literal; bare presence prevails.
+    expect(flagIsTrue(["--flag", "garbage"], "--flag")).toBe(true);
+  });
+
+  it("--flag followed by another --flag (two-arg): next is a flag → bare-presence → true", () => {
+    // Next token starts with '--'; not consumed as a value.
+    expect(flagIsTrue(["--flag", "--other", "val"], "--flag")).toBe(true);
+  });
+
+  it("trailing --flag (two-arg, no next token): bare-presence → true", () => {
+    expect(flagIsTrue(["positional", "--flag"], "--flag")).toBe(true);
+  });
+
+  it("two-arg false in a longer argv (flag-last)", () => {
+    // Real use-case: prod/db is the positional before the flag
+    expect(flagIsTrue(["prod/db", "--flag", "false"], "--flag")).toBe(false);
+  });
+
+  it("two-arg false in a longer argv (flag-first): value consumed correctly", () => {
+    // flag-first form: --flag false positional
+    expect(flagIsTrue(["--flag", "false", "prod/db"], "--flag")).toBe(false);
+  });
+
+  it("case-insensitive two-arg: --flag FALSE → false", () => {
+    expect(flagIsTrue(["--flag", "FALSE"], "--flag")).toBe(false);
+  });
+
+  it("case-insensitive two-arg: --flag True → true", () => {
+    expect(flagIsTrue(["--flag", "True"], "--flag")).toBe(true);
+  });
+});
+
+// ── flagIsTrueStrict — two-arg form ──────────────────────────────────────────
+//
+// flagIsTrueStrict is the FAIL-SAFE variant used for confidentiality flags
+// (--reveal on secrets/SSM).  The fail-safe direction difference is only
+// visible in the =-form: unrecognised =value → false (strict) vs true (non-strict).
+// For the two-arg form, both helpers behave identically — unrecognised non-bool
+// tokens remain bare-presence (→ true).
+
+describe("flagIsTrueStrict — two-arg form (PR #58 blocker fix)", () => {
+  // ── RED on pre-fix code (52fc4ce) ─────────────────────────────────────────
+  //
+  // These tests all returned true on the pre-fix branch because the loop
+  // short-circuited on `if (a === flag) return true` before inspecting the next
+  // token.  A caller who wrote `--reveal false` received reveal=true and got the
+  // plaintext secret — the exact bypass #56 exists to prevent.
+
+  it("--flag false (two-arg) returns false — was leaking before fix", () => {
+    expect(flagIsTrueStrict(["--flag", "false"], "--flag")).toBe(false);
+  });
+
+  it("--flag 0 (two-arg) returns false", () => {
+    expect(flagIsTrueStrict(["--flag", "0"], "--flag")).toBe(false);
+  });
+
+  it("--flag no (two-arg) returns false", () => {
+    expect(flagIsTrueStrict(["--flag", "no"], "--flag")).toBe(false);
+  });
+
+  it("--flag FALSE (case-insensitive) returns false", () => {
+    expect(flagIsTrueStrict(["--flag", "FALSE"], "--flag")).toBe(false);
+  });
+
+  // ── GREEN: must still reveal with explicit true literals ──────────────────
+
+  it("--flag true (two-arg) returns true", () => {
+    expect(flagIsTrueStrict(["--flag", "true"], "--flag")).toBe(true);
+  });
+
+  it("--flag 1 (two-arg) returns true", () => {
+    expect(flagIsTrueStrict(["--flag", "1"], "--flag")).toBe(true);
+  });
+
+  it("--flag yes (two-arg) returns true", () => {
+    expect(flagIsTrueStrict(["--flag", "yes"], "--flag")).toBe(true);
+  });
+
+  // ── Unrecognised non-bool → bare-presence → true ──────────────────────────
+  //
+  // 'garbage' is not a recognised bool literal.  In two-arg form, unrecognised
+  // non-bool tokens are treated as bare presence (consistent with: the flag
+  // appeared, and its next token is a separate positional, not a value).
+  // This is the same behaviour as flagIsTrue for two-arg form — the fail-safe
+  // difference only applies to the =-form (--flag=garbage → false here).
+
+  it("--flag garbage (two-arg): unrecognised → bare-presence → true", () => {
+    expect(flagIsTrueStrict(["--flag", "garbage"], "--flag")).toBe(true);
+  });
+
+  // ── Boundary cases ────────────────────────────────────────────────────────
+
+  it("trailing --flag (no next token): bare-presence → true", () => {
+    expect(flagIsTrueStrict(["positional", "--flag"], "--flag")).toBe(true);
+  });
+
+  it("--flag followed by another --flag: next starts with -- → bare-presence → true", () => {
+    expect(flagIsTrueStrict(["--flag", "--query", "SecretString"], "--flag")).toBe(true);
+  });
+
+  it("flag-last form with positional: --reveal false prod/db → false", () => {
+    // The secret-id positional (prod/db) comes BEFORE --reveal false.
+    // After the fix, --reveal false → reveal=false (correct: redact).
+    expect(flagIsTrueStrict(["prod/db", "--flag", "false"], "--flag")).toBe(false);
+  });
+
+  it("flag-first form: --flag false positional → false", () => {
+    expect(flagIsTrueStrict(["--flag", "false", "prod/db"], "--flag")).toBe(false);
+  });
+
+  // ── =-form still behaves strictly (fail-safe for confidentiality) ─────────
+
+  it("--flag=garbage (=-form) → false (strict fail-safe)", () => {
+    expect(flagIsTrueStrict(["--flag=garbage"], "--flag")).toBe(false);
+  });
+
+  it("--flag=off (=-form) → false (strict fail-safe)", () => {
+    expect(flagIsTrueStrict(["--flag=off"], "--flag")).toBe(false);
+  });
+
+  it("--flag=true (=-form) → true", () => {
+    expect(flagIsTrueStrict(["--flag=true"], "--flag")).toBe(true);
   });
 });

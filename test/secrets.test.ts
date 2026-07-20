@@ -322,6 +322,122 @@ describe("secretsRun get-secret-value --reveal — shows the actual secret", () 
   });
 });
 
+// ─── get-secret-value — --reveal value matrix (redaction-bypass fix #56) ─────
+//
+// BUG (pre-fix): hasFlag("--reveal=false") returned true (flag token present)
+// → revealed the plaintext secret. Caller explicitly opted OUT but got plaintext.
+//
+// FIX: replace hasFlag with flagIsTrueStrict — a whitelist helper:
+//   bare --reveal / --reveal=true / =1 / =yes → reveal
+//   --reveal=false / =0 / =no                 → redact (explicit opt-out)
+//   --reveal=<unrecognised> / --reveal=        → redact (fail-safe for secrets)
+//
+// RED tests (fail on pre-fix hasFlag, pass after fix):
+//   --reveal=false, =0, =no, =garbage, =off, = (empty)  → must REDACT
+// GREEN sanity (pass both before and after):
+//   --reveal=true, =1, =yes                             → must REVEAL
+
+describe("secretsRun get-secret-value --reveal value matrix (redaction-bypass fix #56)", () => {
+  function stubForReveal(): string {
+    return createStub({
+      "secretsmanager-get-secret-value": { stdout: GET_SECRET_VALUE_STRING },
+      "secretsmanager-describe-secret": { stdout: DESCRIBE_SECRET_FULL },
+      "kms-describe-key": { stdout: KMS_DESCRIBE_KEY },
+      "kms-list-aliases": { stdout: KMS_LIST_ALIASES_FOR_KEY },
+    });
+  }
+
+  async function getWithFlag(flag: string): Promise<unknown> {
+    return secretsRun({
+      subcommand: "get-secret-value",
+      args: [flag, SECRET_NAME],
+      binary: stubForReveal(),
+    });
+  }
+
+  // ── RED before fix ─────────────────────────────────────────────────────────
+
+  it("--reveal=false REDACTS — was leaking before fix", async () => {
+    const result = await getWithFlag("--reveal=false");
+    expect(leaksValue(result, SECRET_VALUE)).toBe(false);
+    if (!("secret" in result)) throw new Error("wrong discriminant");
+    expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
+      "<redacted>",
+    );
+  });
+
+  it("--reveal=0 REDACTS", async () => {
+    const result = await getWithFlag("--reveal=0");
+    expect(leaksValue(result, SECRET_VALUE)).toBe(false);
+    if (!("secret" in result)) throw new Error("wrong discriminant");
+    expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
+      "<redacted>",
+    );
+  });
+
+  it("--reveal=no REDACTS", async () => {
+    const result = await getWithFlag("--reveal=no");
+    expect(leaksValue(result, SECRET_VALUE)).toBe(false);
+    if (!("secret" in result)) throw new Error("wrong discriminant");
+    expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
+      "<redacted>",
+    );
+  });
+
+  it("--reveal=garbage REDACTS (fail-safe: unrecognised value → redact)", async () => {
+    const result = await getWithFlag("--reveal=garbage");
+    expect(leaksValue(result, SECRET_VALUE)).toBe(false);
+    if (!("secret" in result)) throw new Error("wrong discriminant");
+    expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
+      "<redacted>",
+    );
+  });
+
+  it("--reveal=off REDACTS (fail-safe)", async () => {
+    const result = await getWithFlag("--reveal=off");
+    expect(leaksValue(result, SECRET_VALUE)).toBe(false);
+    if (!("secret" in result)) throw new Error("wrong discriminant");
+    expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
+      "<redacted>",
+    );
+  });
+
+  it("--reveal= (empty) REDACTS (fail-safe)", async () => {
+    const result = await getWithFlag("--reveal=");
+    expect(leaksValue(result, SECRET_VALUE)).toBe(false);
+    if (!("secret" in result)) throw new Error("wrong discriminant");
+    expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
+      "<redacted>",
+    );
+  });
+
+  // ── GREEN sanity: known-true values must still reveal ──────────────────────
+
+  it("--reveal=true still REVEALS (unaffected by fix)", async () => {
+    const result = await getWithFlag("--reveal=true");
+    if (!("secret" in result)) throw new Error("wrong discriminant");
+    expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
+      SECRET_VALUE,
+    );
+  });
+
+  it("--reveal=1 still REVEALS", async () => {
+    const result = await getWithFlag("--reveal=1");
+    if (!("secret" in result)) throw new Error("wrong discriminant");
+    expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
+      SECRET_VALUE,
+    );
+  });
+
+  it("--reveal=yes still REVEALS", async () => {
+    const result = await getWithFlag("--reveal=yes");
+    if (!("secret" in result)) throw new Error("wrong discriminant");
+    expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
+      SECRET_VALUE,
+    );
+  });
+});
+
 describe("secretsRun get-secret-value — errors", () => {
   it("throws USAGE_ERROR when no secret-id is provided", async () => {
     const stub = createStub({});
@@ -529,6 +645,186 @@ describe("secretsRun describe-secret — curated detail with KMS alias", () => {
 
     if (!("secretDetail" in result)) throw new Error("wrong discriminant");
     expect(result.secretDetail.name).toBe(SECRET_NAME);
+  });
+});
+
+// ─── get-secret-value — two-arg --reveal form (PR #58 round-2 blocker fix) ───
+//
+// The two-arg form `--reveal false` was NOT tested in PR #58 round-1.  Both
+// `flagIsTrue` and `flagIsTrueStrict` short-circuited on the bare-presence
+// check (`if (a === flag) return true`) before inspecting the next token, so
+// `--reveal false` was indistinguishable from bare `--reveal` and leaked.
+//
+// Revert-proof:
+//   R1: Revert the two-arg peek in flagIsTrueStrict (restore `if (a===flag) return true`)
+//       → "two-arg --reveal false REDACTS" goes RED.
+//   R2: Revert extractPositionals to not consume bool literal
+//       → "flag-first two-arg --reveal false prod/db correctly resolves secretId"
+//         goes RED (secretId becomes "false" → USAGE_ERROR: missing secret id
+//         or wrong resource).
+
+describe("secretsRun get-secret-value — two-arg --reveal false (round-2 fix)", () => {
+  function stubForReveal(): string {
+    return createStub({
+      "secretsmanager-get-secret-value": { stdout: GET_SECRET_VALUE_STRING },
+      "secretsmanager-describe-secret": { stdout: DESCRIBE_SECRET_FULL },
+      "kms-describe-key": { stdout: KMS_DESCRIBE_KEY },
+      "kms-list-aliases": { stdout: KMS_LIST_ALIASES_FOR_KEY },
+    });
+  }
+
+  // ── RED before fix ──────────────────────────────────────────────────────────
+
+  it("--reveal false (two-arg, flag-last) REDACTS — was leaking before round-2 fix", async () => {
+    // `args: [SECRET_NAME, "--reveal", "false"]` — standard flag-last form.
+    const result = await secretsRun({
+      subcommand: "get-secret-value",
+      args: [SECRET_NAME, "--reveal", "false"],
+      binary: stubForReveal(),
+    });
+    expect(leaksValue(result, SECRET_VALUE)).toBe(false);
+    if (!("secret" in result)) throw new Error("wrong discriminant");
+    expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe("<redacted>");
+  });
+
+  it("--reveal 0 (two-arg) REDACTS", async () => {
+    const result = await secretsRun({
+      subcommand: "get-secret-value",
+      args: [SECRET_NAME, "--reveal", "0"],
+      binary: stubForReveal(),
+    });
+    expect(leaksValue(result, SECRET_VALUE)).toBe(false);
+    if (!("secret" in result)) throw new Error("wrong discriminant");
+    expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe("<redacted>");
+  });
+
+  it("--reveal no (two-arg) REDACTS", async () => {
+    const result = await secretsRun({
+      subcommand: "get-secret-value",
+      args: [SECRET_NAME, "--reveal", "no"],
+      binary: stubForReveal(),
+    });
+    expect(leaksValue(result, SECRET_VALUE)).toBe(false);
+    if (!("secret" in result)) throw new Error("wrong discriminant");
+    expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe("<redacted>");
+  });
+
+  // ── GREEN: two-arg true still reveals ──────────────────────────────────────
+
+  it("--reveal true (two-arg) still REVEALS", async () => {
+    const result = await secretsRun({
+      subcommand: "get-secret-value",
+      args: [SECRET_NAME, "--reveal", "true"],
+      binary: stubForReveal(),
+    });
+    if (!("secret" in result)) throw new Error("wrong discriminant");
+    expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(SECRET_VALUE);
+  });
+
+  it("--reveal 1 (two-arg) still REVEALS", async () => {
+    const result = await secretsRun({
+      subcommand: "get-secret-value",
+      args: [SECRET_NAME, "--reveal", "1"],
+      binary: stubForReveal(),
+    });
+    if (!("secret" in result)) throw new Error("wrong discriminant");
+    expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(SECRET_VALUE);
+  });
+
+  // ── Positional interaction ──────────────────────────────────────────────────
+
+  it("flag-first two-arg --reveal false resolves secretId correctly (not 'false')", async () => {
+    // `args: ["--reveal", "false", SECRET_NAME]` — flag-first.
+    // After extractPositionals fix, "false" is consumed as the flag value,
+    // so SECRET_NAME is positionals[0] (correct secretId).
+    const result = await secretsRun({
+      subcommand: "get-secret-value",
+      args: ["--reveal", "false", SECRET_NAME],
+      binary: stubForReveal(),
+    });
+    expect(leaksValue(result, SECRET_VALUE)).toBe(false);
+    if (!("secret" in result)) throw new Error("wrong discriminant");
+    // Name should be the real SECRET_NAME, not "false"
+    expect((result as { secret: { name: string } }).secret.name).toBe(SECRET_NAME);
+  });
+});
+
+// ─── get-secret-value — --query guard (PR #58 round-2 fix) ──────────────────
+//
+// --query without --reveal on get-secret-value was silently returning plaintext.
+// The hasQuery branch returned awsJson before reveal was consulted; since
+// SecretsManager always returns SecretString in plaintext, any --query call
+// would print the secret.
+//
+// Operator decision: hard USAGE_ERROR when --query is present without --reveal
+// on get-secret-value (the one SecretString-bearing overlay op).
+//
+// Scope justification (verified in round-2 review):
+//   - SSM: NOT affected. Without --with-decryption, AWS returns ciphertext.
+//   - list-secrets / describe-secret: NOT affected. No SecretString in response.
+//   - Engine path (batch-get-secret-value etc.): pre-existing known gap, tracked
+//     separately via issue filed in this PR.
+
+describe("secretsRun get-secret-value — --query guard (round-2 fix)", () => {
+  function stubForQuery(): string {
+    return createStub({
+      "secretsmanager-get-secret-value": { stdout: GET_SECRET_VALUE_STRING },
+      "secretsmanager-describe-secret": { stdout: DESCRIBE_SECRET_FULL },
+      "kms-describe-key": { stdout: KMS_DESCRIBE_KEY },
+      "kms-list-aliases": { stdout: KMS_LIST_ALIASES_FOR_KEY },
+    });
+  }
+
+  it("--query without --reveal throws USAGE_ERROR", async () => {
+    await expect(
+      secretsRun({
+        subcommand: "get-secret-value",
+        args: [SECRET_NAME, "--query", "SecretString"],
+        binary: stubForQuery(),
+      }),
+    ).rejects.toMatchObject({ code: "USAGE_ERROR" });
+  });
+
+  it("--query with --reveal=false throws USAGE_ERROR (--reveal=false ≠ revealed)", async () => {
+    await expect(
+      secretsRun({
+        subcommand: "get-secret-value",
+        args: [SECRET_NAME, "--reveal=false", "--query", "SecretString"],
+        binary: stubForQuery(),
+      }),
+    ).rejects.toMatchObject({ code: "USAGE_ERROR" });
+  });
+
+  it("--query with --reveal (bare) succeeds — caller opted in", async () => {
+    // With --reveal, --query is legal and returns the raw JMESPath result.
+    // The stub returns GET_SECRET_VALUE_STRING; with --query the overlay forwards
+    // it to the real aws call (via stub), returning a raw Record.
+    const stub = createStub({
+      "secretsmanager-get-secret-value": {
+        stdout: JSON.stringify({ SecretString: SECRET_VALUE }),
+      },
+    });
+    const result = await secretsRun({
+      subcommand: "get-secret-value",
+      args: [SECRET_NAME, "--reveal", "--query", "SecretString"],
+      binary: stub,
+    });
+    // raw record — no curated projection
+    expect(result).toBeDefined();
+  });
+
+  it("--query with --reveal=true succeeds", async () => {
+    const stub = createStub({
+      "secretsmanager-get-secret-value": {
+        stdout: JSON.stringify({ SecretString: SECRET_VALUE }),
+      },
+    });
+    const result = await secretsRun({
+      subcommand: "get-secret-value",
+      args: [SECRET_NAME, "--reveal=true", "--query", "SecretString"],
+      binary: stub,
+    });
+    expect(result).toBeDefined();
   });
 });
 

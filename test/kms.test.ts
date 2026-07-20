@@ -537,6 +537,58 @@ describe("kmsRun describe-key — errors", () => {
   });
 });
 
+// ─── kmsRun: describe-key — global bool flag does not eat positional ──────────
+//
+// Regression introduced by the private extractPositionals in kms.ts (shared with
+// lambda.ts): any --flag not in an explicit boolean set is treated as a value
+// flag, so --no-cli-pager eats the following token (the key id / alias).
+//
+// Pre-fix (f66878c): extractPositionals(["--no-cli-pager", "alias/my-app-key"])
+//   → --no-cli-pager treated as value flag → eats alias/my-app-key
+//   → positionals = [] → USAGE_ERROR
+//
+// Post-fix (shared extractPositionals + GLOBAL_BOOL_FLAGS):
+//   --no-cli-pager in GLOBAL_BOOL_FLAGS → boolean → alias/my-app-key kept
+//   → positionals = ["alias/my-app-key"] → key resolved correctly
+
+describe("kmsRun describe-key — global bool flag does not eat key positional", () => {
+  it("--no-cli-pager before key alias: resolves key correctly (not USAGE_ERROR)", async () => {
+    const stub = createKmsStub({
+      describeKey: DESCRIBE_KEY_1,
+      listAliasesForKey: LIST_ALIASES_FOR_KEY_1,
+      listAliases: LIST_ALIASES_FOR_KEY_1,
+    });
+
+    // On broken head f66878c, --no-cli-pager eats KEY_ALIAS_1 (alias/my-app-key)
+    // → extractPositionals returns [] → USAGE_ERROR.
+    const result = await kmsRun({
+      subcommand: "describe-key",
+      args: ["--no-cli-pager", KEY_ALIAS_1],
+      binary: stub,
+    });
+
+    expect("key" in result).toBe(true);
+    if (!("key" in result)) throw new Error("wrong discriminant");
+    expect(result.key.keyId).toBe(KEY_ID_1);
+  });
+
+  it("--debug before key id: resolves key correctly (not USAGE_ERROR)", async () => {
+    const stub = createKmsStub({
+      describeKey: DESCRIBE_KEY_1,
+      listAliasesForKey: LIST_ALIASES_FOR_KEY_1,
+      listAliases: LIST_ALIASES_FOR_KEY_1,
+    });
+
+    const result = await kmsRun({
+      subcommand: "describe-key",
+      args: ["--debug", KEY_ID_1],
+      binary: stub,
+    });
+
+    expect("key" in result).toBe(true);
+  });
+});
+
 // ─── kmsRun: get-key-policy ───────────────────────────────────────────────────
 
 describe("kmsRun get-key-policy — happy path", () => {

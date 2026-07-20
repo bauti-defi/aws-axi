@@ -1071,3 +1071,41 @@ describe("LAMBDA_HELP — invoke --query payload-loss warning", () => {
     expect(LAMBDA_HELP).toContain("payload is not retained");
   });
 });
+
+// ─── lambdaRun: get-function — global bool flag does not eat positional ────────
+//
+// Regression in the private extractPositionals in lambda.ts: all --flags not in
+// an explicit boolean set are treated as value flags, so --no-cli-pager eats
+// the following function name.
+//
+// Pre-fix (f66878c): extractPositionals(["--no-cli-pager", "my-function"])
+//   → --no-cli-pager treated as value flag → eats my-function
+//   → positionals = [] → USAGE_ERROR
+//
+// Post-fix (shared extractPositionals + GLOBAL_BOOL_FLAGS):
+//   → positionals = ["my-function"] → function resolved correctly
+
+describe("lambdaRun get-function — global bool flag does not eat function name", () => {
+  it("--no-cli-pager before function name: resolves correctly (not USAGE_ERROR)", async () => {
+    const stub = createLambdaStub({
+      getFunction: GET_FUNCTION_RESPONSE,
+      describeSecurityGroups: SG_RESPONSE,
+      describeSubnets: SUBNET_RESPONSE,
+      kmsDescribeKey: KMS_DESCRIBE_KEY,
+      kmsListAliases: KMS_LIST_ALIASES,
+      logsDescribeLogGroups: LOG_GROUP_RESPONSE,
+    });
+
+    // On broken head f66878c, --no-cli-pager eats FN_NAME (my-function)
+    // → extractPositionals returns [] → USAGE_ERROR.
+    const result = await lambdaRun({
+      subcommand: "get-function",
+      args: ["--no-cli-pager", FN_NAME],
+      binary: stub,
+    });
+
+    expect("function" in result).toBe(true);
+    if (!("function" in result)) throw new Error("wrong discriminant");
+    expect(result.function.name).toBe(FN_NAME);
+  });
+});

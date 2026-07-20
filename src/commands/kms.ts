@@ -18,7 +18,7 @@ import type { AwsRunOptions } from "../aws.js";
 import { awsJson } from "../aws.js";
 import { loadAliasMap } from "../resolve/key.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough, extractFlag } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, extractFlag, extractPositionals } from "../overlay-args.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -206,31 +206,6 @@ function extractMaxItems(args: readonly string[]): number {
     );
   }
   return parsed;
-}
-
-/**
- * Extract bare positional arguments (non-flag tokens) from args.
- *
- * Handles both flag forms:
- *   --flag value   → skip flag token AND the following value token
- *   --flag=value   → skip only the combined token (value is embedded)
- */
-function extractPositionals(args: readonly string[]): string[] {
-  const result: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] ?? "";
-    if (arg.startsWith("--") && arg.includes("=")) {
-      // --flag=value form: value embedded, skip only this token
-      continue;
-    }
-    if (arg.startsWith("--")) {
-      // --flag value form: skip this token AND the following value token
-      i++;
-    } else if (arg !== "") {
-      result.push(arg);
-    }
-  }
-  return result;
 }
 
 /** Build a human-readable count/pagination summary string. */

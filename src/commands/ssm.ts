@@ -26,7 +26,7 @@ import type { AwsRunOptions } from "../aws.js";
 import { awsJson } from "../aws.js";
 import { resolveKey } from "../resolve/key.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough, extractFlag, hasFlag } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrue, flagIsTrueStrict, hasFlag, extractPositionals } from "../overlay-args.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -357,39 +357,19 @@ examples:
 // ─── Arg-parsing helpers ──────────────────────────────────────────────────────
 
 /**
- * Boolean flags that take no separate value token.
- * Without this list, extractPositionals would incorrectly consume the first
- * positional after a boolean flag as that flag's value.
+ * Boolean flags for the SSM overlay.
+ *
+ * These flags take no separate value token in the default (bare) case but
+ * accept a recognised boolean literal in two-arg form (e.g. `--reveal false`).
+ * Passed to the shared `extractPositionals` from `overlay-args.ts`.
  */
-const BOOLEAN_FLAGS = new Set([
+const SSM_BOOL_FLAGS = new Set([
   "--reveal",
   "--with-decryption",
   "--no-with-decryption",
   "--recursive",
   "--no-recursive",
 ]);
-
-function extractPositionals(args: readonly string[]): string[] {
-  const result: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] ?? "";
-    if (arg.startsWith("--") && arg.includes("=")) {
-      // --flag=value form: value embedded, no separate token
-      continue;
-    }
-    if (arg.startsWith("--")) {
-      if (BOOLEAN_FLAGS.has(arg)) {
-        // Boolean flag — no value token follows; skip only this token
-        continue;
-      }
-      // Value flag — skip this AND the following value token
-      i++;
-    } else if (arg !== "") {
-      result.push(arg);
-    }
-  }
-  return result;
-}
 
 function extractMaxItems(args: readonly string[]): number {
   const raw = extractFlag(args, "--max-items");
@@ -714,7 +694,10 @@ async function runGetCommandInvocation(
 ): Promise<SsmGetCommandInvocationResult | Record<string, unknown>> {
   const commandId = extractFlag(options.args, "--command-id");
   const instanceId = extractFlag(options.args, "--instance-id");
-  const doWait = hasFlag(options.args, "--wait");
+  // flagIsTrue: value-aware — --wait=false must NOT wait.
+  // hasFlag was value-blind: --wait=false returned true and triggered polling.
+  // Unrecognised value → true (fail-safe: over-waiting is safer than missing completion).
+  const doWait = flagIsTrue(options.args, "--wait");
 
   if (commandId === undefined || commandId === "") {
     throw new AxiError(
@@ -794,8 +777,10 @@ async function runGetCommandInvocation(
 async function runGetParameter(
   options: SsmRunOptions,
 ): Promise<SsmGetParameterResult | Record<string, unknown>> {
-  const reveal = hasFlag(options.args, "--reveal");
-  const positionals = extractPositionals(options.args);
+  // flagIsTrueStrict: fail-safe for confidentiality — unrecognised value → redact.
+  // hasFlag was value-blind: --reveal=false returned true and leaked the parameter value.
+  const reveal = flagIsTrueStrict(options.args, "--reveal");
+  const positionals = extractPositionals(options.args, SSM_BOOL_FLAGS);
   const nameArg =
     extractFlag(options.args, "--name") ?? positionals[0];
 
@@ -836,8 +821,10 @@ async function runGetParameter(
 async function runGetParameters(
   options: SsmRunOptions,
 ): Promise<{ parameterList: SsmGetParametersResult } | Record<string, unknown>> {
-  const reveal = hasFlag(options.args, "--reveal");
-  const positionals = extractPositionals(options.args);
+  // flagIsTrueStrict: fail-safe for confidentiality — unrecognised value → redact.
+  // hasFlag was value-blind: --reveal=false returned true and leaked the parameter value.
+  const reveal = flagIsTrueStrict(options.args, "--reveal");
+  const positionals = extractPositionals(options.args, SSM_BOOL_FLAGS);
 
   // --names flag value (single space-separated string from CLI) or positionals
   const namesFlag = extractFlag(options.args, "--names");
@@ -888,8 +875,10 @@ async function runGetParameters(
 async function runGetParametersByPath(
   options: SsmRunOptions,
 ): Promise<{ parametersByPath: SsmGetParametersByPathResult } | Record<string, unknown>> {
-  const reveal = hasFlag(options.args, "--reveal");
-  const positionals = extractPositionals(options.args);
+  // flagIsTrueStrict: fail-safe for confidentiality — unrecognised value → redact.
+  // hasFlag was value-blind: --reveal=false returned true and leaked the parameter value.
+  const reveal = flagIsTrueStrict(options.args, "--reveal");
+  const positionals = extractPositionals(options.args, SSM_BOOL_FLAGS);
   const pathArg =
     extractFlag(options.args, "--path") ?? positionals[0];
 

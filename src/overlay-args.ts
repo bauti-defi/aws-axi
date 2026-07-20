@@ -224,15 +224,19 @@ export function hasFlag(args: readonly string[], flag: string): boolean {
  * (currently: --dryrun and --recursive in s3).
  *
  * Accepted inputs and their interpretation:
- *   --flag          → true   (bare presence implies enabled)
- *   --flag=true     → true
- *   --flag=1        → true
- *   --flag=yes      → true
- *   --flag=<other>  → true   (any unrecognised value is treated as truthy)
- *   --flag=false    → false  (superset extension: real aws hard-errors here)
- *   --flag=0        → false
- *   --flag=no       → false
- *   (absent)        → false
+ *   --flag            → true   (bare presence implies enabled)
+ *   --flag true       → true   (two-arg form; recognised true literal)
+ *   --flag false      → false  (two-arg form; recognised false literal)
+ *   --flag 0 / no     → false  (two-arg form; recognised false literals)
+ *   --flag <other>    → true   (two-arg; unrecognised non-bool → bare-presence)
+ *   --flag=true       → true
+ *   --flag=1          → true
+ *   --flag=yes        → true
+ *   --flag=<other>    → true   (any unrecognised =value is treated as truthy)
+ *   --flag=false      → false  (superset extension: real aws hard-errors here)
+ *   --flag=0          → false
+ *   --flag=no         → false
+ *   (absent)          → false
  *
  * ADR-0002 contract: aws-axi is a strict SUPERSET of real aws — it accepts
  * input that real aws rejects and honours it sensibly.  `--flag=false` is
@@ -252,14 +256,203 @@ export function hasFlag(args: readonly string[], flag: string): boolean {
  */
 export function flagIsTrue(args: readonly string[], flag: string): boolean {
   const eqPrefix = `${flag}=`;
-  for (const a of args) {
-    if (a === flag) return true;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? "";
+    if (a === flag) {
+      // Two-arg form: peek at the next token.
+      //   Recognised false literals (false/0/no, case-insensitive) → false
+      //   Recognised true  literals (true/1/yes)                   → true
+      //   Absent, another --flag, or any non-bool positional        → bare-presence → true
+      //
+      // Only recognised boolean literals are consumed as the flag's value;
+      // non-bool positionals (e.g. a secret-id like "prod/db") are left alone.
+      const next = args[i + 1];
+      if (next !== undefined && !next.startsWith("--")) {
+        const v = next.toLowerCase();
+        if (v === "false" || v === "0" || v === "no") return false;
+        if (v === "true" || v === "1" || v === "yes") return true;
+      }
+      return true; // bare presence
+    }
     if (a.startsWith(eqPrefix)) {
       const v = a.slice(eqPrefix.length).toLowerCase();
       return v !== "false" && v !== "0" && v !== "no";
     }
   }
   return false;
+}
+
+// ── flagIsTrueStrict ──────────────────────────────────────────────────────────
+
+/**
+ * Return true ONLY if a named BOOLEAN flag is explicitly enabled in argv.
+ *
+ * This is the FAIL-SAFE variant of `flagIsTrue` for CONFIDENTIALITY flags
+ * (e.g. `--reveal`).  Where `flagIsTrue` treats any unrecognised value as
+ * truthy (fail-safe for write-guard flags: unrecognised ⇒ dry-run ⇒ no write),
+ * this helper uses a whitelist: anything not in the known-true set is treated
+ * as FALSE (fail-safe for confidentiality: unrecognised ⇒ redact, not reveal).
+ *
+ * Accepted inputs and their interpretation:
+ *   --flag            → true   (bare presence implies enabled)
+ *   --flag true       → true   (two-arg form; recognised true literal)
+ *   --flag false      → false  (two-arg form; recognised false literal)
+ *   --flag 0 / no     → false  (two-arg form; recognised false literals)
+ *   --flag <other>    → true   (two-arg; unrecognised non-bool → bare-presence)
+ *   --flag=true       → true   (case-insensitive)
+ *   --flag=1          → true
+ *   --flag=yes        → true
+ *   --flag=false      → false  (explicit opt-out)
+ *   --flag=0          → false
+ *   --flag=no         → false
+ *   --flag=<other>    → false  (unrecognised =value → fail-safe: REDACT)
+ *   --flag=           → false  (empty value → fail-safe)
+ *   (absent)          → false
+ *
+ * FAIL-SAFE DIRECTION: the two helpers differ only in their `=`-form
+ * fallback.  For the two-arg form, both helpers treat unrecognised
+ * non-bool tokens as bare-presence (→ true), leaving non-bool positionals
+ * (e.g. a secret-id "prod/db") untouched.
+ *
+ * WHEN TO USE: whenever the flag controls secret or credential exposure.
+ * Leaking on `--reveal=garbage` is a confidentiality violation; redacting is
+ * always safe.  For write-guard flags (`--dryrun`, `--recursive`) where the
+ * fail-safe is the opposite direction, use `flagIsTrue` instead.
+ *
+ * Interaction with #57: issue #57 proposes hard-erroring on unrecognised
+ * boolean values for ALL boolean flags.  When that lands, both `flagIsTrue`
+ * and `flagIsTrueStrict` will error before returning, making the fallback
+ * difference moot.  Until then the two helpers serve different fail-safe
+ * directions for `=`-form values; remove `flagIsTrueStrict` when #57 lands.
+ *
+ * First-wins on repeated flags.  Same `=`-prefix guard as `flagIsTrue`.
+ */
+export function flagIsTrueStrict(args: readonly string[], flag: string): boolean {
+  const eqPrefix = `${flag}=`;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] ?? "";
+    if (a === flag) {
+      // Two-arg form: same peek logic as flagIsTrue.
+      // (Fail-safe direction differs ONLY in the =-form: unrecognised
+      //  --flag=garbage → false here vs → true in flagIsTrue.)
+      const next = args[i + 1];
+      if (next !== undefined && !next.startsWith("--")) {
+        const v = next.toLowerCase();
+        if (v === "false" || v === "0" || v === "no") return false;
+        if (v === "true" || v === "1" || v === "yes") return true;
+      }
+      return true; // bare presence
+    }
+    if (a.startsWith(eqPrefix)) {
+      const v = a.slice(eqPrefix.length).toLowerCase();
+      return v === "true" || v === "1" || v === "yes";
+    }
+  }
+  return false;
+}
+
+// ── extractPositionals ────────────────────────────────────────────────────────
+
+/**
+ * Recognised boolean literals for two-arg flag forms (case-insensitive).
+ * Exactly mirrors the literal set used by `flagIsTrue` and `flagIsTrueStrict`.
+ */
+const BOOL_LITERALS = new Set(["true", "false", "1", "0", "yes", "no"]);
+
+/**
+ * Extract bare positionals from argv, skipping all flag tokens and their values.
+ *
+ * This is the boolean-aware replacement for the naive
+ * `args.filter(a => !a.startsWith("-"))` pattern, which incorrectly treats
+ * recognised boolean literals (e.g. `false`, `0`, `no`) as positionals when
+ * they appear as the value token of a boolean flag in two-arg form
+ * (`--dryrun false`), silently shifting every positional that follows.
+ *
+ * Algorithm (left-to-right scan):
+ *   --flag=value form  → skip (value embedded in one token)
+ *   --flag in booleanFlags:
+ *       next token is a recognised boolean literal → consume both (skip flag + value)
+ *       next token is absent or not a bool literal → skip flag only
+ *   --flag in GLOBAL_BOOL_FLAGS (e.g. --no-cli-pager, --debug, --no-paginate,
+ *       --no-verify-ssl) → boolean: skip flag only, next token is NOT a value.
+ *       Keeping this consistent with collectPassthroughFlags (which already checks
+ *       GLOBAL_BOOL_FLAGS) prevents global flags from eating the next positional.
+ *   any other --flag   → value flag: skip it AND the following token
+ *   bare token (no --)  → positional: push to result
+ *
+ * The "any other --flag" value-flag rule is the reason the `--exclude` bug
+ * (reviewer follow-up) falls out of this fix for free: `--exclude *.log`
+ * skips both tokens, leaving `*.log` out of the positional result.
+ *
+ * @param args         Raw argv to scan.
+ * @param booleanFlags Set of flags that take NO separate value token in the
+ *                     default (bare) case but MAY consume a recognised boolean
+ *                     literal as a two-arg value.  Must be consistent with
+ *                     `flagIsTrue`/`flagIsTrueStrict` for the same argv.
+ *
+ * Replaces the identical private copies in `secrets.ts` and `ssm.ts` (the
+ * duplication that caused the `s3.ts` call-site to be missed in round-2).
+ */
+// Empty-set singleton used as the default when no caller-specific boolean flags exist
+// (e.g. kms/lambda, which have no overlay-specific boolean flags of their own).
+const EMPTY_BOOL_FLAGS: ReadonlySet<string> = new Set<string>();
+
+export function extractPositionals(
+  args: readonly string[],
+  booleanFlags: ReadonlySet<string> = EMPTY_BOOL_FLAGS,
+): string[] {
+  const result: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] ?? "";
+    if (arg.startsWith("--") && arg.includes("=")) {
+      // --flag=value form: value is embedded; nothing else to consume.
+      continue;
+    }
+    if (arg.startsWith("--")) {
+      if (booleanFlags.has(arg)) {
+        // Boolean flag in the caller's set: may optionally carry a recognised
+        // literal as a separate value token.
+        const next = args[i + 1];
+        if (
+          next !== undefined &&
+          !next.startsWith("--") &&
+          BOOL_LITERALS.has(next.toLowerCase())
+        ) {
+          i++; // consume the bool value — it is NOT a positional
+        }
+        // The flag itself is not a positional; continue regardless.
+        continue;
+      }
+      // Global aws CLI boolean flags (e.g. --no-cli-pager, --debug,
+      // --no-paginate, --no-verify-ssl) take no value token.
+      // They are not in the caller-supplied booleanFlags set because the
+      // caller only lists its own overlay-specific boolean flags; but they
+      // must not eat the next positional.  GLOBAL_BOOL_FLAGS is already
+      // maintained for collectPassthroughFlags — reusing it here keeps the
+      // two functions consistent.
+      if (GLOBAL_BOOL_FLAGS.has(arg)) {
+        continue;
+      }
+      // POSIX end-of-options separator: forward to child (collectPassthroughFlags
+      // will keep it in passthrough since it is not in owned/bools), but do NOT
+      // consume the following token as a "value". Without this guard, `--` hits
+      // the unknown/value-flag branch below and the `i++` silently eats the next
+      // positional — converting `s3 cp -- ./local.txt s3://bucket/key` into a
+      // USAGE_ERROR (no destination). This maintains ADR-0002's superset contract:
+      // real `aws` 2.33.13 accepts `--` and processes through; base (52fc4ce)
+      // forwarded it verbatim.
+      if (arg === "--") {
+        continue;
+      }
+      // Unknown / value flag: skip this token and the next (the value).
+      i++;
+      continue;
+    }
+    if (arg !== "") {
+      result.push(arg);
+    }
+  }
+  return result;
 }
 
 // ── extractFlag ──────────────────────────────────────────────────────────────
