@@ -38,7 +38,7 @@ import { resolveSubnet } from "../resolve/subnet.js";
 import { resolveLogGroup } from "../resolve/log-group.js";
 import { resolveKey } from "../resolve/key.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough, extractFlag } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, extractFlag, extractPositionals } from "../overlay-args.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -240,28 +240,6 @@ function extractMaxItems(args: readonly string[]): number {
     );
   }
   return parsed;
-}
-
-/**
- * Extract bare positional arguments (non-flag tokens) from args.
- * Skips both --flag=value (combined) and --flag value (pair) forms.
- */
-function extractPositionals(args: readonly string[]): string[] {
-  const result: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] ?? "";
-    if (arg.startsWith("--") && arg.includes("=")) {
-      // --flag=value form: skip only this combined token
-      continue;
-    }
-    if (arg.startsWith("--")) {
-      // --flag value form: skip this token AND the following value token
-      i++;
-    } else if (arg !== "") {
-      result.push(arg);
-    }
-  }
-  return result;
 }
 
 /** Build a human-readable count/pagination summary string. */

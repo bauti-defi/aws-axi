@@ -472,3 +472,169 @@ describe("wire: s3 cp — two-arg boolean flags do not shift source/destination"
     expect(argv).toContain("*.log");
   });
 });
+
+// ---------------------------------------------------------------------------
+// s3 cp / rm — global aws boolean flags must NOT eat S3 URI positionals
+//
+// Regression introduced in f66878c: extractPositionals treats ALL unknown
+// --flags as value flags (skips next token).  GLOBAL_BOOL_FLAGS like
+// --no-cli-pager, --debug, --no-paginate, --no-verify-ssl have no entry in
+// S3_BOOL_FLAGS, so the token following them (a local path or S3 URI) is
+// silently consumed as the flag's value.
+//
+// Pre-fix (f66878c):
+//   s3 cp --no-cli-pager ./local.txt s3://bucket/key
+//   → extractPositionals eats ./local.txt as value of --no-cli-pager
+//   → positionals = ["s3://bucket/key"]  →  source OK, destination=undefined
+//   → USAGE_ERROR (exit 252)
+//
+// Post-fix:
+//   --no-cli-pager is in GLOBAL_BOOL_FLAGS → treated as boolean → no eat
+//   → positionals = ["./local.txt", "s3://bucket/key"]  ✅
+// ---------------------------------------------------------------------------
+
+describe("wire: s3 cp/rm — global aws bool flags do not eat S3 URI positionals", () => {
+  /**
+   * Liveness anchor.
+   */
+  it("anchor: stub IS invoked for s3 cp baseline (no global flags)", async () => {
+    const logFile = join(tmpdir(), `s3-global-anchor-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(["cp", "./local.txt", "s3://bucket/key"], undefined, binary);
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0);
+    expect(argv).toContain("./local.txt");
+    expect(argv).toContain("s3://bucket/key");
+  });
+
+  /**
+   * PRIMARY REGRESSION — f66878c: --no-cli-pager eats ./local.txt.
+   *
+   * `s3 cp --no-cli-pager ./local.txt s3://bucket/key`
+   *
+   * Pre-fix (f66878c):
+   *   extractPositionals: --no-cli-pager not in S3_BOOL_FLAGS → value flag
+   *   → skip ./local.txt  → positionals = ["s3://bucket/key"]
+   *   → destination=undefined → USAGE_ERROR ← goes RED here
+   *
+   * Post-fix:
+   *   --no-cli-pager in GLOBAL_BOOL_FLAGS → boolean → ./local.txt kept
+   *   → positionals = ["./local.txt", "s3://bucket/key"] → argv[cp+1]="./local.txt" ✅
+   */
+  it("cp --no-cli-pager ./local.txt s3://bucket/key: correct source/dest, flag forwarded", async () => {
+    const logFile = join(tmpdir(), `s3-cp-nopager-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["cp", "--no-cli-pager", "./local.txt", "s3://bucket/key"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0);   // liveness
+    const cpIdx = argv.indexOf("cp");
+    expect(cpIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[cpIdx + 1]).toBe("./local.txt");
+    expect(argv[cpIdx + 2]).toBe("s3://bucket/key");
+    // --no-cli-pager is a global passthrough flag — forwarded verbatim.
+    expect(argv).toContain("--no-cli-pager");
+  });
+
+  /**
+   * --debug: same regression class as --no-cli-pager.
+   *
+   * `s3 cp --debug ./local.txt s3://bucket/key`
+   */
+  it("cp --debug ./local.txt s3://bucket/key: correct source/dest", async () => {
+    const logFile = join(tmpdir(), `s3-cp-debug-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["cp", "--debug", "./local.txt", "s3://bucket/key"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0);
+    const cpIdx = argv.indexOf("cp");
+    expect(argv[cpIdx + 1]).toBe("./local.txt");
+    expect(argv[cpIdx + 2]).toBe("s3://bucket/key");
+    expect(argv).toContain("--debug");
+  });
+
+  /**
+   * --no-paginate: same regression class.
+   *
+   * `s3 rm --no-paginate s3://bucket/key`
+   *
+   * Pre-fix: extractPositionals eats s3://bucket/key → positionals=[] → USAGE_ERROR
+   * Post-fix: --no-paginate is boolean → s3://bucket/key kept → argv[rm+1] correct
+   */
+  it("rm --no-paginate s3://bucket/key: correct target at argv[rm+1]", async () => {
+    const logFile = join(tmpdir(), `s3-rm-nopaginate-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["rm", "--no-paginate", "s3://bucket/key"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0);
+    const rmIdx = argv.indexOf("rm");
+    expect(rmIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[rmIdx + 1]).toBe("s3://bucket/key");
+    expect(argv).toContain("--no-paginate");
+  });
+
+  /**
+   * --no-verify-ssl: same regression class.
+   */
+  it("cp --no-verify-ssl s3://src/file.txt ./out.txt: correct source/dest", async () => {
+    const logFile = join(tmpdir(), `s3-cp-nossl-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["cp", "--no-verify-ssl", "s3://src/file.txt", "./out.txt"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0);
+    const cpIdx = argv.indexOf("cp");
+    expect(argv[cpIdx + 1]).toBe("s3://src/file.txt");
+    expect(argv[cpIdx + 2]).toBe("./out.txt");
+    expect(argv).toContain("--no-verify-ssl");
+  });
+
+  /**
+   * Combined: global bool flag + S3 bool flag together.
+   *
+   * `s3 rm --no-cli-pager --dryrun s3://bucket/key`
+   * → --no-cli-pager = global bool (no eat); --dryrun = S3 bool in S3_BOOL_FLAGS
+   * → positionals = ["s3://bucket/key"]; dryRun=true → --dryrun IS forwarded
+   */
+  it("rm --no-cli-pager --dryrun s3://bucket/key: correct target, both flags forwarded", async () => {
+    const logFile = join(tmpdir(), `s3-rm-nopager-dryrun-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["rm", "--no-cli-pager", "--dryrun", "s3://bucket/key"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0);
+    const rmIdx = argv.indexOf("rm");
+    expect(argv[rmIdx + 1]).toBe("s3://bucket/key");
+    expect(argv).toContain("--no-cli-pager");
+    expect(argv).toContain("--dryrun");
+  });
+});

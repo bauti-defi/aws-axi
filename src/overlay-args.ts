@@ -373,6 +373,10 @@ const BOOL_LITERALS = new Set(["true", "false", "1", "0", "yes", "no"]);
  *   --flag in booleanFlags:
  *       next token is a recognised boolean literal → consume both (skip flag + value)
  *       next token is absent or not a bool literal → skip flag only
+ *   --flag in GLOBAL_BOOL_FLAGS (e.g. --no-cli-pager, --debug, --no-paginate,
+ *       --no-verify-ssl) → boolean: skip flag only, next token is NOT a value.
+ *       Keeping this consistent with collectPassthroughFlags (which already checks
+ *       GLOBAL_BOOL_FLAGS) prevents global flags from eating the next positional.
  *   any other --flag   → value flag: skip it AND the following token
  *   bare token (no --)  → positional: push to result
  *
@@ -389,9 +393,13 @@ const BOOL_LITERALS = new Set(["true", "false", "1", "0", "yes", "no"]);
  * Replaces the identical private copies in `secrets.ts` and `ssm.ts` (the
  * duplication that caused the `s3.ts` call-site to be missed in round-2).
  */
+// Empty-set singleton used as the default when no caller-specific boolean flags exist
+// (e.g. kms/lambda, which have no overlay-specific boolean flags of their own).
+const EMPTY_BOOL_FLAGS: ReadonlySet<string> = new Set<string>();
+
 export function extractPositionals(
   args: readonly string[],
-  booleanFlags: ReadonlySet<string>,
+  booleanFlags: ReadonlySet<string> = EMPTY_BOOL_FLAGS,
 ): string[] {
   const result: string[] = [];
   for (let i = 0; i < args.length; i++) {
@@ -413,6 +421,16 @@ export function extractPositionals(
           i++; // consume the bool value — it is NOT a positional
         }
         // The flag itself is not a positional; continue regardless.
+        continue;
+      }
+      // Global aws CLI boolean flags (e.g. --no-cli-pager, --debug,
+      // --no-paginate, --no-verify-ssl) take no value token.
+      // They are not in the caller-supplied booleanFlags set because the
+      // caller only lists its own overlay-specific boolean flags; but they
+      // must not eat the next positional.  GLOBAL_BOOL_FLAGS is already
+      // maintained for collectPassthroughFlags — reusing it here keeps the
+      // two functions consistent.
+      if (GLOBAL_BOOL_FLAGS.has(arg)) {
         continue;
       }
       // Unknown / value flag: skip this token and the next (the value).
