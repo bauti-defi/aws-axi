@@ -22,6 +22,7 @@ import { writeFileSync, chmodSync, rmSync, mkdtempSync, readFileSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AxiError } from "axi-sdk-js";
+import type { LambdaRunResult, LambdaListResult, LambdaFunctionSummary, LambdaInvokeResult } from "../src/commands/lambda.js";
 import { lambdaRun, lambdaCommand, LAMBDA_HELP } from "../src/commands/lambda.js";
 import { main } from "../src/cli.js";
 
@@ -389,6 +390,23 @@ afterEach(() => {
   }
 });
 
+// ─── Type-narrowing asserts ───────────────────────────────────────────────────
+// `LambdaRunResult` includes `Record<string,unknown>` (the --query passthrough),
+// which defeats TypeScript's `in`-based union narrowing. These assert functions
+// wrap the same runtime guards the tests already use.
+
+function assertFunctions(r: LambdaRunResult): asserts r is { readonly functions: LambdaListResult } {
+  if (!("functions" in r)) throw new Error("wrong discriminant");
+}
+
+function assertFunction(r: LambdaRunResult): asserts r is { readonly function: LambdaFunctionSummary } {
+  if (!("function" in r)) throw new Error("wrong discriminant");
+}
+
+function assertInvocation(r: LambdaRunResult): asserts r is { readonly invocation: LambdaInvokeResult } {
+  if (!("invocation" in r)) throw new Error("wrong discriminant");
+}
+
 // ─── list-functions: happy path ───────────────────────────────────────────────
 
 describe("lambdaRun list-functions — happy path", () => {
@@ -402,7 +420,7 @@ describe("lambdaRun list-functions — happy path", () => {
     });
 
     expect("functions" in result).toBe(true);
-    if (!("functions" in result)) throw new Error("wrong discriminant");
+    assertFunctions(result);
 
     const { functions } = result;
     expect(functions.items).toHaveLength(2);
@@ -419,7 +437,7 @@ describe("lambdaRun list-functions — happy path", () => {
   it("count string shows N total when not truncated", async () => {
     const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO });
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
-    if (!("functions" in result)) throw new Error("wrong discriminant");
+    assertFunctions(result);
 
     expect(result.functions.count).toContain("2");
     expect(result.functions.count).toContain("total");
@@ -437,7 +455,7 @@ describe("lambdaRun list-functions — pagination", () => {
       args: ["--max-items", "1"],
       binary: stub,
     });
-    if (!("functions" in result)) throw new Error("wrong discriminant");
+    assertFunctions(result);
 
     expect(result.functions.nextToken).toBe("AQICAHiGqSomePaginationToken==");
     expect(result.functions.count).toContain("truncated");
@@ -482,7 +500,7 @@ describe("lambdaRun list-functions — pagination", () => {
       args: ["--next-token", "AQICAHiGqSomePaginationToken=="],
       binary: stub,
     });
-    if (!("functions" in result)) throw new Error("wrong discriminant");
+    assertFunctions(result);
     expect(result.functions.items).toHaveLength(2);
   });
 });
@@ -493,7 +511,7 @@ describe("lambdaRun list-functions — empty state", () => {
   it("returns a definitive empty state with guidance", async () => {
     const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_EMPTY });
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
-    if (!("functions" in result)) throw new Error("wrong discriminant");
+    assertFunctions(result);
 
     expect(result.functions.items).toHaveLength(0);
     expect(result.functions.count).toBe("0 total");
@@ -509,7 +527,7 @@ describe("lambdaRun list-functions — enrichment", () => {
       listFunctions: LIST_FUNCTIONS_TWO,
     });
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
-    if (!("functions" in result)) throw new Error("wrong discriminant");
+    assertFunctions(result);
 
     const fn1 = result.functions.items.find((f) => f.name === FN_NAME);
     // Role name should be extracted from the ARN (last path segment)
@@ -523,7 +541,7 @@ describe("lambdaRun list-functions — enrichment", () => {
       describeSubnets: SUBNET_RESPONSE,
     });
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
-    if (!("functions" in result)) throw new Error("wrong discriminant");
+    assertFunctions(result);
 
     const fn1 = result.functions.items.find((f) => f.name === FN_NAME);
     expect(fn1?.vpc).toBeDefined();
@@ -538,7 +556,7 @@ describe("lambdaRun list-functions — enrichment", () => {
       kmsListAliases: KMS_LIST_ALIASES,
     });
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
-    if (!("functions" in result)) throw new Error("wrong discriminant");
+    assertFunctions(result);
 
     const fn1 = result.functions.items.find((f) => f.name === FN_NAME);
     expect(fn1?.kmsAlias).toBe("alias/my-lambda-key");
@@ -550,7 +568,7 @@ describe("lambdaRun list-functions — enrichment", () => {
       logsDescribeLogGroups: LOG_GROUP_RESPONSE,
     });
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
-    if (!("functions" in result)) throw new Error("wrong discriminant");
+    assertFunctions(result);
 
     const fn1 = result.functions.items.find((f) => f.name === FN_NAME);
     // logGroup should be the resolved name (trimmed of ARN noise)
@@ -564,7 +582,7 @@ describe("lambdaRun list-functions — enrichment", () => {
       // No SG/subnet enrichment stubs → fall back to error / null
     });
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
-    if (!("functions" in result)) throw new Error("wrong discriminant");
+    assertFunctions(result);
 
     // Must NOT throw even when enrichment fails
     expect(result.functions.items).toHaveLength(2);
@@ -594,7 +612,7 @@ describe("lambdaRun get-function — happy path", () => {
     });
 
     expect("function" in result).toBe(true);
-    if (!("function" in result)) throw new Error("wrong discriminant");
+    assertFunction(result);
 
     const { function: fn } = result;
     expect(fn.name).toBe(FN_NAME);
@@ -631,7 +649,7 @@ describe("lambdaRun get-function-configuration — happy path", () => {
     });
 
     expect("function" in result).toBe(true);
-    if (!("function" in result)) throw new Error("wrong discriminant");
+    assertFunction(result);
 
     const { function: fn } = result;
     expect(fn.name).toBe(FN_NAME);
@@ -662,7 +680,7 @@ describe("lambdaRun invoke — success", () => {
     });
 
     expect("invocation" in result).toBe(true);
-    if (!("invocation" in result)) throw new Error("wrong discriminant");
+    assertInvocation(result);
 
     const { invocation } = result;
     expect(invocation.statusCode).toBe(200);
@@ -683,7 +701,7 @@ describe("lambdaRun invoke — success", () => {
       args: ["--function-name", FN_NAME, "--payload", '{"key":"value"}'],
       binary: stub,
     });
-    if (!("invocation" in result)) throw new Error("wrong discriminant");
+    assertInvocation(result);
     expect(result.invocation.statusCode).toBe(200);
   });
 });
@@ -702,7 +720,7 @@ describe("lambdaRun invoke — FunctionError", () => {
       binary: stub,
     });
 
-    if (!("invocation" in result)) throw new Error("wrong discriminant");
+    assertInvocation(result);
     const { invocation } = result;
     expect(invocation.statusCode).toBe(200);
     expect(invocation.functionError).toBe("Unhandled");
@@ -1105,7 +1123,7 @@ describe("lambdaRun get-function — global bool flag does not eat function name
     });
 
     expect("function" in result).toBe(true);
-    if (!("function" in result)) throw new Error("wrong discriminant");
+    assertFunction(result);
     expect(result.function.name).toBe(FN_NAME);
   });
 });

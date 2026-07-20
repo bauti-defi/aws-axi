@@ -12,6 +12,12 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import type {
+  SecretsRunResult,
+  SecretsGetValueResult,
+  SecretsListResult,
+  SecretsDetailResult,
+} from "../src/commands/secrets.js";
 import { secretsRun, secretsCommand } from "../src/commands/secrets.js";
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
@@ -191,6 +197,23 @@ function leaksValue(result: unknown, secret: string): boolean {
   return JSON.stringify(result).includes(secret);
 }
 
+// ─── Type-narrowing asserts ───────────────────────────────────────────────────
+// `SecretsRunResult` includes `Record<string,unknown>` (the --query passthrough),
+// which defeats TypeScript's `in`-based union narrowing. These assert functions
+// wrap the same runtime guards the tests already use.
+
+function assertSecret(r: SecretsRunResult): asserts r is { readonly secret: SecretsGetValueResult; readonly suggestion?: string } {
+  if (!("secret" in r)) throw new Error("wrong discriminant");
+}
+
+function assertSecretList(r: SecretsRunResult): asserts r is { readonly secretList: SecretsListResult } {
+  if (!("secretList" in r)) throw new Error("wrong discriminant");
+}
+
+function assertSecretDetail(r: SecretsRunResult): asserts r is { readonly secretDetail: SecretsDetailResult } {
+  if (!("secretDetail" in r)) throw new Error("wrong discriminant");
+}
+
 // ─── get-secret-value — redaction ────────────────────────────────────────────
 
 describe("secretsRun get-secret-value — default REDACTS the secret", () => {
@@ -212,7 +235,7 @@ describe("secretsRun get-secret-value — default REDACTS the secret", () => {
     expect(leaksValue(result, SECRET_VALUE)).toBe(false);
 
     expect("secret" in result).toBe(true);
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect(result.secret.name).toBe(SECRET_NAME);
     expect(result.secret.secretValue).toBe("<redacted>");
   });
@@ -231,7 +254,7 @@ describe("secretsRun get-secret-value — default REDACTS the secret", () => {
       binary: stub,
     });
 
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect(result.secret.arn).toBe(SECRET_ARN);
     expect(result.secret.versionId).toBe(SECRET_VERSION_ID);
     expect(result.secret.versionStages).toContain("AWSCURRENT");
@@ -252,7 +275,7 @@ describe("secretsRun get-secret-value — default REDACTS the secret", () => {
       binary: stub,
     });
 
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect(result.secret.kmsKeyAlias).toBe(KMS_KEY_ALIAS);
   });
 
@@ -270,7 +293,7 @@ describe("secretsRun get-secret-value — default REDACTS the secret", () => {
       binary: stub,
     });
 
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect(result.suggestion).toBeTruthy();
     expect(result.suggestion).toContain("--reveal");
   });
@@ -293,7 +316,7 @@ describe("secretsRun get-secret-value — default REDACTS the secret", () => {
       binary: stub,
     });
 
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     // Still present, just no alias
     expect(result.secret.name).toBe(SECRET_NAME);
     // Value still redacted even when enrichment fails
@@ -316,7 +339,7 @@ describe("secretsRun get-secret-value --reveal — shows the actual secret", () 
       binary: stub,
     });
 
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect(result.secret.secretValue).toBe(SECRET_VALUE);
     expect(result.suggestion).toBeUndefined();
   });
@@ -347,7 +370,7 @@ describe("secretsRun get-secret-value --reveal value matrix (redaction-bypass fi
     });
   }
 
-  async function getWithFlag(flag: string): Promise<unknown> {
+  async function getWithFlag(flag: string): Promise<SecretsRunResult> {
     return secretsRun({
       subcommand: "get-secret-value",
       args: [flag, SECRET_NAME],
@@ -360,7 +383,7 @@ describe("secretsRun get-secret-value --reveal value matrix (redaction-bypass fi
   it("--reveal=false REDACTS — was leaking before fix", async () => {
     const result = await getWithFlag("--reveal=false");
     expect(leaksValue(result, SECRET_VALUE)).toBe(false);
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
       "<redacted>",
     );
@@ -369,7 +392,7 @@ describe("secretsRun get-secret-value --reveal value matrix (redaction-bypass fi
   it("--reveal=0 REDACTS", async () => {
     const result = await getWithFlag("--reveal=0");
     expect(leaksValue(result, SECRET_VALUE)).toBe(false);
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
       "<redacted>",
     );
@@ -378,7 +401,7 @@ describe("secretsRun get-secret-value --reveal value matrix (redaction-bypass fi
   it("--reveal=no REDACTS", async () => {
     const result = await getWithFlag("--reveal=no");
     expect(leaksValue(result, SECRET_VALUE)).toBe(false);
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
       "<redacted>",
     );
@@ -387,7 +410,7 @@ describe("secretsRun get-secret-value --reveal value matrix (redaction-bypass fi
   it("--reveal=garbage REDACTS (fail-safe: unrecognised value → redact)", async () => {
     const result = await getWithFlag("--reveal=garbage");
     expect(leaksValue(result, SECRET_VALUE)).toBe(false);
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
       "<redacted>",
     );
@@ -396,7 +419,7 @@ describe("secretsRun get-secret-value --reveal value matrix (redaction-bypass fi
   it("--reveal=off REDACTS (fail-safe)", async () => {
     const result = await getWithFlag("--reveal=off");
     expect(leaksValue(result, SECRET_VALUE)).toBe(false);
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
       "<redacted>",
     );
@@ -405,7 +428,7 @@ describe("secretsRun get-secret-value --reveal value matrix (redaction-bypass fi
   it("--reveal= (empty) REDACTS (fail-safe)", async () => {
     const result = await getWithFlag("--reveal=");
     expect(leaksValue(result, SECRET_VALUE)).toBe(false);
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
       "<redacted>",
     );
@@ -415,7 +438,7 @@ describe("secretsRun get-secret-value --reveal value matrix (redaction-bypass fi
 
   it("--reveal=true still REVEALS (unaffected by fix)", async () => {
     const result = await getWithFlag("--reveal=true");
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
       SECRET_VALUE,
     );
@@ -423,7 +446,7 @@ describe("secretsRun get-secret-value --reveal value matrix (redaction-bypass fi
 
   it("--reveal=1 still REVEALS", async () => {
     const result = await getWithFlag("--reveal=1");
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
       SECRET_VALUE,
     );
@@ -431,7 +454,7 @@ describe("secretsRun get-secret-value --reveal value matrix (redaction-bypass fi
 
   it("--reveal=yes still REVEALS", async () => {
     const result = await getWithFlag("--reveal=yes");
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(
       SECRET_VALUE,
     );
@@ -474,7 +497,7 @@ describe("secretsRun get-secret-value — errors", () => {
       binary: stub,
     });
 
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect(result.secret.name).toBe(SECRET_NAME);
   });
 });
@@ -495,7 +518,7 @@ describe("secretsRun list-secrets — curated list with KMS alias enrichment", (
       binary: stub,
     });
 
-    if (!("secretList" in result)) throw new Error("wrong discriminant");
+    assertSecretList(result);
     const withKms = result.secretList.secrets.find((s) => s.name === SECRET_NAME);
     expect(withKms?.kmsKeyAlias).toBe(KMS_KEY_ALIAS);
 
@@ -517,7 +540,7 @@ describe("secretsRun list-secrets — curated list with KMS alias enrichment", (
       binary: stub,
     });
 
-    if (!("secretList" in result)) throw new Error("wrong discriminant");
+    assertSecretList(result);
     expect(result.secretList.count).toContain("2");
     expect(result.secretList.count).toContain("total");
   });
@@ -535,7 +558,7 @@ describe("secretsRun list-secrets — curated list with KMS alias enrichment", (
       binary: stub,
     });
 
-    if (!("secretList" in result)) throw new Error("wrong discriminant");
+    assertSecretList(result);
     expect(result.secretList.nextToken).toBe("AQECAHiGqSecretsToken==");
     expect(result.secretList.count).toContain("truncated");
   });
@@ -551,7 +574,7 @@ describe("secretsRun list-secrets — curated list with KMS alias enrichment", (
       binary: stub,
     });
 
-    if (!("secretList" in result)) throw new Error("wrong discriminant");
+    assertSecretList(result);
     expect(result.secretList.secrets).toHaveLength(0);
     expect(result.secretList.message).toBeTruthy();
     expect(result.secretList.suggestion).toBeTruthy();
@@ -574,7 +597,7 @@ describe("secretsRun list-secrets — curated list with KMS alias enrichment", (
       binary: stub,
     });
 
-    if (!("secretList" in result)) throw new Error("wrong discriminant");
+    assertSecretList(result);
     expect(result.secretList.secrets).toHaveLength(2);
     // Alias may be undefined or raw keyId — not the resolved alias
     const withKms = result.secretList.secrets.find((s) => s.name === SECRET_NAME);
@@ -598,7 +621,7 @@ describe("secretsRun describe-secret — curated detail with KMS alias", () => {
       binary: stub,
     });
 
-    if (!("secretDetail" in result)) throw new Error("wrong discriminant");
+    assertSecretDetail(result);
     expect(result.secretDetail.name).toBe(SECRET_NAME);
     expect(result.secretDetail.arn).toBe(SECRET_ARN);
     expect(result.secretDetail.description).toBe("Production DB password");
@@ -618,7 +641,7 @@ describe("secretsRun describe-secret — curated detail with KMS alias", () => {
       binary: stub,
     });
 
-    if (!("secretDetail" in result)) throw new Error("wrong discriminant");
+    assertSecretDetail(result);
     expect(result.secretDetail.kmsKeyAlias).toBeUndefined();
   });
 
@@ -643,7 +666,7 @@ describe("secretsRun describe-secret — curated detail with KMS alias", () => {
       binary: stub,
     });
 
-    if (!("secretDetail" in result)) throw new Error("wrong discriminant");
+    assertSecretDetail(result);
     expect(result.secretDetail.name).toBe(SECRET_NAME);
   });
 });
@@ -683,7 +706,7 @@ describe("secretsRun get-secret-value — two-arg --reveal false (round-2 fix)",
       binary: stubForReveal(),
     });
     expect(leaksValue(result, SECRET_VALUE)).toBe(false);
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe("<redacted>");
   });
 
@@ -694,7 +717,7 @@ describe("secretsRun get-secret-value — two-arg --reveal false (round-2 fix)",
       binary: stubForReveal(),
     });
     expect(leaksValue(result, SECRET_VALUE)).toBe(false);
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe("<redacted>");
   });
 
@@ -705,7 +728,7 @@ describe("secretsRun get-secret-value — two-arg --reveal false (round-2 fix)",
       binary: stubForReveal(),
     });
     expect(leaksValue(result, SECRET_VALUE)).toBe(false);
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe("<redacted>");
   });
 
@@ -717,7 +740,7 @@ describe("secretsRun get-secret-value — two-arg --reveal false (round-2 fix)",
       args: [SECRET_NAME, "--reveal", "true"],
       binary: stubForReveal(),
     });
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(SECRET_VALUE);
   });
 
@@ -727,7 +750,7 @@ describe("secretsRun get-secret-value — two-arg --reveal false (round-2 fix)",
       args: [SECRET_NAME, "--reveal", "1"],
       binary: stubForReveal(),
     });
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     expect((result as { secret: { secretValue: string } }).secret.secretValue).toBe(SECRET_VALUE);
   });
 
@@ -743,7 +766,7 @@ describe("secretsRun get-secret-value — two-arg --reveal false (round-2 fix)",
       binary: stubForReveal(),
     });
     expect(leaksValue(result, SECRET_VALUE)).toBe(false);
-    if (!("secret" in result)) throw new Error("wrong discriminant");
+    assertSecret(result);
     // Name should be the real SECRET_NAME, not "false"
     expect((result as { secret: { name: string } }).secret.name).toBe(SECRET_NAME);
   });

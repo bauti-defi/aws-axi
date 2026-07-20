@@ -11,6 +11,7 @@ import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AxiError } from "axi-sdk-js";
+import type { KmsListKeysResult, KmsListAliasesResult, KmsKeyDetail, KmsKeyPolicy } from "../src/commands/kms.js";
 import { kmsRun, kmsCommand } from "../src/commands/kms.js";
 import { resolveKey, loadAliasMap } from "../src/resolve/key.js";
 
@@ -335,8 +336,9 @@ describe("kmsRun list-keys — happy path", () => {
 
     expect("listKeys" in result).toBe(true);
     if (!("listKeys" in result)) throw new Error("wrong discriminant");
-
-    const { listKeys } = result;
+    // `KmsRunResult` includes `Record<string,unknown>` (--query path) which defeats `in`
+    // narrowing; the runtime guard above proves this branch is the typed variant.
+    const { listKeys } = result as { readonly listKeys: KmsListKeysResult };
     expect(listKeys.keys).toHaveLength(2);
 
     const key1 = listKeys.keys.find((k) => k.keyId === KEY_ID_1);
@@ -355,10 +357,10 @@ describe("kmsRun list-keys — happy path", () => {
 
     const result = await kmsRun({ subcommand: "list-keys", args: [], binary: stub });
     if (!("listKeys" in result)) throw new Error("wrong discriminant");
-
-    expect(result.listKeys.count).toContain("2");
-    expect(result.listKeys.count).toContain("total");
-    expect(result.listKeys.nextToken).toBeUndefined();
+    const { listKeys } = result as { readonly listKeys: KmsListKeysResult };
+    expect(listKeys.count).toContain("2");
+    expect(listKeys.count).toContain("total");
+    expect(listKeys.nextToken).toBeUndefined();
   });
 });
 
@@ -371,10 +373,10 @@ describe("kmsRun list-keys — empty state", () => {
 
     const result = await kmsRun({ subcommand: "list-keys", args: [], binary: stub });
     if (!("listKeys" in result)) throw new Error("wrong discriminant");
-
-    expect(result.listKeys.keys).toHaveLength(0);
-    expect(result.listKeys.message).toBeTruthy();
-    expect(result.listKeys.suggestion).toBeTruthy();
+    const { listKeys } = result as { readonly listKeys: KmsListKeysResult };
+    expect(listKeys.keys).toHaveLength(0);
+    expect(listKeys.message).toBeTruthy();
+    expect(listKeys.suggestion).toBeTruthy();
   });
 });
 
@@ -391,10 +393,10 @@ describe("kmsRun list-keys — pagination", () => {
       binary: stub,
     });
     if (!("listKeys" in result)) throw new Error("wrong discriminant");
-
-    expect(result.listKeys.nextToken).toBe("AQECAHiGqSomeToken==");
-    expect(result.listKeys.count).toContain("truncated");
-    expect(result.listKeys.count).toContain("AQECAHiGqSomeToken==");
+    const { listKeys } = result as { readonly listKeys: KmsListKeysResult };
+    expect(listKeys.nextToken).toBe("AQECAHiGqSomeToken==");
+    expect(listKeys.count).toContain("truncated");
+    expect(listKeys.count).toContain("AQECAHiGqSomeToken==");
   });
 
   it("passes --max-items to aws cli (defaults to 50)", async () => {
@@ -437,8 +439,7 @@ describe("kmsRun list-aliases — happy path", () => {
 
     expect("listAliases" in result).toBe(true);
     if (!("listAliases" in result)) throw new Error("wrong discriminant");
-
-    const { listAliases } = result;
+    const { listAliases } = result as { readonly listAliases: KmsListAliasesResult };
     expect(listAliases.aliases.length).toBeGreaterThanOrEqual(1);
 
     const appAlias = listAliases.aliases.find(
@@ -452,8 +453,8 @@ describe("kmsRun list-aliases — happy path", () => {
     const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO });
     const result = await kmsRun({ subcommand: "list-aliases", args: [], binary: stub });
     if (!("listAliases" in result)) throw new Error("wrong discriminant");
-
-    expect(result.listAliases.count).toContain("total");
+    const { listAliases } = result as { readonly listAliases: KmsListAliasesResult };
+    expect(listAliases.count).toContain("total");
   });
 });
 
@@ -462,9 +463,9 @@ describe("kmsRun list-aliases — empty state", () => {
     const stub = createKmsStub({ listAliases: LIST_ALIASES_EMPTY });
     const result = await kmsRun({ subcommand: "list-aliases", args: [], binary: stub });
     if (!("listAliases" in result)) throw new Error("wrong discriminant");
-
-    expect(result.listAliases.aliases).toHaveLength(0);
-    expect(result.listAliases.message).toBeTruthy();
+    const { listAliases } = result as { readonly listAliases: KmsListAliasesResult };
+    expect(listAliases.aliases).toHaveLength(0);
+    expect(listAliases.message).toBeTruthy();
   });
 });
 
@@ -486,8 +487,7 @@ describe("kmsRun describe-key — happy path", () => {
 
     expect("key" in result).toBe(true);
     if (!("key" in result)) throw new Error("wrong discriminant");
-
-    const { key } = result;
+    const { key } = result as { readonly key: KmsKeyDetail };
     expect(key.keyId).toBe(KEY_ID_1);
     expect(key.arn).toBe(KEY_ARN_1);
     expect(key.alias).toBe(KEY_ALIAS_1);
@@ -512,7 +512,7 @@ describe("kmsRun describe-key — happy path", () => {
     });
 
     if (!("key" in result)) throw new Error("wrong discriminant");
-    expect(result.key.keyId).toBe(KEY_ID_1);
+    expect((result as { readonly key: KmsKeyDetail }).key.keyId).toBe(KEY_ID_1);
   });
 });
 
@@ -569,7 +569,7 @@ describe("kmsRun describe-key — global bool flag does not eat key positional",
 
     expect("key" in result).toBe(true);
     if (!("key" in result)) throw new Error("wrong discriminant");
-    expect(result.key.keyId).toBe(KEY_ID_1);
+    expect((result as { readonly key: KmsKeyDetail }).key.keyId).toBe(KEY_ID_1);
   });
 
   it("--debug before key id: resolves key correctly (not USAGE_ERROR)", async () => {
@@ -605,8 +605,7 @@ describe("kmsRun get-key-policy — happy path", () => {
 
     expect("keyPolicy" in result).toBe(true);
     if (!("keyPolicy" in result)) throw new Error("wrong discriminant");
-
-    const { keyPolicy } = result;
+    const { keyPolicy } = result as { readonly keyPolicy: KmsKeyPolicy };
     expect(keyPolicy.keyId).toBe(KEY_ID_1);
     expect(keyPolicy.policyName).toBe("default");
     // Policy should be parsed object, not a raw JSON string
@@ -626,7 +625,7 @@ describe("kmsRun get-key-policy — happy path", () => {
     });
 
     if (!("keyPolicy" in result)) throw new Error("wrong discriminant");
-    expect(result.keyPolicy.policyName).toBe("custom");
+    expect((result as { readonly keyPolicy: KmsKeyPolicy }).keyPolicy.policyName).toBe("custom");
   });
 
   it("requires a key identifier", async () => {
@@ -717,7 +716,7 @@ describe("kmsRun list-keys — --flag=value form", () => {
       binary: stub,
     });
     if (!("listKeys" in result)) throw new Error("wrong discriminant");
-    expect(result.listKeys.keys).toHaveLength(2);
+    expect((result as { readonly listKeys: KmsListKeysResult }).listKeys.keys).toHaveLength(2);
   });
 
   it("--policy-name=custom is respected in get-key-policy", async () => {
@@ -730,7 +729,7 @@ describe("kmsRun list-keys — --flag=value form", () => {
     });
 
     if (!("keyPolicy" in result)) throw new Error("wrong discriminant");
-    expect(result.keyPolicy.policyName).toBe("custom");
+    expect((result as { readonly keyPolicy: KmsKeyPolicy }).keyPolicy.policyName).toBe("custom");
   });
 });
 
@@ -758,10 +757,10 @@ describe("kmsRun list-keys — alias-map AccessDenied degrades gracefully", () =
 
     expect("listKeys" in result).toBe(true);
     if (!("listKeys" in result)) throw new Error("wrong discriminant");
-
+    const { listKeys } = result as { readonly listKeys: KmsListKeysResult };
     // Both keys present, all with alias=undefined (degraded, not errored)
-    expect(result.listKeys.keys).toHaveLength(2);
-    for (const key of result.listKeys.keys) {
+    expect(listKeys.keys).toHaveLength(2);
+    for (const key of listKeys.keys) {
       expect(key.alias).toBeUndefined();
     }
   });
@@ -787,8 +786,9 @@ describe("kmsRun get-key-policy — non-JSON Policy fallback", () => {
     });
 
     if (!("keyPolicy" in result)) throw new Error("wrong discriminant");
+    const { keyPolicy } = result as { readonly keyPolicy: KmsKeyPolicy };
     // policy falls back to the raw string
-    expect(typeof result.keyPolicy.policy).toBe("string");
-    expect(result.keyPolicy.policy).toBe("this-is-not-json { broken");
+    expect(typeof keyPolicy.policy).toBe("string");
+    expect(keyPolicy.policy).toBe("this-is-not-json { broken");
   });
 });

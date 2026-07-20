@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AxiError } from "axi-sdk-js";
 
+import type { TailResult, LogGroupsResult } from "../src/commands/logs.js";
 import {
   parseSince,
   tailRun,
@@ -262,11 +263,13 @@ describe("tailRun — happy path (events < cap)", () => {
   it("returns projected events with ISO timestamps", async () => {
     const stub = createStub({ stdout: buildEventsJson(3), exitCode: 0 });
 
+    // tailRun returns TailResult | Record<string,unknown> (--query path);
+    // tests that don't pass --query always receive TailResult.
     const result = await tailRun({
       logGroupName: "/aws/lambda/my-function",
       since: "15m",
       binary: stub,
-    });
+    }) as TailResult;
 
     expect(result.logGroup).toBe("/aws/lambda/my-function");
     expect(result.events).toHaveLength(3);
@@ -288,7 +291,7 @@ describe("tailRun — happy path (events < cap)", () => {
       logGroupName: "/aws/lambda/fn",
       since: "1h",
       binary: stub,
-    });
+    }) as TailResult;
 
     expect(result.window.since).toMatch(/^\d{4}-/);
     expect(result.window.until).toMatch(/^\d{4}-/);
@@ -411,7 +414,9 @@ describe("describeLogGroupsRun — happy path", () => {
   it("projects log groups to curated TOON shape", async () => {
     const stub = createStub({ stdout: buildLogGroupsJson(3), exitCode: 0 });
 
-    const result = await describeLogGroupsRun({ binary: stub });
+    // describeLogGroupsRun returns LogGroupsResult | Record<string,unknown> (--query);
+    // tests without --query always receive LogGroupsResult.
+    const result = await describeLogGroupsRun({ binary: stub }) as LogGroupsResult;
 
     expect(result.logGroups).toHaveLength(3);
     expect(result.logGroups[0]?.name).toBe("/aws/lambda/function-1");

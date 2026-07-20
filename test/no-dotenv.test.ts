@@ -65,10 +65,7 @@ afterEach(() => {
 
 describe("dist/bin/aws-axi launcher contract", () => {
   it("launcher exists (requires `bun run build` to have run first)", () => {
-    expect(existsSync(LAUNCHER)).toBe(
-      true,
-      "dist/bin/aws-axi does not exist — run `bun run build` first",
-    );
+    expect(existsSync(LAUNCHER), "dist/bin/aws-axi does not exist — run `bun run build` first").toBe(true);
   });
 
   it('first line is exactly "#!/bin/sh"', () => {
@@ -79,18 +76,12 @@ describe("dist/bin/aws-axi launcher contract", () => {
 
   it("has the owner-execute bit set", () => {
     const mode = statSync(LAUNCHER).mode;
-    expect(!!(mode & 0o100)).toBe(
-      true,
-      `dist/bin/aws-axi is not executable (mode 0${(mode & 0o777).toString(8)})`,
-    );
+    expect(!!(mode & 0o100), `dist/bin/aws-axi is not executable (mode 0${(mode & 0o777).toString(8)})`).toBe(true);
   });
 
   it("contains --no-env-file (the .env isolation guard)", () => {
     const contents = readFileSync(LAUNCHER, "utf-8");
-    expect(contents).toContain(
-      "--no-env-file",
-      "launcher is missing --no-env-file — cwd .env files would silently leak into aws calls",
-    );
+    expect(contents, "launcher is missing --no-env-file — cwd .env files would silently leak into aws calls").toContain("--no-env-file");
   });
 });
 
@@ -168,22 +159,22 @@ describe("process isolation — cwd .env must not reach the child aws process", 
     // aws-axi exited before ever invoking `aws`.  That is a test bug or a
     // change to the whoami flow, not a success.
     const sentinelExists = existsSync(sentinelFile);
-    expect(sentinelExists).toBe(
-      true,
+    expect(
+      sentinelExists,
       `Sentinel file was not written — the stub aws was never invoked.\n` +
         `  launcher exit code: ${result.status ?? "null"}\n` +
         `  launcher stdout: ${result.stdout.trim()}\n` +
         `  launcher stderr: ${result.stderr.trim()}`,
-    );
+    ).toBe(true);
 
     const sentinel = readFileSync(sentinelFile, "utf-8");
 
     // Core assertion: the canary must be absent from the child's env.
     // If it appears here, the launcher is not passing --no-env-file to Bun.
-    expect(sentinel).toBe(
-      "",
+    expect(
+      sentinel,
       `AXI_CANARY leaked into the child process env (sentinel = "${sentinel}").\n` +
         `The launcher is NOT suppressing .env auto-load — check that it passes --no-env-file to Bun.`,
-    );
+    ).toBe("");
   });
 });
