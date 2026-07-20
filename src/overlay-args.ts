@@ -433,6 +433,17 @@ export function extractPositionals(
       if (GLOBAL_BOOL_FLAGS.has(arg)) {
         continue;
       }
+      // POSIX end-of-options separator: forward to child (collectPassthroughFlags
+      // will keep it in passthrough since it is not in owned/bools), but do NOT
+      // consume the following token as a "value". Without this guard, `--` hits
+      // the unknown/value-flag branch below and the `i++` silently eats the next
+      // positional — converting `s3 cp -- ./local.txt s3://bucket/key` into a
+      // USAGE_ERROR (no destination). This maintains ADR-0002's superset contract:
+      // real `aws` 2.33.13 accepts `--` and processes through; base (52fc4ce)
+      // forwarded it verbatim.
+      if (arg === "--") {
+        continue;
+      }
       // Unknown / value flag: skip this token and the next (the value).
       i++;
       continue;

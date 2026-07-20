@@ -638,3 +638,289 @@ describe("wire: s3 cp/rm — global aws bool flags do not eat S3 URI positionals
     expect(argv).toContain("--dryrun");
   });
 });
+
+// ---------------------------------------------------------------------------
+// s3 cp / rm — POSIX `--` end-of-options separator
+//
+// Bug (9cdf100): `"--"` satisfies `arg.startsWith("--")`, is not in
+// booleanFlags / GLOBAL_BOOL_FLAGS, and contains no `=`, so it falls into
+// the "Unknown / value flag" branch of extractPositionals and the `i++`
+// swallows the immediately following token.
+//
+//   s3 cp -- ./local.txt s3://bucket/key
+//     [9cdf100] exit=252  child: (none)   ← token after -- eaten as "value"
+//     [fixed]   exit=0    child: s3 cp ./local.txt s3://bucket/key -- …
+//
+// Fix: `if (arg === "--") continue;` before the unknown/value-flag branch —
+// skip the separator itself without consuming what follows.
+//
+// Forward vs drop (ADR-0002 superset contract):
+//   Real `aws` 2.33.13 accepts `--` and processes through. Base (52fc4ce)
+//   forwarded it verbatim to the child. Forwarding is required to maintain
+//   strict-superset input semantics: the child must see the same argv that
+//   the user expressed. `--` is kept in passthrough via collectPassthroughFlags
+//   (it is not in owned/bools, so it is pushed to out).
+//
+// RED proof: every test in this describe goes RED on 9cdf100.
+//   anchor passes (baseline without --), but all `--`-bearing tests fail:
+//     - primary bug: USAGE_ERROR (no child invoked → liveness assertion fails)
+//     - regression guard: positional at wrong position → position assertion fails
+// ---------------------------------------------------------------------------
+
+describe("wire: s3 cp/rm — POSIX `--` end-of-options separator: forwarded, does not eat next token", () => {
+  /**
+   * Liveness anchor: no `--` — stub must be invoked and log written.
+   */
+  it("anchor: stub IS invoked for s3 cp baseline (no --)", async () => {
+    const logFile = join(tmpdir(), `s3-eoo-anchor-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(["cp", "./local.txt", "s3://bucket/key"], undefined, binary);
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0); // harness is alive
+    expect(argv).toContain("./local.txt");
+    expect(argv).toContain("s3://bucket/key");
+  });
+
+  /**
+   * PRIMARY BUG — cp ordering 1: `--` before positionals.
+   *
+   * `s3 cp -- ./local.txt s3://bucket/key`
+   *
+   * Pre-fix (9cdf100):
+   *   `--` hits unknown/value-flag branch → i++ eats `./local.txt`
+   *   extractPositionals returns ["s3://bucket/key"]
+   *   source="s3://bucket/key", destination=undefined → USAGE_ERROR (exit 252)
+   *   child is never invoked → log absent → liveness assertion: FAIL 🔴
+   *
+   * Post-fix:
+   *   `if (arg === "--") continue;` skips `--` without consuming `./local.txt`
+   *   extractPositionals returns ["./local.txt", "s3://bucket/key"]
+   *   source="./local.txt", destination="s3://bucket/key" ✅
+   *   `--` forwarded to child via collectPassthroughFlags ✅
+   */
+  it("cp -- <src> <dst>: source/dest correct, -- forwarded to child", async () => {
+    const logFile = join(tmpdir(), `s3-cp-eoo-before-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["cp", "--", "./local.txt", "s3://bucket/key"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0); // liveness
+    const cpIdx = argv.indexOf("cp");
+    expect(cpIdx).toBeGreaterThanOrEqual(0);
+    // Source must be the local path, NOT undefined (USAGE_ERROR) or the S3 URI.
+    expect(argv[cpIdx + 1]).toBe("./local.txt");
+    // Destination must follow source.
+    expect(argv[cpIdx + 2]).toBe("s3://bucket/key");
+    // -- must be forwarded to child (superset contract / base behaviour).
+    expect(argv).toContain("--");
+  });
+
+  /**
+   * Ordering 2: `--` after positionals (regression guard).
+   *
+   * `s3 cp ./local.txt s3://bucket/key --`
+   *
+   * Pre-fix: `--` is at the end; no token follows → i++ goes past end of
+   * array harmlessly. Positionals are correct (accidentally). But `--` is
+   * NOT forwarded to the child — it is consumed as a "value" of… nothing.
+   * This test pins that after the fix `--` IS forwarded.
+   *
+   * Note: the test goes RED on 9cdf100 because `argv.toContain("--")`
+   * fails — the current code eats `--` as a "value" sentinel (i++ on empty
+   * tail) and it is lost before reaching collectPassthroughFlags.
+   * (The positional positions are accidentally correct so cpIdx+1/+2 pass.)
+   */
+  it("cp <src> <dst> --: source/dest correct, -- forwarded to child", async () => {
+    const logFile = join(tmpdir(), `s3-cp-eoo-after-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["cp", "./local.txt", "s3://bucket/key", "--"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0);
+    const cpIdx = argv.indexOf("cp");
+    expect(cpIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[cpIdx + 1]).toBe("./local.txt");
+    expect(argv[cpIdx + 2]).toBe("s3://bucket/key");
+    // -- must be forwarded to child.
+    expect(argv).toContain("--");
+  });
+
+  /**
+   * rm: `--` before positional.
+   *
+   * `s3 rm -- s3://bucket/key`
+   *
+   * Pre-fix (9cdf100): `--` eats `s3://bucket/key` → positionals=[] →
+   * USAGE_ERROR → child never invoked → liveness FAIL 🔴
+   *
+   * Post-fix: positionals=["s3://bucket/key"], -- forwarded ✅
+   */
+  it("rm -- <uri>: target correct at argv[rm+1], -- forwarded to child", async () => {
+    const logFile = join(tmpdir(), `s3-rm-eoo-before-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["rm", "--", "s3://bucket/key"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0); // liveness
+    const rmIdx = argv.indexOf("rm");
+    expect(rmIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[rmIdx + 1]).toBe("s3://bucket/key");
+    expect(argv).toContain("--");
+  });
+
+  /**
+   * rm: `--` after positional (regression guard — -- forwarded).
+   *
+   * Pre-fix: positional is correct (accidentally) but -- not forwarded.
+   * Goes RED on 9cdf100 via the `toContain("--")` assertion.
+   */
+  it("rm <uri> --: target correct, -- forwarded to child", async () => {
+    const logFile = join(tmpdir(), `s3-rm-eoo-after-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["rm", "s3://bucket/key", "--"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0);
+    const rmIdx = argv.indexOf("rm");
+    expect(rmIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[rmIdx + 1]).toBe("s3://bucket/key");
+    expect(argv).toContain("--");
+  });
+
+  /**
+   * Interaction: `--` combined with `--dryrun` (boolean flag).
+   *
+   * `s3 cp --dryrun false -- ./local.txt s3://bucket/key`
+   *
+   * Pre-fix (9cdf100):
+   *   --dryrun + false consumed (i=0→1, skip both) → i=2 at top-of-loop
+   *   `--` at i=2: unknown/value-flag → i++ eats `./local.txt` → i=4 at top
+   *   `s3://bucket/key` at i=4: positional
+   *   Result: ["s3://bucket/key"] → destination=undefined → USAGE_ERROR 🔴
+   *
+   * Post-fix:
+   *   --dryrun + false consumed → `--` skipped (continue) → ./local.txt + s3://bucket/key
+   *   Result: ["./local.txt", "s3://bucket/key"] ✅
+   */
+  it("cp --dryrun false -- <src> <dst>: source/dest correct, --dryrun absent, -- forwarded", async () => {
+    const logFile = join(tmpdir(), `s3-cp-eoo-dryrun-flag-before-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["cp", "--dryrun", "false", "--", "./local.txt", "s3://bucket/key"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0); // liveness
+    const cpIdx = argv.indexOf("cp");
+    expect(cpIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[cpIdx + 1]).toBe("./local.txt");
+    expect(argv[cpIdx + 2]).toBe("s3://bucket/key");
+    // --dryrun false → dryRun=false → not forwarded
+    expect(argv).not.toContain("--dryrun");
+    expect(argv).not.toContain("false");
+    // -- forwarded
+    expect(argv).toContain("--");
+  });
+
+  /**
+   * Interaction: `--` combined with `--dryrun`, separator before positionals.
+   *
+   * `s3 cp -- ./local.txt s3://bucket/key --dryrun false`
+   *
+   * Pre-fix (9cdf100):
+   *   `--` at i=0: eats `./local.txt` → i=2 at top
+   *   `s3://bucket/key` at i=2: positional
+   *   `--dryrun` at i=3: S3_BOOL_FLAGS → `false` → i=4, skip both
+   *   Result: ["s3://bucket/key"] → destination=undefined → USAGE_ERROR 🔴
+   *
+   * Post-fix:
+   *   `--` skipped → ./local.txt + s3://bucket/key → --dryrun false consumed ✅
+   */
+  it("cp -- <src> <dst> --dryrun false: source/dest correct, --dryrun absent, -- forwarded", async () => {
+    const logFile = join(tmpdir(), `s3-cp-eoo-dryrun-flag-after-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["cp", "--", "./local.txt", "s3://bucket/key", "--dryrun", "false"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0);
+    const cpIdx = argv.indexOf("cp");
+    expect(cpIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[cpIdx + 1]).toBe("./local.txt");
+    expect(argv[cpIdx + 2]).toBe("s3://bucket/key");
+    expect(argv).not.toContain("--dryrun");
+    expect(argv).not.toContain("false");
+    expect(argv).toContain("--");
+  });
+
+  /**
+   * Interaction: `--` combined with `--exclude` (value flag).
+   *
+   * `s3 cp -- --exclude '*.log' ./local.txt s3://bucket/key`
+   *
+   * Pre-fix (9cdf100):
+   *   `--` at i=0: unknown/value-flag → i++ eats `--exclude` → i=2 at top
+   *   `*.log` at i=2: positional (WRONG — it is --exclude's value)
+   *   `./local.txt` at i=3: positional
+   *   `s3://bucket/key` at i=4: positional
+   *   source="*.log", destination="./local.txt" → argv[cp+1]="*.log" 🔴
+   *
+   * Post-fix:
+   *   `--` skipped → `--exclude` is value flag → eats `*.log` → ./local.txt + s3://bucket/key
+   *   source="./local.txt", destination="s3://bucket/key" ✅
+   *   --exclude + *.log forwarded via passthrough ✅
+   */
+  it("cp -- --exclude '*.log' <src> <dst>: source/dest correct, --exclude forwarded, -- forwarded", async () => {
+    const logFile = join(tmpdir(), `s3-cp-eoo-exclude-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["cp", "--", "--exclude", "*.log", "./local.txt", "s3://bucket/key"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0); // liveness
+    const cpIdx = argv.indexOf("cp");
+    expect(cpIdx).toBeGreaterThanOrEqual(0);
+    // Source must be ./local.txt, NOT *.log (which was the pre-fix value).
+    expect(argv[cpIdx + 1]).toBe("./local.txt");
+    // Destination must follow source correctly.
+    expect(argv[cpIdx + 2]).toBe("s3://bucket/key");
+    // --exclude and its value must survive in passthrough.
+    expect(argv).toContain("--exclude");
+    expect(argv).toContain("*.log");
+    // -- forwarded to child.
+    expect(argv).toContain("--");
+  });
+});
