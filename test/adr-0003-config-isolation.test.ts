@@ -108,3 +108,102 @@ describe("ADR-0003 invariant — src/aws-config.ts has exactly one importer in s
     ).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// ADR-0003 corollary — command/resolve modules must not import parseAwsError
+// or mapAwsError directly from errors.ts
+// ---------------------------------------------------------------------------
+//
+// WHY THIS GUARD EXISTS:
+//
+// After PR #71 closed the NO_PROFILE_SELECTED gap in awsExec and awsJson,
+// three awsRaw consumers still called parseAwsError off the raw ExecResult
+// (wait.ts:188, s3.ts:580, bucket.ts:71) and one called mapAwsError (lambda.ts:567).
+// These missed the enrichNoCredsError call, so those command paths emitted the
+// old NO_CREDENTIALS + "Run `aws sso login`" message regardless of whether named
+// profiles existed — exactly the silent-stop failure mode #70 was filed to fix.
+//
+// The fix: export parseAndEnrichAwsError from src/aws.ts, which wraps both
+// parseAwsError and enrichNoCredsError. Command/resolve modules must use it
+// instead of importing parseAwsError or mapAwsError from errors.ts directly.
+//
+// This guard enforces that invariant statically: if a new src/commands/*.ts or
+// src/resolve/*.ts file imports parseAwsError or mapAwsError from errors.ts,
+// this test fails with a clear explanation of why and how to fix it.
+
+const COMMANDS_DIR = join(REPO_ROOT, "src", "commands");
+const RESOLVE_DIR = join(REPO_ROOT, "src", "resolve");
+
+/**
+ * Detect a direct import of parseAwsError or mapAwsError from errors.ts
+ * in a TypeScript source file.
+ */
+function importsRawErrorParsers(content: string): boolean {
+  // Matches import { ..., parseAwsError, ... } or import { ..., mapAwsError, ... }
+  // from a relative path containing "errors" (with or without .js extension).
+  return /import\s*\{[^}]*\b(?:parseAwsError|mapAwsError)\b[^}]*\}\s*from\s+["'][^"']*\/errors(?:\.js)?["']/.test(
+    content,
+  );
+}
+
+describe("ADR-0003 corollary — command/resolve modules must use parseAndEnrichAwsError, not raw error parsers", () => {
+  it("no src/commands/*.ts file imports parseAwsError or mapAwsError from errors.ts", () => {
+    const files = collectTsFiles(COMMANDS_DIR);
+    const violators: string[] = [];
+
+    for (const file of files) {
+      const content = readFileSync(file, "utf-8");
+      if (importsRawErrorParsers(content)) {
+        violators.push(relative(REPO_ROOT, file));
+      }
+    }
+
+    expect(
+      violators,
+      `ADR-0003 corollary violation: src/commands/*.ts files must not import\n` +
+        `parseAwsError or mapAwsError directly from errors.ts.\n` +
+        `Violating file(s): ${violators.join(", ")}\n\n` +
+        `WHY THIS IS BLOCKED:\n` +
+        `Calling parseAwsError directly on an awsRaw ExecResult skips the\n` +
+        `enrichNoCredsError upgrade that converts NO_CREDENTIALS to NO_PROFILE_SELECTED\n` +
+        `when named profiles exist in ~/.aws/config. This recreates the exact silent-stop\n` +
+        `failure mode that #70 was filed to fix.\n\n` +
+        `FIX: import parseAndEnrichAwsError from "../aws.js" and call it with\n` +
+        `(result, options.context, options.configPath) instead of calling parseAwsError\n` +
+        `(result.stderr, result.exitCode) or mapAwsError(result.stderr, result.exitCode).\n` +
+        `parseAndEnrichAwsError does both parse + enrich in one call.\n\n` +
+        `See: docs/adr/0003-cli-delegation-for-reported-values.md`,
+    ).toEqual([]);
+  });
+
+  it("no src/resolve/*.ts file imports parseAwsError or mapAwsError from errors.ts", () => {
+    const files = collectTsFiles(RESOLVE_DIR);
+    const violators: string[] = [];
+
+    for (const file of files) {
+      const content = readFileSync(file, "utf-8");
+      if (importsRawErrorParsers(content)) {
+        violators.push(relative(REPO_ROOT, file));
+      }
+    }
+
+    expect(
+      violators,
+      `ADR-0003 corollary violation: src/resolve/*.ts files must not import\n` +
+        `parseAwsError or mapAwsError directly from errors.ts.\n` +
+        `Violating file(s): ${violators.join(", ")}\n` +
+        `See the message from the commands/ check above for the full explanation.`,
+    ).toEqual([]);
+  });
+
+  it("the guard is not vacuous — src/aws.ts still exports parseAndEnrichAwsError", () => {
+    const awsTsContent = readFileSync(join(REPO_ROOT, "src", "aws.ts"), "utf-8");
+    expect(
+      awsTsContent,
+      `src/aws.ts no longer exports parseAndEnrichAwsError.\n` +
+        `If the function was renamed or removed, update this guard and the command/resolve\n` +
+        `modules that use it.\n` +
+        `See: docs/adr/0003-cli-delegation-for-reported-values.md`,
+    ).toContain("export function parseAndEnrichAwsError");
+  });
+});

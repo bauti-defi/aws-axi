@@ -2,7 +2,7 @@
  * E2E tests for the whoami command through a real stub aws binary.
  * No mocks — the full `awsJson` exec seam runs with a subprocess boundary.
  */
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, beforeEach } from "bun:test";
 import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -262,7 +262,50 @@ describe("whoamiRun — credential errors", () => {
 // Region resolution — delegates to `aws configure get region` (CLI-authoritative)
 // ---------------------------------------------------------------------------
 
+// ── Env keys that affect detectCredentialSource ────────────────────────────
+// detectCredentialSource reads process.env directly (no injection seam).
+// If a prior test (e.g. wire-reveal.test.ts) leaks AWS_ACCESS_KEY_ID into
+// the process env (via a timed-out test whose captureMain finally never ran),
+// credentialSource returns "env-keys" instead of "profile:X", breaking the
+// assertions below. These hooks snap the env to a known-clean state so the
+// two describe blocks are immune to whatever leaked.
+// Keys cleaned by beforeEach in the two describe blocks below.
+// Covers both the credentialSource detection (AWS_ACCESS_KEY_ID etc.) and
+// region resolution (AWS_REGION / AWS_DEFAULT_REGION — whoamiRun reads these
+// from process.env directly, so a parent shell's AWS_REGION bypasses the
+// configure-get-region path that the region-resolution tests exercise).
+const CREDENTIAL_ENV_KEYS = [
+  "AWS_ACCESS_KEY_ID",
+  "AWS_SECRET_ACCESS_KEY",
+  "AWS_SESSION_TOKEN",
+  "AWS_WEB_IDENTITY_TOKEN_FILE",
+  "AWS_ROLE_ARN",
+  "AWS_REGION",
+  "AWS_DEFAULT_REGION",
+] as const;
+
 describe("whoamiRun — region resolution", () => {
+  let savedCredEnv: Partial<Record<string, string | undefined>> = {};
+
+  beforeEach(() => {
+    savedCredEnv = {};
+    for (const key of CREDENTIAL_ENV_KEYS) {
+      savedCredEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of CREDENTIAL_ENV_KEYS) {
+      const saved = savedCredEnv[key];
+      if (saved === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = saved;
+      }
+    }
+  });
+
   it("reports region from context when supplied (context takes precedence, no CLI call)", async () => {
     // region in context → configure get region is NOT called
     const stub = createStub({
@@ -332,6 +375,27 @@ describe("whoamiRun — region resolution", () => {
 // ---------------------------------------------------------------------------
 
 describe("whoamiRun — accurate profile reporting", () => {
+  let savedCredEnv: Partial<Record<string, string | undefined>> = {};
+
+  beforeEach(() => {
+    savedCredEnv = {};
+    for (const key of CREDENTIAL_ENV_KEYS) {
+      savedCredEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of CREDENTIAL_ENV_KEYS) {
+      const saved = savedCredEnv[key];
+      if (saved === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = saved;
+      }
+    }
+  });
+
   it("reports the profile from context (covers AWS_DEFAULT_PROFILE path)", async () => {
     // When context.profile = "admin" (from AWS_DEFAULT_PROFILE resolution),
     // whoami must report "admin", never "default".

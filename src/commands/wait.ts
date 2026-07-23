@@ -19,9 +19,8 @@
  */
 import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
-import { awsRaw } from "../aws.js";
+import { awsRaw, parseAndEnrichAwsError } from "../aws.js";
 import { loadService, getWaiter, pascalToKebab, type ServiceModel } from "../model.js";
-import { parseAwsError } from "../errors.js";
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -63,6 +62,12 @@ export interface WaitRunOptions {
    * Defaults to the installed aws CLI's botocore data path.
    */
   readonly dataDir?: string;
+  /**
+   * Override path to ~/.aws/config for NO_PROFILE_SELECTED diagnostics.
+   * Defaults to the real ~/.aws/config. Injectable for tests so they never
+   * read the developer's actual config file.
+   */
+  readonly configPath?: string;
 }
 
 /** Options injected by tests into `waitCommand` (not exposed in production). */
@@ -185,7 +190,9 @@ export async function waitRun(options: WaitRunOptions): Promise<WaitResult> {
   }
 
   // 4a. Propagate well-known taxonomy errors (no-credentials, auth-expired, …)
-  const parsed = parseAwsError(result.stderr, result.exitCode);
+  // Use parseAndEnrichAwsError so NO_CREDENTIALS is upgraded to NO_PROFILE_SELECTED
+  // when named profiles exist in ~/.aws/config but none was selected.
+  const parsed = parseAndEnrichAwsError(result, options.context, options.configPath);
   if (parsed.code !== "UNKNOWN") {
     throw new AxiError(parsed.message, parsed.code, [...parsed.suggestions]);
   }

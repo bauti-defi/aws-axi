@@ -14,9 +14,8 @@
  *   resolveBucket(options) → BucketInfo
  */
 import { AxiError } from "axi-sdk-js";
-import { awsRaw } from "../aws.js";
+import { awsRaw, parseAndEnrichAwsError } from "../aws.js";
 import type { AwsContext } from "../context.js";
-import { parseAwsError } from "../errors.js";
 
 export interface BucketInfo {
   readonly exists: boolean;
@@ -26,6 +25,12 @@ export interface ResolveBucketOptions {
   readonly bucket: string;
   readonly binary?: string;
   readonly context?: AwsContext;
+  /**
+   * Override path to ~/.aws/config for NO_PROFILE_SELECTED diagnostics.
+   * Defaults to the real ~/.aws/config. Injectable for tests so they never
+   * read the developer's actual config file.
+   */
+  readonly configPath?: string;
 }
 
 // Process-scoped cache — keyed by profile:region:bucket.
@@ -68,7 +73,9 @@ export async function resolveBucket(
     return info;
   }
 
-  const parsed = parseAwsError(result.stderr, result.exitCode);
+  // Use parseAndEnrichAwsError so NO_CREDENTIALS is upgraded to NO_PROFILE_SELECTED
+  // when named profiles exist in ~/.aws/config but none was selected.
+  const parsed = parseAndEnrichAwsError(result, options.context, options.configPath);
 
   // Handle "bucket does not exist" as a known non-error state.
   if (parsed.botoCode !== undefined && NOT_FOUND_CODES.has(parsed.botoCode)) {

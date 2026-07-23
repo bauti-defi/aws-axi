@@ -17,7 +17,15 @@ import {
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { awsJson, awsExec } from "../src/aws.js";
+import { waitRun } from "../src/commands/wait.js";
+import { s3CreateBucketRun } from "../src/commands/s3.js";
+import { lambdaRun } from "../src/commands/lambda.js";
+import { resolveBucket } from "../src/resolve/bucket.js";
 import { AxiError } from "axi-sdk-js";
+import { fileURLToPath } from "node:url";
+
+/** Botocore fixture data dir for waitRun tests (fake-svc waiter model). */
+const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
 
 const tempDirs: string[] = [];
 
@@ -395,5 +403,125 @@ describe("awsExitCode — NO_PROFILE_SELECTED maps to 253", () => {
   it("NO_PROFILE_SELECTED has exit code 253 (same bucket as NO_CREDENTIALS)", async () => {
     const { awsExitCode } = await import("../src/errors.js");
     expect(awsExitCode("NO_PROFILE_SELECTED")).toBe(253);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// awsRaw consumers — enrichment reaches every command surface (#70 gap)
+//
+// These three tests close the gap identified in cycle-4: wait, s3 create-bucket,
+// and resolveBucket called parseAwsError directly off awsRaw results, bypassing
+// enrichNoCredsError. They now call parseAndEnrichAwsError, so NO_CREDENTIALS is
+// upgraded to NO_PROFILE_SELECTED whenever named profiles exist but none was selected.
+// ---------------------------------------------------------------------------
+
+describe("waitRun — NO_PROFILE_SELECTED diagnostic (awsRaw consumer)", () => {
+  it("upgrades NO_CREDENTIALS to NO_PROFILE_SELECTED when named profiles exist but none selected", async () => {
+    const binary = createStub({
+      stdout: "",
+      stderr: "Unable to locate credentials",
+      exitCode: 255,
+    });
+    const configPath = makeConfigFile("[profile dev]\n[profile admin]\n");
+
+    let caught: AxiError | null = null;
+    try {
+      await waitRun({
+        service: "fake-svc",
+        waiterName: "item-ready",
+        flags: [],
+        binary,
+        dataDir: FIXTURES_DIR,
+        configPath,
+      });
+    } catch (e) {
+      caught = e as AxiError;
+    }
+
+    expect(caught?.code).toBe("NO_PROFILE_SELECTED");
+    const allText = `${caught?.message ?? ""} ${(caught?.suggestions ?? []).join(" ")}`;
+    expect(allText).toContain("dev");
+    expect(allText).toContain("admin");
+  });
+});
+
+describe("s3CreateBucketRun — NO_PROFILE_SELECTED diagnostic (awsRaw consumer)", () => {
+  it("upgrades NO_CREDENTIALS to NO_PROFILE_SELECTED when named profiles exist but none selected", async () => {
+    const binary = createStub({
+      stdout: "",
+      stderr: "Unable to locate credentials",
+      exitCode: 255,
+    });
+    const configPath = makeConfigFile("[profile dev]\n[profile admin]\n");
+
+    let caught: AxiError | null = null;
+    try {
+      await s3CreateBucketRun({
+        bucket: "my-test-bucket",
+        // Provide region explicitly so resolveConfigRegion is not called
+        // (that path also uses awsRaw; would fail too, but we want one clean stub call).
+        region: "us-east-1",
+        binary,
+        configPath,
+      });
+    } catch (e) {
+      caught = e as AxiError;
+    }
+
+    expect(caught?.code).toBe("NO_PROFILE_SELECTED");
+    const allText = `${caught?.message ?? ""} ${(caught?.suggestions ?? []).join(" ")}`;
+    expect(allText).toContain("dev");
+    expect(allText).toContain("admin");
+  });
+});
+
+describe("resolveBucket — NO_PROFILE_SELECTED diagnostic (awsRaw consumer)", () => {
+  it("upgrades NO_CREDENTIALS to NO_PROFILE_SELECTED when named profiles exist but none selected", async () => {
+    const binary = createStub({
+      stdout: "",
+      stderr: "Unable to locate credentials",
+      exitCode: 255,
+    });
+    const configPath = makeConfigFile("[profile dev]\n[profile admin]\n");
+
+    let caught: AxiError | null = null;
+    try {
+      await resolveBucket({ bucket: "my-test-bucket", binary, configPath });
+    } catch (e) {
+      caught = e as AxiError;
+    }
+
+    expect(caught?.code).toBe("NO_PROFILE_SELECTED");
+    const allText = `${caught?.message ?? ""} ${(caught?.suggestions ?? []).join(" ")}`;
+    expect(allText).toContain("dev");
+    expect(allText).toContain("admin");
+  });
+});
+
+describe("lambdaRun invoke — NO_PROFILE_SELECTED diagnostic (awsRaw consumer)", () => {
+  it("upgrades NO_CREDENTIALS to NO_PROFILE_SELECTED when named profiles exist but none selected", async () => {
+    const binary = createStub({
+      stdout: "",
+      stderr: "Unable to locate credentials",
+      exitCode: 255,
+    });
+    const configPath = makeConfigFile("[profile dev]\n[profile admin]\n");
+
+    let caught: AxiError | null = null;
+    try {
+      await lambdaRun({
+        subcommand: "invoke",
+        args: ["--function-name", "my-function"],
+        binary,
+        configPath,
+      });
+    } catch (e) {
+      caught = e as AxiError;
+    }
+
+    expect(caught?.code).toBe("NO_PROFILE_SELECTED");
+    const allText = `${caught?.message ?? ""} ${(caught?.suggestions ?? []).join(" ")}`;
+    expect(allText).toContain("dev");
+    expect(allText).toContain("admin");
   });
 });
