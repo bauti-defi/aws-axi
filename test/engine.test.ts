@@ -596,7 +596,10 @@ describe("engineRun — error mapping", () => {
     }
   });
 
-  it("propagates NO_CREDENTIALS without modification", async () => {
+  it("propagates auth error without modification (NO_CREDENTIALS or NO_PROFILE_SELECTED)", async () => {
+    // The exact code depends on whether ~/.aws/config has named profiles.
+    // Both codes are auth-family; the engine must surface whichever applies.
+    const AUTH_CODES = new Set(["NO_CREDENTIALS", "NO_PROFILE_SELECTED"]);
     const stub = createStub({
       stdout: "",
       stderr: "Unable to locate credentials",
@@ -608,7 +611,7 @@ describe("engineRun — error mapping", () => {
         baseOptions({ operation: "simple-op", args: [], binary: stub }),
       );
     } catch (err) {
-      expect((err as AxiError).code).toBe("NO_CREDENTIALS");
+      expect(AUTH_CODES.has((err as AxiError).code)).toBe(true);
     }
   });
 

@@ -346,7 +346,9 @@ describe("waitRun — unknown waiter name", () => {
 // ---------------------------------------------------------------------------
 
 describe("waitRun — credential error propagation", () => {
-  it("propagates NO_CREDENTIALS AxiError from the exec seam", async () => {
+  it("propagates NO_CREDENTIALS AxiError when config has no named profiles", async () => {
+    // Inject a nonexistent configPath so readAwsConfigProfiles returns [] and
+    // the error stays NO_CREDENTIALS (not upgraded to NO_PROFILE_SELECTED).
     const stub = createStub({
       stdout: "",
       stderr: "Unable to locate credentials",
@@ -359,10 +361,38 @@ describe("waitRun — credential error propagation", () => {
       flags: [],
       binary: stub,
       dataDir: FIXTURES_DIR,
+      configPath: "/nonexistent/path/to/.aws/config",
     }).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(AxiError);
     expect((err as AxiError).code).toBe("NO_CREDENTIALS");
+  });
+
+  it("upgrades to NO_PROFILE_SELECTED when named profiles exist but none selected", async () => {
+    const stub = createStub({
+      stdout: "",
+      stderr: "Unable to locate credentials",
+      exitCode: 255,
+    });
+    // Write a temp config with named profiles
+    const cfgDir = mkdtempSync(join(tmpdir(), "aws-axi-wait-cfg-"));
+    tempDirs.push(cfgDir);
+    const configPath = join(cfgDir, "config");
+    writeFileSync(configPath, "[profile dev]\n[profile admin]\n", "utf-8");
+
+    const err = await waitRun({
+      service: "fake-svc",
+      waiterName: WAITER_KEBAB,
+      flags: [],
+      binary: stub,
+      dataDir: FIXTURES_DIR,
+      configPath,
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(AxiError);
+    expect((err as AxiError).code).toBe("NO_PROFILE_SELECTED");
+    const allText = `${(err as AxiError).message} ${(err as AxiError).suggestions.join(" ")}`;
+    expect(allText).toContain("dev");
   });
 
   it("propagates AUTH_EXPIRED AxiError from the exec seam", async () => {
@@ -379,6 +409,7 @@ describe("waitRun — credential error propagation", () => {
       flags: [],
       binary: stub,
       dataDir: FIXTURES_DIR,
+      configPath: "/nonexistent/path/to/.aws/config",
     }).catch((e: unknown) => e);
 
     expect(err).toBeInstanceOf(AxiError);

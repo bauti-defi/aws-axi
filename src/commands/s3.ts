@@ -19,9 +19,8 @@
  *   S3_HELP                     → help text
  */
 import { AxiError } from "axi-sdk-js";
-import { awsJson, awsRaw, awsExec } from "../aws.js";
+import { awsJson, awsRaw, awsExec, parseAndEnrichAwsError } from "../aws.js";
 import type { AwsContext } from "../context.js";
-import { parseAwsError } from "../errors.js";
 import { fallThroughToEngine } from "../engine.js";
 import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrue, hasFlag, extractPositionals } from "../overlay-args.js";
 
@@ -489,6 +488,12 @@ export interface S3CreateBucketRunOptions {
   readonly hasQuery?: boolean;
   readonly binary?: string;
   readonly context?: AwsContext;
+  /**
+   * Override path to ~/.aws/config for NO_PROFILE_SELECTED diagnostics.
+   * Defaults to the real ~/.aws/config. Injectable for tests so they never
+   * read the developer's actual config file.
+   */
+  readonly configPath?: string;
 }
 
 /**
@@ -577,7 +582,9 @@ export async function s3CreateBucketRun(
   }
 
   // ── idempotent: bucket already owned by this caller ───────────────────────
-  const parsed = parseAwsError(result.stderr, result.exitCode);
+  // Use parseAndEnrichAwsError so NO_CREDENTIALS is upgraded to NO_PROFILE_SELECTED
+  // when named profiles exist in ~/.aws/config but none was selected.
+  const parsed = parseAndEnrichAwsError(result, options.context, options.configPath);
   if (parsed.botoCode === "BucketAlreadyOwnedByYou") {
     return {
       created: false,

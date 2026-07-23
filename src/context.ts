@@ -12,6 +12,18 @@ export interface AwsContext {
 }
 
 /**
+ * Return the value only if it is a non-empty, non-whitespace-only string.
+ * Used to filter `export AWS_PROFILE=` (empty string) so it doesn't silently
+ * suppress lower-precedence env vars like AWS_AXI_PROFILE.
+ */
+function nonEmpty(value: string | undefined): string | undefined {
+  // Treat whitespace-only values as absent (same as undefined). But do NOT trim
+  // a padded value like " dev " — the raw `aws` CLI rejects it with "The config
+  // profile ( dev ) could not be found"; aws-axi must agree, not silently succeed.
+  return value?.trim() ? value : undefined;
+}
+
+/**
  * Parse --profile / --region global flags from argv, falling back to the
  * canonical AWS environment variables. Returns the effective context AND the
  * argv with those flags removed so command handlers see only their own flags.
@@ -45,7 +57,14 @@ export function stripContextArgs(args: readonly string[]): {
   return {
     strippedArgs: stripped,
     context: {
-      profile: profile ?? process.env["AWS_PROFILE"] ?? undefined,
+      // Precedence: --profile flag > AWS_PROFILE > AWS_DEFAULT_PROFILE > AWS_AXI_PROFILE
+      // Empty/whitespace-only env values are treated as absent so a stray
+      // `export AWS_PROFILE=` does not silently disable AWS_AXI_PROFILE.
+      profile:
+        profile ??
+        nonEmpty(process.env["AWS_PROFILE"]) ??
+        nonEmpty(process.env["AWS_DEFAULT_PROFILE"]) ??
+        nonEmpty(process.env["AWS_AXI_PROFILE"]),
       region:
         region ??
         process.env["AWS_REGION"] ??

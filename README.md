@@ -59,6 +59,24 @@ Requirements:
   aws-axi shells out to it.
 - [Bun](https://bun.sh) (the CLI runs on the Bun runtime).
 
+**Profile required on SSO-only setups.** `aws sso login --profile dev` never creates a
+`[default]` section, so `~/.aws/config` may contain only named profiles with no default
+fallback. aws-axi needs a profile, exactly as the raw `aws` CLI does. Three ways to supply it:
+
+```sh
+# 1. Per-command flag
+npx -y aws-axi whoami --profile dev
+
+# 2. Shell environment (standard; affects all AWS tools)
+export AWS_PROFILE=dev && npx -y aws-axi whoami
+
+# 3. aws-axi-specific env var (lowest precedence; pins a session without clobbering AWS_PROFILE)
+export AWS_AXI_PROFILE=dev && npx -y aws-axi whoami
+```
+
+If aws-axi reports `NO_PROFILE_SELECTED`, it will list the available profiles — pick one from
+that list and re-invoke.
+
 For a global install and ambient session context:
 
 ```sh
@@ -86,6 +104,19 @@ aws-axi <service> <op> --help   # per-command signature + examples
 
 Global flags `--profile <name>` and `--region <region>` are accepted before any command. Every response
 ends with contextual `help:` next-step hints.
+
+**Profile precedence** (highest to lowest):
+
+| Source | Example |
+|---|---|
+| `--profile <name>` flag | `aws-axi whoami --profile dev` |
+| `AWS_PROFILE` env var | `export AWS_PROFILE=dev` |
+| `AWS_DEFAULT_PROFILE` env var | `export AWS_DEFAULT_PROFILE=dev` |
+| `AWS_AXI_PROFILE` env var | `export AWS_AXI_PROFILE=dev` |
+
+`AWS_AXI_PROFILE` is aws-axi-specific and has the lowest precedence. Use it to pin a
+repository or agent session to a profile without clobbering the system-wide `AWS_PROFILE`
+used by other tools.
 
 ## Capabilities
 
@@ -156,7 +187,12 @@ redaction**).
 ## `aws` ↔ `aws-axi`
 
 The interface mirrors the AWS CLI 1:1 — same service and operation names — so most commands are identical
-apart from the `aws-axi` prefix. Where the ergonomics differ, here is the map both ways:
+apart from the `aws-axi` prefix. **aws-axi needs a profile for exactly the same reason raw `aws` does.**
+If you habitually `export AWS_PROFILE=dev` and never notice, raw `aws` works fine for the same reason
+`aws-axi` works fine — both see the env var. (This was the source of #70's confusion: "the raw CLI
+works fine for me" was really "I export `AWS_PROFILE` and never noticed.")
+
+Where the ergonomics differ, here is the map both ways:
 
 | You'd run with `aws`                                   | With `aws-axi`                                         | What changed                                                                 |
 | ------------------------------------------------------ | ----------------------------------------------------- | --------------------------------------------------------------------------- |
@@ -189,8 +225,18 @@ apart from the `aws-axi` prefix. Where the ergonomics differ, here is the map bo
 - **Output** — TOON, not JSON. Tabular result sets render as `key[N]{col,col}` blocks with a `count`.
 - **Pagination** — capped by default (`--max-items` / `--limit`, service-specific defaults). When more
   exists, the result carries a `NextToken`; resume with `--next-token` (or `--starting-token` for `s3 ls`).
-- **Errors** — structured TOON on stderr (`error`, `code`, `help[]`) with exit codes: `252` usage,
-  `253` no credentials, `254` service/client error, `255` general (`0` for a `DryRunOperation`).
+- **Errors** — structured TOON on stderr (`error`, `code`, `help[]`) with exit codes:
+
+  | Code | Exit | Meaning |
+  |---|---|---|
+  | `USAGE_ERROR` | 252 | Bad flag or argument |
+  | `NO_CREDENTIALS` | 253 | No AWS credentials found — run `aws sso login` |
+  | `NO_PROFILE_SELECTED` | 253 | Named profiles exist but none was selected — pass `--profile <name>` or `export AWS_PROFILE=<name>`; **not** an auth failure |
+  | `AUTH_EXPIRED` | 253 | Profile exists but SSO token stale — run `aws sso login --profile <name>` |
+  | `SERVICE_CLIENT_ERROR` | 254 | AWS service or client error |
+  | `AWS_NOT_INSTALLED` | 127 | `aws` binary not found in PATH |
+  | `DRY_RUN_SUCCESS` | 0 | `DryRunOperation` success signal (not an error) |
+  | `UNKNOWN` | 255 | General / unrecognized error |
 - **Redaction** — `ssm` and `secretsmanager` overlays redact values unless `--reveal` is passed.
 - **Idempotency** — overlay mutations (e.g. `s3 create-bucket`) report what changed and are safe to re-run.
 - **No `.env` loading (installed CLI)** — the distributed launcher never reads `.env` from the current

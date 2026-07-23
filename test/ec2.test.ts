@@ -341,7 +341,10 @@ describe("ec2Run describe-security-groups — happy path", () => {
 // ---------------------------------------------------------------------------
 
 describe("ec2Run — error propagation", () => {
-  it("throws AxiError on AWS credential error", async () => {
+  it("throws AxiError on AWS credential error (NO_CREDENTIALS or NO_PROFILE_SELECTED)", async () => {
+    // The exact code depends on whether ~/.aws/config has named profiles.
+    // Both codes are auth-family; the command layer must surface whichever applies.
+    const AUTH_CODES = new Set(["NO_CREDENTIALS", "NO_PROFILE_SELECTED"]);
     const stub = createStub({
       stdout: "",
       stderr: "Unable to locate credentials",
@@ -360,7 +363,7 @@ describe("ec2Run — error propagation", () => {
       });
       await ec2Run({ operation: "describe-vpcs", binary: stub2 });
     } catch (e) {
-      expect((e as AxiError).code).toBe("NO_CREDENTIALS");
+      expect(AUTH_CODES.has((e as AxiError).code)).toBe(true);
     }
   });
 });

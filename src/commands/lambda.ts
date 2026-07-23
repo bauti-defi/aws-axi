@@ -31,7 +31,7 @@ import { tmpdir } from "node:os";
 import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import type { AwsRunOptions } from "../aws.js";
-import { awsJson, awsRaw } from "../aws.js";
+import { awsJson, awsRaw, parseAndEnrichAwsError } from "../aws.js";
 import { resolveRole } from "../resolve/role.js";
 import { resolveSg } from "../resolve/sg.js";
 import { resolveSubnet } from "../resolve/subnet.js";
@@ -176,6 +176,12 @@ export interface LambdaRunOptions {
   /** Override the aws binary path — for testing via real stub scripts. */
   readonly binary?: string;
   readonly context?: AwsContext;
+  /**
+   * Override path to ~/.aws/config for NO_PROFILE_SELECTED diagnostics.
+   * Defaults to the real ~/.aws/config. Injectable for tests so they never
+   * read the developer's actual config file.
+   */
+  readonly configPath?: string;
 }
 
 // ─── Help ─────────────────────────────────────────────────────────────────────
@@ -563,8 +569,10 @@ async function runInvoke(
     // is a function-level outcome — surfaced as a result field, not an error.
     // NOTE: do NOT conflate HTTP StatusCode (200/400/...) with process exit code.
     if (metadataResult.exitCode !== 0) {
-      const { mapAwsError } = await import("../errors.js");
-      throw mapAwsError(metadataResult.stderr, metadataResult.exitCode);
+      // parseAndEnrichAwsError upgrades NO_CREDENTIALS → NO_PROFILE_SELECTED when
+      // named profiles exist in ~/.aws/config but none was selected.
+      const parsed = parseAndEnrichAwsError(metadataResult, options.context, options.configPath);
+      throw new AxiError(parsed.message, parsed.code, [...parsed.suggestions]);
     }
 
     // --query bypass: the AWS CLI has already applied JMESPath to the metadata
