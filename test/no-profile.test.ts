@@ -75,6 +75,130 @@ function makeConfigFile(content: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// awsJson — NO_PROFILE_SELECTED message accuracy (F2)
+// ---------------------------------------------------------------------------
+
+describe("awsJson — NO_PROFILE_SELECTED message correctness", () => {
+  it("message says 'no [default] profile exists' when [default] is truly absent", async () => {
+    const binary = createStub({
+      stdout: "",
+      stderr: "Unable to locate credentials",
+      exitCode: 255,
+    });
+    const configPath = makeConfigFile("[profile dev]\n[profile admin]\n");
+
+    let caught: AxiError | null = null;
+    try {
+      await awsJson(["sts", "get-caller-identity"], {
+        binary,
+        context: { profile: undefined, region: undefined },
+        configPath,
+      });
+    } catch (e) {
+      caught = e as AxiError;
+    }
+
+    expect(caught?.code).toBe("NO_PROFILE_SELECTED");
+    expect(caught?.message).toContain("no [default] profile exists");
+  });
+
+  it("message says [default] has no credentials when [default] section exists but is credential-less", async () => {
+    // A region-only [default] section still counts as "default exists" but
+    // has no usable credentials. The message must NOT lie and say it is absent.
+    const binary = createStub({
+      stdout: "",
+      stderr: "Unable to locate credentials",
+      exitCode: 255,
+    });
+    const configPath = makeConfigFile(
+      "[default]\nregion = us-west-2\n[profile dev]\n[profile admin]\n",
+    );
+
+    let caught: AxiError | null = null;
+    try {
+      await awsJson(["sts", "get-caller-identity"], {
+        binary,
+        context: { profile: undefined, region: undefined },
+        configPath,
+      });
+    } catch (e) {
+      caught = e as AxiError;
+    }
+
+    expect(caught?.code).toBe("NO_PROFILE_SELECTED");
+    // Must NOT say [default] doesn't exist — it does.
+    expect(caught?.message).not.toContain("no [default] profile exists");
+    // Must mention [default] in some truthful way
+    expect(caught?.message).toMatch(/\[default\]/);
+    // Must still list the named profiles
+    const allText = `${caught?.message ?? ""} ${(caught?.suggestions ?? []).join(" ")}`;
+    expect(allText).toContain("dev");
+    expect(allText).toContain("admin");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildNoProfileSelectedError — placeholder vs concrete example (B1)
+// ---------------------------------------------------------------------------
+
+describe("buildNoProfileSelectedError — suggestion content", () => {
+  it("uses <name> placeholder when multiple profiles exist (never guesses)", async () => {
+    // Multiple profiles — the tool must not pick an arbitrary one.
+    const binary = createStub({
+      stdout: "",
+      stderr: "Unable to locate credentials",
+      exitCode: 255,
+    });
+    const configPath = makeConfigFile("[profile dev]\n[profile admin]\n[profile other]\n");
+
+    let caught: AxiError | null = null;
+    try {
+      await awsJson(["sts", "get-caller-identity"], {
+        binary,
+        context: { profile: undefined, region: undefined },
+        configPath,
+      });
+    } catch (e) {
+      caught = e as AxiError;
+    }
+
+    expect(caught?.code).toBe("NO_PROFILE_SELECTED");
+    const suggestions = caught?.suggestions ?? [];
+    // Must use the placeholder, never a guessed profile name
+    expect(suggestions.some((s) => s.includes("--profile <name>"))).toBe(true);
+    expect(suggestions.some((s) => s.includes("export AWS_PROFILE=<name>"))).toBe(true);
+    // Must still list all the profiles so the user can choose
+    expect(suggestions.some((s) => s.includes("dev") && s.includes("admin"))).toBe(true);
+  });
+
+  it("uses the concrete profile name when exactly one profile exists", async () => {
+    // Single profile — safe to name it because there is no ambiguity.
+    const binary = createStub({
+      stdout: "",
+      stderr: "Unable to locate credentials",
+      exitCode: 255,
+    });
+    const configPath = makeConfigFile("[profile only-profile]\n");
+
+    let caught: AxiError | null = null;
+    try {
+      await awsJson(["sts", "get-caller-identity"], {
+        binary,
+        context: { profile: undefined, region: undefined },
+        configPath,
+      });
+    } catch (e) {
+      caught = e as AxiError;
+    }
+
+    expect(caught?.code).toBe("NO_PROFILE_SELECTED");
+    const suggestions = caught?.suggestions ?? [];
+    expect(suggestions.some((s) => s.includes("--profile only-profile"))).toBe(true);
+    expect(suggestions.some((s) => s.includes("export AWS_PROFILE=only-profile"))).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // awsJson — NO_PROFILE_SELECTED when no profile + named profiles in config
 // ---------------------------------------------------------------------------
 
@@ -161,6 +285,30 @@ sso_session = damm
     }
 
     expect(caught?.code).toBe("NO_CREDENTIALS");
+  });
+
+  it("upgrades to NO_PROFILE_SELECTED when context.profile is empty string (treated as absent)", async () => {
+    // An empty-string profile must not bypass enrichment — same as undefined.
+    const binary = createStub({
+      stdout: "",
+      stderr: "Unable to locate credentials",
+      exitCode: 255,
+    });
+    const configPath = makeConfigFile("[profile dev]\n[profile admin]\n");
+
+    let caught: AxiError | null = null;
+    try {
+      await awsJson(["sts", "get-caller-identity"], {
+        binary,
+        context: { profile: "", region: undefined },
+        configPath,
+      });
+    } catch (e) {
+      caught = e as AxiError;
+    }
+
+    // Empty-string profile = no profile selected → should upgrade
+    expect(caught?.code).toBe("NO_PROFILE_SELECTED");
   });
 
   it("does NOT upgrade when a profile WAS selected (profile in context)", async () => {

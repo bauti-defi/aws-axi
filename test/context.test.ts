@@ -111,6 +111,52 @@ describe("profile precedence", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Empty-string env vars — must be treated as unset (F1)
+// ---------------------------------------------------------------------------
+
+describe("profile precedence — empty-string env vars treated as absent", () => {
+  it("empty AWS_PROFILE falls through to AWS_AXI_PROFILE", () => {
+    savedEnv = saveEnv();
+    process.env["AWS_PROFILE"] = "";
+    delete process.env["AWS_DEFAULT_PROFILE"];
+    process.env["AWS_AXI_PROFILE"] = "axi-fallback";
+
+    const { context } = stripContextArgs(["whoami"]);
+    expect(context.profile).toBe("axi-fallback");
+  });
+
+  it("whitespace-only AWS_PROFILE falls through to AWS_AXI_PROFILE", () => {
+    savedEnv = saveEnv();
+    process.env["AWS_PROFILE"] = "   ";
+    delete process.env["AWS_DEFAULT_PROFILE"];
+    process.env["AWS_AXI_PROFILE"] = "axi-fallback";
+
+    const { context } = stripContextArgs(["whoami"]);
+    expect(context.profile).toBe("axi-fallback");
+  });
+
+  it("empty AWS_PROFILE and empty AWS_DEFAULT_PROFILE fall through to AWS_AXI_PROFILE", () => {
+    savedEnv = saveEnv();
+    process.env["AWS_PROFILE"] = "";
+    process.env["AWS_DEFAULT_PROFILE"] = "";
+    process.env["AWS_AXI_PROFILE"] = "axi-only";
+
+    const { context } = stripContextArgs(["whoami"]);
+    expect(context.profile).toBe("axi-only");
+  });
+
+  it("all empty env vars yield undefined profile", () => {
+    savedEnv = saveEnv();
+    process.env["AWS_PROFILE"] = "";
+    process.env["AWS_DEFAULT_PROFILE"] = "";
+    process.env["AWS_AXI_PROFILE"] = "";
+
+    const { context } = stripContextArgs(["whoami"]);
+    expect(context.profile).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Region precedence (unchanged, regression guard)
 // ---------------------------------------------------------------------------
 

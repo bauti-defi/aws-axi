@@ -151,16 +151,26 @@ export function parseAwsError(
 /**
  * Build a NO_PROFILE_SELECTED ParsedAwsError with a profile list.
  *
- * @param namedProfiles - profiles found in ~/.aws/config (sso-session blocks excluded)
+ * @param namedProfiles - profiles found in ~/.aws/config (default excluded)
+ * @param defaultExists - whether a [default] section is present (even if credential-less)
  */
-export function buildNoProfileSelectedError(namedProfiles: readonly string[]): ParsedAwsError {
-  const example = namedProfiles[0] ?? "dev";
+export function buildNoProfileSelectedError(
+  namedProfiles: readonly string[],
+  defaultExists: boolean,
+): ParsedAwsError {
+  // Use a concrete name only when the choice is unambiguous (exactly one profile).
+  // With multiple profiles, a placeholder avoids silently suggesting a broken one.
+  const example = namedProfiles.length === 1 ? (namedProfiles[0] ?? "<name>") : "<name>";
+
+  const message = defaultExists
+    ? "No AWS profile selected — the [default] profile has no usable credentials"
+    : "No AWS profile selected and no [default] profile exists in ~/.aws/config";
+
   return {
     code: "NO_PROFILE_SELECTED",
     botoCode: undefined,
     operation: undefined,
-    message:
-      "No AWS profile selected and no [default] profile exists in ~/.aws/config",
+    message,
     suggestions: [
       `Found profiles: ${namedProfiles.join(", ")}  (from ~/.aws/config)`,
       `Pass a profile:  aws-axi <command> --profile ${example}`,

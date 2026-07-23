@@ -83,9 +83,16 @@ Use it to pin a repo or agent session to a profile without affecting the system-
 `AWS_PROFILE` used by other tools.
 
 **As an agent:** `NO_PROFILE_SELECTED` (exit 253) means retry with a profile — it does NOT
-mean "the operator is logged out" or "credentials are missing". Read the `found:` list in
-the error output and re-invoke with `--profile <name>`. Do NOT ask the operator to run
+mean "the operator is logged out" or "credentials are missing". Do NOT ask the operator to run
 `aws sso login` — that will not help.
+
+To recover: read the `help[3]:` line in the error output. The first item starts with
+`"Found profiles: dev, admin, ..."` and lists every available profile. Pick one and
+re-invoke with `--profile <name>`:
+
+```
+help[3]: "Found profiles: dev, admin, ...","Pass a profile:  aws-axi <command> --profile <name>","Or export it:    export AWS_PROFILE=<name>"
+```
 
 ### `NO_CREDENTIALS` — no AWS config at all
 

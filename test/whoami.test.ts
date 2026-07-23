@@ -217,11 +217,20 @@ describe("whoamiRun — credential errors", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Region resolution — falls back to aws configure get region
+// Region resolution — reads from ~/.aws/config via INI parser (avoids subprocess)
 // ---------------------------------------------------------------------------
 
+// Helper: write a temp config file and return its path.
+function makeWhoamiConfig(content: string): string {
+  const dir = mkdtempSync(join(tmpdir(), "aws-axi-whoami-cfg-"));
+  tempDirs.push(dir);
+  const p = join(dir, "config");
+  writeFileSync(p, content, "utf-8");
+  return p;
+}
+
 describe("whoamiRun — region resolution", () => {
-  it("reports region from context when supplied", async () => {
+  it("reports region from context when supplied (context takes precedence)", async () => {
     const stub = createStub({
       stdout:
         '{"Account":"123456789012","UserId":"U1","Arn":"arn:aws:iam::123456789012:user/test"}',
@@ -231,80 +240,52 @@ describe("whoamiRun — region resolution", () => {
     const result = await whoamiRun({
       context: { profile: "dev", region: "eu-west-1" },
       binary: stub,
+      configPath: EMPTY_CONFIG_PATH,
     });
     expect(result.whoami.region).toBe("eu-west-1");
   });
 
-  it("falls back to 'aws configure get region' when context has no region", async () => {
-    // Multi-dispatch stub: sts → identity JSON, configure → region string
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-whoami-region-"));
-    tempDirs.push(dir);
-    const stub = join(dir, "aws");
-    writeFileSync(
-      stub,
-      [
-        "#!/bin/sh",
-        "case \"$1\" in",
-        "  sts) printf '%s' '{\"Account\":\"123456789012\",\"UserId\":\"U1\",\"Arn\":\"arn:aws:iam::123456789012:user/test\"}'; exit 0;;",
-        "  configure) printf '%s' 'us-west-2'; exit 0;;",
-        "  *) exit 1;;",
-        "esac",
-      ].join("\n"),
-    );
-    chmodSync(stub, 0o755);
+  it("reads region from ~/.aws/config when context has no region", async () => {
+    // INI-based lookup: no subprocess needed.
+    const configPath = makeWhoamiConfig("[profile dev]\nregion = us-west-2\n");
+    const stub = createStub({
+      stdout: '{"Account":"123456789012","UserId":"U1","Arn":"arn:aws:iam::123456789012:user/test"}',
+      exitCode: 0,
+    });
 
     const result = await whoamiRun({
       context: { profile: "dev", region: undefined },
       binary: stub,
+      configPath,
     });
     expect(result.whoami.region).toBe("us-west-2");
   });
 
-  it("degrades to 'unknown' when configure get region fails", async () => {
-    // Multi-dispatch stub: sts succeeds, configure fails
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-whoami-noregion-"));
-    tempDirs.push(dir);
-    const stub = join(dir, "aws");
-    writeFileSync(
-      stub,
-      [
-        "#!/bin/sh",
-        "case \"$1\" in",
-        "  sts) printf '%s' '{\"Account\":\"123456789012\",\"UserId\":\"U1\",\"Arn\":\"arn:aws:iam::123456789012:user/test\"}'; exit 0;;",
-        "  configure) exit 1;;",
-        "  *) exit 1;;",
-        "esac",
-      ].join("\n"),
-    );
-    chmodSync(stub, 0o755);
+  it("degrades to 'unknown' when profile has no region in config", async () => {
+    const configPath = makeWhoamiConfig("[profile dev]\nsso_session = example\n");
+    const stub = createStub({
+      stdout: '{"Account":"123456789012","UserId":"U1","Arn":"arn:aws:iam::123456789012:user/test"}',
+      exitCode: 0,
+    });
 
     const result = await whoamiRun({
       context: { profile: "dev", region: undefined },
       binary: stub,
+      configPath,
     });
     expect(result.whoami.region).toBe("unknown");
   });
 
-  it("degrades to 'unknown' when configure returns empty string", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-whoami-emptyregion-"));
-    tempDirs.push(dir);
-    const stub = join(dir, "aws");
-    writeFileSync(
-      stub,
-      [
-        "#!/bin/sh",
-        "case \"$1\" in",
-        "  sts) printf '%s' '{\"Account\":\"123456789012\",\"UserId\":\"U1\",\"Arn\":\"arn:aws:iam::123456789012:user/test\"}'; exit 0;;",
-        "  configure) printf '%s' ''; exit 0;;",
-        "  *) exit 1;;",
-        "esac",
-      ].join("\n"),
-    );
-    chmodSync(stub, 0o755);
+  it("degrades to 'unknown' when config file is absent", async () => {
+    const stub = createStub({
+      stdout: '{"Account":"123456789012","UserId":"U1","Arn":"arn:aws:iam::123456789012:user/test"}',
+      exitCode: 0,
+    });
 
     const result = await whoamiRun({
       context: { profile: "dev", region: undefined },
       binary: stub,
+      configPath: EMPTY_CONFIG_PATH,
     });
     expect(result.whoami.region).toBe("unknown");
   });
@@ -320,7 +301,7 @@ describe("whoamiRun — accurate profile reporting", () => {
     // whoami must report "admin", never "default".
     const stub = createStub({
       stdout:
-        '{"Account":"465910372065","UserId":"AROAWY6TMC3Q:bauti","Arn":"arn:aws:sts::465910372065:assumed-role/Admin/bauti"}',
+        '{"Account":"123456789012","UserId":"AROATESTEXAMPLE:testuser","Arn":"arn:aws:sts::123456789012:assumed-role/Admin/testuser"}',
       exitCode: 0,
     });
 

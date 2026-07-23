@@ -57,16 +57,19 @@ function enrichNoCredsError(
   configPath: string | undefined,
 ): ParsedAwsError {
   // Only relevant when no profile was selected and the error is NO_CREDENTIALS.
-  if (parsed.code !== "NO_CREDENTIALS" || context?.profile !== undefined) {
+  // Use a truthiness guard so an empty-string profile (shouldn't happen after F1
+  // context.ts fix, but defensive) is treated the same as undefined.
+  if (parsed.code !== "NO_CREDENTIALS" || context?.profile) {
     return parsed;
   }
 
   const allProfiles = readAwsConfigProfiles(configPath);
-  // Only named profiles matter: [profile x]. [default] would have worked.
+  // Separate default from named profiles: [profile x] are the actionable ones.
+  const defaultExists = allProfiles.includes("default");
   const namedProfiles = allProfiles.filter((p) => p !== "default");
 
   if (namedProfiles.length > 0) {
-    return buildNoProfileSelectedError(namedProfiles);
+    return buildNoProfileSelectedError(namedProfiles, defaultExists);
   }
 
   return parsed;
@@ -79,6 +82,17 @@ function buildArgs(userArgs: readonly string[]): string[] {
 function buildChildEnv(context: AwsContext | undefined): Record<string, string | undefined> {
   // Clone current env so the child inherits it; overlay profile/region.
   const env: Record<string, string | undefined> = { ...process.env } as Record<string, string | undefined>;
+
+  // Strip empty/whitespace AWS profile vars from the inherited env. The real
+  // aws CLI does NOT treat AWS_PROFILE="" as absent — it errors with
+  // "The config profile () could not be found". Since context.ts normalises
+  // empties to undefined, any profile in context is guaranteed non-empty.
+  for (const key of ["AWS_PROFILE", "AWS_DEFAULT_PROFILE", "AWS_AXI_PROFILE"] as const) {
+    if (!env[key]?.trim()) {
+      delete env[key];
+    }
+  }
+
   if (context?.profile) {
     env["AWS_PROFILE"] = context.profile;
   }

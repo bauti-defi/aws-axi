@@ -9,7 +9,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { parseAwsConfigProfiles, readAwsConfigProfiles } from "../src/aws-config.js";
+import { parseAwsConfigProfiles, readAwsConfigProfiles, readConfigProfileRegion } from "../src/aws-config.js";
 
 const tempDirs: string[] = [];
 
@@ -133,30 +133,30 @@ describe("parseAwsConfigProfiles — realistic ~/.aws/config layout", () => {
     const content = `[profile personal]
 region = us-west-2
 
-[sso-session damm]
-sso_start_url = https://damm.awsapps.com/start
+[sso-session example]
+sso_start_url = https://example.awsapps.com/start
 sso_region = us-east-1
 sso_registration_scopes = sso:account:access
 
 [profile dev]
-sso_session = damm
-sso_account_id = 465910372065
-sso_role_name = DammDeveloper
+sso_session = example
+sso_account_id = 123456789012
+sso_role_name = ExampleDeveloper
 
 [profile admin]
-sso_session = damm
-sso_account_id = 465910372065
-sso_role_name = DammAdmin
+sso_session = example
+sso_account_id = 123456789012
+sso_role_name = ExampleAdmin
 
-[sso-session monte]
-sso_start_url = https://monte.awsapps.com/start
+[sso-session example2]
+sso_start_url = https://example2.awsapps.com/start
 sso_region = us-east-1
 
 [profile monte]
-sso_session = monte
+sso_session = example2
 
 [profile kleros-mm-dev]
-sso_session = damm
+sso_session = example
 `;
     expect(parseAwsConfigProfiles(content)).toEqual([
       "personal",
@@ -195,5 +195,108 @@ describe("readAwsConfigProfiles — file I/O via injected configPath", () => {
     const configPath = join(dir, "config");
     writeFileSync(configPath, "", "utf-8");
     expect(readAwsConfigProfiles(configPath)).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readAwsConfigProfiles — AWS_CONFIG_FILE environment variable (F4)
+// ---------------------------------------------------------------------------
+
+describe("readAwsConfigProfiles — AWS_CONFIG_FILE env override", () => {
+  let savedConfigFile: string | undefined;
+
+  afterEach(() => {
+    if (savedConfigFile === undefined) {
+      delete process.env["AWS_CONFIG_FILE"];
+    } else {
+      process.env["AWS_CONFIG_FILE"] = savedConfigFile;
+    }
+  });
+
+  it("reads from AWS_CONFIG_FILE when set and no explicit configPath given", () => {
+    savedConfigFile = process.env["AWS_CONFIG_FILE"];
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
+    tempDirs.push(dir);
+    const altPath = join(dir, "alt-config");
+    writeFileSync(altPath, "[profile via-env-var]\n[profile also-via-env]\n", "utf-8");
+
+    process.env["AWS_CONFIG_FILE"] = altPath;
+    // No explicit configPath — must fall back to AWS_CONFIG_FILE
+    expect(readAwsConfigProfiles()).toEqual(["via-env-var", "also-via-env"]);
+  });
+
+  it("explicit configPath overrides AWS_CONFIG_FILE", () => {
+    savedConfigFile = process.env["AWS_CONFIG_FILE"];
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
+    tempDirs.push(dir);
+    const envPath = join(dir, "env-config");
+    const explicitPath = join(dir, "explicit-config");
+    writeFileSync(envPath, "[profile from-env]\n", "utf-8");
+    writeFileSync(explicitPath, "[profile from-explicit]\n", "utf-8");
+
+    process.env["AWS_CONFIG_FILE"] = envPath;
+    // Explicit configPath wins over AWS_CONFIG_FILE
+    expect(readAwsConfigProfiles(explicitPath)).toEqual(["from-explicit"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// readConfigProfileRegion — per-profile region lookup (F5)
+// ---------------------------------------------------------------------------
+
+describe("readConfigProfileRegion — region lookup from config", () => {
+  it("returns region for a [profile x] section", () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
+    tempDirs.push(dir);
+    const configPath = join(dir, "config");
+    writeFileSync(
+      configPath,
+      "[profile dev]\nregion = us-west-2\n[profile admin]\nregion = eu-west-1\n",
+      "utf-8",
+    );
+    expect(readConfigProfileRegion("dev", configPath)).toBe("us-west-2");
+    expect(readConfigProfileRegion("admin", configPath)).toBe("eu-west-1");
+  });
+
+  it("returns region for the [default] section", () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
+    tempDirs.push(dir);
+    const configPath = join(dir, "config");
+    writeFileSync(configPath, "[default]\nregion = ap-southeast-1\n", "utf-8");
+    expect(readConfigProfileRegion("default", configPath)).toBe("ap-southeast-1");
+  });
+
+  it("returns undefined when profile has no region key", () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
+    tempDirs.push(dir);
+    const configPath = join(dir, "config");
+    writeFileSync(configPath, "[profile dev]\nsso_session = example\n", "utf-8");
+    expect(readConfigProfileRegion("dev", configPath)).toBeUndefined();
+  });
+
+  it("returns undefined when config file is absent", () => {
+    expect(readConfigProfileRegion("dev", "/nonexistent/path/.aws/config")).toBeUndefined();
+  });
+
+  it("returns undefined when profile does not exist in config", () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
+    tempDirs.push(dir);
+    const configPath = join(dir, "config");
+    writeFileSync(configPath, "[profile other]\nregion = us-east-1\n", "utf-8");
+    expect(readConfigProfileRegion("dev", configPath)).toBeUndefined();
+  });
+
+  it("stops reading at the next section header (does not bleed between sections)", () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
+    tempDirs.push(dir);
+    const configPath = join(dir, "config");
+    writeFileSync(
+      configPath,
+      "[profile dev]\n[profile admin]\nregion = eu-west-1\n",
+      "utf-8",
+    );
+    // dev has no region of its own (admin's region must not bleed in)
+    expect(readConfigProfileRegion("dev", configPath)).toBeUndefined();
+    expect(readConfigProfileRegion("admin", configPath)).toBe("eu-west-1");
   });
 });
