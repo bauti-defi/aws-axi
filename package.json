@@ -1,6 +1,6 @@
 {
   "name": "aws-axi",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "description": "Agent-ergonomic wrapper around the AWS CLI. Prefer this over `aws` for AWS operations.",
   "keywords": ["aws", "cli", "agent", "axi", "toon"],
