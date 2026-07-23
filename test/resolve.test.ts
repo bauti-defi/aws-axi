@@ -4,21 +4,22 @@
  * No mocks — real stub aws binaries via the `binary` seam. Each primitive
  * resolves an AWS resource id to a human name using the Name tag (or
  * group-name for SGs), with in-process caching across repeated calls.
+ *
+ * These stubs MUST come from `uniqueStubBin`, not the pool: `resolve/vpc.ts`,
+ * `subnet.ts` and `sg.ts` memoize for the lifetime of the process under a key
+ * that includes the binary path. A recycled path would let one test's cached
+ * entry satisfy the next test's lookup — the "caches results" and "returns
+ * null on AWS error" cases both go RED when that happens, which is how this
+ * was caught. The per-test fresh inode IS the cache isolation here.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import {
-  writeFileSync,
-  chmodSync,
-  rmSync,
-  mkdtempSync,
-  readFileSync,
-  existsSync,
-} from "node:fs";
+import { rmSync, mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { resolveVpc } from "../src/resolve/vpc.js";
 import { resolveSubnet } from "../src/resolve/subnet.js";
 import { resolveSg } from "../src/resolve/sg.js";
+import { uniqueStubBin } from "./helpers/stub-bin.js";
 
 // ---------------------------------------------------------------------------
 // Stub factory
@@ -35,9 +36,6 @@ function createStub(spec: {
   stderr?: string;
   exitCode?: number;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-resolve-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
   const lines = [
     "#!/bin/sh",
     spec.stdout !== undefined
@@ -50,8 +48,7 @@ function createStub(spec: {
   ]
     .filter(Boolean)
     .join("\n");
-  writeFileSync(p, lines);
-  chmodSync(p, 0o755);
+  const p = uniqueStubBin(lines);
   return p;
 }
 
@@ -63,9 +60,10 @@ function createCountingStub(stdout: string): {
   readonly binary: string;
   readonly counterFile: string;
 } {
+  // The stub itself is pooled, but this dir still holds the sibling counter
+  // file that the stub reads and writes across invocations.
   const dir = mkdtempSync(join(tmpdir(), "aws-axi-resolve-count-"));
   tempDirs.push(dir);
-  const p = join(dir, "aws");
   const counterFile = join(dir, "calls");
 
   const script = [
@@ -84,8 +82,7 @@ function createCountingStub(stdout: string): {
     `exit 1`,
   ].join("\n");
 
-  writeFileSync(p, script);
-  chmodSync(p, 0o755);
+  const p = uniqueStubBin(script);
   return { binary: p, counterFile };
 }
 

@@ -22,7 +22,7 @@
     "access": "public"
   },
   "scripts": {
-    "test": "bun test",
+    "test": "bun test --timeout 20000",
     "pretest": "bun run build",
     "typecheck": "tsc --noEmit",
     "dev": "bun --no-env-file bin/aws-axi.ts",

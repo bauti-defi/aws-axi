@@ -7,7 +7,7 @@
  *   - No function mocks
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -19,6 +19,11 @@ import {
   type EngineRunOptions,
 } from "../src/engine.js";
 import { resolveOperationName, loadService } from "../src/model.js";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
+
+afterEach(() => {
+  releaseStubBins();
+});
 
 // ── Fixture paths ─────────────────────────────────────────────────────────────
 
@@ -33,9 +38,6 @@ function createStub(spec: {
   stderr?: string;
   exitCode?: number;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-engine-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
 
   function shellQuote(s: string): string {
     return `'${s.replaceAll("'", "'\\''")}'`;
@@ -54,8 +56,7 @@ function createStub(spec: {
     .filter(Boolean)
     .join("\n");
 
-  writeFileSync(p, lines);
-  chmodSync(p, 0o755);
+  const p = stubBin(lines);
   return p;
 }
 
@@ -70,9 +71,6 @@ function createArgBanStub(spec: {
   bannedArg: string;
   validStdout: string;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-engine-ban-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
 
   function shellQuote(s: string): string {
     return `'${s.replaceAll("'", "'\\''")}'`;
@@ -90,8 +88,7 @@ function createArgBanStub(spec: {
     "fi",
     `printf '%s' ${shellQuote(spec.validStdout)}`,
   ].join("\n");
-  writeFileSync(p, script);
-  chmodSync(p, 0o755);
+  const p = stubBin(script);
   return p;
 }
 
@@ -103,9 +100,6 @@ function createArgGuardStub(spec: {
   requiredArg: string;
   validStdout: string;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-engine-guard-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
 
   function shellQuote(s: string): string {
     return `'${s.replaceAll("'", "'\\''")}'`;
@@ -123,8 +117,7 @@ function createArgGuardStub(spec: {
     "fi",
     `printf '%s' ${shellQuote(spec.validStdout)}`,
   ].join("\n");
-  writeFileSync(p, script);
-  chmodSync(p, 0o755);
+  const p = stubBin(script);
   return p;
 }
 

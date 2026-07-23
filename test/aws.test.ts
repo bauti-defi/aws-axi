@@ -6,11 +6,16 @@
  * boundary without requiring live AWS credentials.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { awsRaw, awsJson, awsExec } from "../src/aws.js";
 import { AxiError } from "axi-sdk-js";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
+
+afterEach(() => {
+  releaseStubBins();
+});
 
 // ---------------------------------------------------------------------------
 // Stub factory — creates a real executable shell script in a temp dir.
@@ -25,9 +30,6 @@ interface StubSpec {
 const tempDirs: string[] = [];
 
 function createStub(spec: StubSpec): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-stub-"));
-  tempDirs.push(dir);
-  const scriptPath = join(dir, "aws");
 
   // Use printf with JSON.stringify to safely embed arbitrary strings.
   // JSON.stringify wraps the value in double-quotes and escapes internal
@@ -46,8 +48,7 @@ function createStub(spec: StubSpec): string {
     .filter(Boolean)
     .join("\n");
 
-  writeFileSync(scriptPath, lines);
-  chmodSync(scriptPath, 0o755);
+  const scriptPath = stubBin(lines);
   return scriptPath;
 }
 
@@ -117,11 +118,7 @@ describe("awsRaw", () => {
 
   it("appends --output json to every invocation", async () => {
     // Stub that echoes its args to stdout so we can inspect them
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-stub-"));
-    tempDirs.push(dir);
-    const scriptPath = join(dir, "aws");
-    writeFileSync(scriptPath, `#!/bin/sh\necho "$@"\nexit 0`);
-    chmodSync(scriptPath, 0o755);
+    const scriptPath = stubBin(`#!/bin/sh\necho "$@"\nexit 0`);
 
     const result = await awsRaw(["sts", "get-caller-identity"], {
       binary: scriptPath,
@@ -131,12 +128,8 @@ describe("awsRaw", () => {
   });
 
   it("sets AWS_PROFILE env var when context has profile", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-stub-"));
-    tempDirs.push(dir);
-    const scriptPath = join(dir, "aws");
     // Print the AWS_PROFILE env var that the child sees
-    writeFileSync(scriptPath, `#!/bin/sh\necho "$AWS_PROFILE"\nexit 0`);
-    chmodSync(scriptPath, 0o755);
+    const scriptPath = stubBin(`#!/bin/sh\necho "$AWS_PROFILE"\nexit 0`);
 
     const result = await awsRaw(["sts", "get-caller-identity"], {
       binary: scriptPath,
@@ -146,14 +139,7 @@ describe("awsRaw", () => {
   });
 
   it("sets AWS_DEFAULT_REGION env var when context has region", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-stub-"));
-    tempDirs.push(dir);
-    const scriptPath = join(dir, "aws");
-    writeFileSync(
-      scriptPath,
-      `#!/bin/sh\necho "$AWS_DEFAULT_REGION"\nexit 0`,
-    );
-    chmodSync(scriptPath, 0o755);
+    const scriptPath = stubBin(`#!/bin/sh\necho "$AWS_DEFAULT_REGION"\nexit 0`);
 
     const result = await awsRaw(["sts", "get-caller-identity"], {
       binary: scriptPath,

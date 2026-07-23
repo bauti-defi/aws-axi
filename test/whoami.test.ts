@@ -3,11 +3,16 @@
  * No mocks — the full `awsJson` exec seam runs with a subprocess boundary.
  */
 import { describe, it, expect, afterEach, beforeEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
+import { writeFileSync, rmSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { whoamiRun } from "../src/commands/whoami.js";
 import { AxiError } from "axi-sdk-js";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
+
+afterEach(() => {
+  releaseStubBins();
+});
 
 // Absent/empty configPath prevents the NO_PROFILE_SELECTED enrichment from
 // reading the developer's real ~/.aws/config in tests.
@@ -20,9 +25,6 @@ function createStub(spec: {
   stderr?: string;
   exitCode?: number;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-whoami-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
 
   function shellQuote(s: string): string {
     return `'${s.replaceAll("'", "'\\''")}'`;
@@ -41,8 +43,7 @@ function createStub(spec: {
     .filter(Boolean)
     .join("\n");
 
-  writeFileSync(p, lines);
-  chmodSync(p, 0o755);
+  const p = stubBin(lines);
   return p;
 }
 
@@ -69,9 +70,6 @@ function createMultiDispatchStub(options: {
   readonly identityJson: string;
   readonly configureRegion?: string;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-whoami-multi-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
 
   function shellQuote(s: string): string {
     return `'${s.replaceAll("'", "'\\''")}'`;
@@ -91,8 +89,7 @@ function createMultiDispatchStub(options: {
     "esac",
   ].join("\n");
 
-  writeFileSync(p, script);
-  chmodSync(p, 0o755);
+  const p = stubBin(script);
   return p;
 }
 
@@ -103,21 +100,14 @@ function createMultiDispatchStub(options: {
 describe("whoamiRun — happy path", () => {
   it("returns the fused identity+context object", async () => {
     // Stub handles both sts get-caller-identity and configure get region
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-whoami-multi-"));
-    tempDirs.push(dir);
-    const stub = join(dir, "aws");
-    writeFileSync(
-      stub,
-      [
+    const stub = stubBin([
         "#!/bin/sh",
         "case \"$1\" in",
         "  sts) printf '%s' '{\"Account\":\"123456789012\",\"UserId\":\"AIDAJQABLCHTEST\",\"Arn\":\"arn:aws:iam::123456789012:user/test-user\"}'; exit 0;;",
         "  configure) printf '%s' 'us-west-2'; exit 0;;",
         "  *) exit 1;;",
         "esac",
-      ].join("\n"),
-    );
-    chmodSync(stub, 0o755);
+      ].join("\n"));
 
     const result = await whoamiRun({
       context: { profile: "my-profile", region: "us-west-2" },
