@@ -45,7 +45,13 @@ export function stripContextArgs(args: readonly string[]): {
   return {
     strippedArgs: stripped,
     context: {
-      profile: profile ?? process.env["AWS_PROFILE"] ?? undefined,
+      // Precedence: --profile flag > AWS_PROFILE > AWS_DEFAULT_PROFILE > AWS_AXI_PROFILE
+      profile:
+        profile ??
+        process.env["AWS_PROFILE"] ??
+        process.env["AWS_DEFAULT_PROFILE"] ??
+        process.env["AWS_AXI_PROFILE"] ??
+        undefined,
       region:
         region ??
         process.env["AWS_REGION"] ??

@@ -12,7 +12,14 @@
  */
 import { execFile } from "node:child_process";
 import type { AwsContext } from "./context.js";
-import { mapAwsError, parseAwsError, AxiError } from "./errors.js";
+import {
+  mapAwsError,
+  parseAwsError,
+  buildNoProfileSelectedError,
+  AxiError,
+  type ParsedAwsError,
+} from "./errors.js";
+import { readAwsConfigProfiles } from "./aws-config.js";
 
 export interface ExecResult {
   readonly stdout: string;
@@ -25,9 +32,45 @@ export interface AwsRunOptions {
   readonly binary?: string;
   /** Per-call profile/region context injected as child-process env vars. */
   readonly context?: AwsContext;
+  /**
+   * Override the path to ~/.aws/config for NO_PROFILE_SELECTED diagnostics.
+   * Defaults to the real ~/.aws/config. Injectable for tests so they never
+   * read the developer's actual config file.
+   */
+  readonly configPath?: string;
 }
 
 const MAX_BUFFER_BYTES = 10 * 1024 * 1024; // 10 MB
+
+/**
+ * When the child aws returns NO_CREDENTIALS and no profile was selected,
+ * read ~/.aws/config to discover whether named profiles exist. If they do,
+ * upgrade the error to NO_PROFILE_SELECTED with the profile list so the user
+ * (or an agent) knows to pass --profile rather than re-authenticating.
+ *
+ * If configPath is absent/empty → falls back to NO_CREDENTIALS unchanged.
+ * Never throws — diagnostic I/O is best-effort.
+ */
+function enrichNoCredsError(
+  parsed: ParsedAwsError,
+  context: AwsContext | undefined,
+  configPath: string | undefined,
+): ParsedAwsError {
+  // Only relevant when no profile was selected and the error is NO_CREDENTIALS.
+  if (parsed.code !== "NO_CREDENTIALS" || context?.profile !== undefined) {
+    return parsed;
+  }
+
+  const allProfiles = readAwsConfigProfiles(configPath);
+  // Only named profiles matter: [profile x]. [default] would have worked.
+  const namedProfiles = allProfiles.filter((p) => p !== "default");
+
+  if (namedProfiles.length > 0) {
+    return buildNoProfileSelectedError(namedProfiles);
+  }
+
+  return parsed;
+}
 
 function buildArgs(userArgs: readonly string[]): string[] {
   return [...userArgs, "--output", "json"];
@@ -107,7 +150,12 @@ export async function awsExec(
     throw mapAwsError("ENOENT", 127);
   }
   if (result.exitCode !== 0) {
-    throw mapAwsError(result.stderr, result.exitCode);
+    const parsed = enrichNoCredsError(
+      parseAwsError(result.stderr, result.exitCode),
+      options.context,
+      options.configPath,
+    );
+    throw new AxiError(parsed.message, parsed.code, [...parsed.suggestions]);
   }
   return result.stdout;
 }
@@ -128,10 +176,11 @@ export async function awsJson<T = unknown>(
   }
 
   if (result.exitCode !== 0) {
-    const parsed = parseAwsError(result.stderr, result.exitCode);
-    if (parsed.code === "DRY_RUN_SUCCESS") {
+    const base = parseAwsError(result.stderr, result.exitCode);
+    if (base.code === "DRY_RUN_SUCCESS") {
       return {} as T;
     }
+    const parsed = enrichNoCredsError(base, options.context, options.configPath);
     throw new AxiError(parsed.message, parsed.code, [...parsed.suggestions]);
   }
 

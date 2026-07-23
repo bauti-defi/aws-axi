@@ -472,7 +472,12 @@ describe("iamRun — list-attached-role-policies", () => {
 // ---------------------------------------------------------------------------
 
 describe("iamRun — error propagation", () => {
-  it("propagates NO_CREDENTIALS error from aws", async () => {
+  it("propagates auth error from aws (NO_CREDENTIALS or NO_PROFILE_SELECTED)", async () => {
+    // The exact code depends on whether ~/.aws/config has named profiles:
+    //   NO_CREDENTIALS       — no profiles configured at all
+    //   NO_PROFILE_SELECTED  — profiles exist but none was selected
+    // Both are auth-family errors; the command layer must surface whichever applies.
+    const AUTH_CODES = new Set(["NO_CREDENTIALS", "NO_PROFILE_SELECTED"]);
     const stub = createStub({
       stdout: "",
       stderr: "Unable to locate credentials",
@@ -483,7 +488,7 @@ describe("iamRun — error propagation", () => {
       expect(true).toBe(false);
     } catch (e) {
       expect(e).toBeInstanceOf(AxiError);
-      expect((e as AxiError).code).toBe("NO_CREDENTIALS");
+      expect(AUTH_CODES.has((e as AxiError).code)).toBe(true);
     }
   });
 });

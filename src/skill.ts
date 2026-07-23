@@ -97,5 +97,47 @@ Run \`npx -y aws-axi --help\` for global flags, or \`npx -y aws-axi <command> --
 - **Overlay superset contract**: enriched overlays accept all flags the real \`aws\` CLI accepts — overlays change the *output*, never restrict the *input*. Unknown flags (\`--filters\`, \`--path-prefix\`, \`--grant-tokens\`, etc.) are forwarded verbatim. One exception: \`--output\` is stripped (aws-axi forces \`--output json\` internally and reformats as TOON; passing \`--output text\` has no effect).
 - **\`--query\` bypass**: \`--query\` is forwarded to the underlying \`aws\` call; when present, aws-axi returns the raw JMESPath result instead of the curated TOON projection. Output is **unbounded** — botocore auto-pages all results (the default cap is suppressed). To bound output size when using \`--query\`, pass \`--max-items N\` (or \`--limit N\` on \`logs\`). **Exception — secret redaction takes precedence over \`--query\`**: on \`secretsmanager get-secret-value\`, using \`--query\` without \`--reveal\` is a hard error (USAGE_ERROR). AWS always returns \`SecretString\` in plaintext; \`--query\` alone would bypass redaction. Pass \`--reveal\` to explicitly opt in, then \`--query\` applies normally.
 - **Engine-path operations are NOT redacted**: aws-axi only redacts output on its hand-polished overlays (the commands listed above). Operations that route through the generic engine — any AWS operation not in the overlay list, including \`secretsmanager batch-get-secret-value\` — are forwarded directly to the \`aws\` CLI and their output is returned verbatim with **no redaction**. If you call a non-overlay secretsmanager operation, the response will include plaintext \`SecretString\` values without any \`--reveal\` requirement.
+
+## Troubleshooting
+
+### \`NO_PROFILE_SELECTED\` — no default profile (standard SSO-only setup)
+
+**This is NOT an authentication failure.** The SSO session may be fully valid.
+
+\`\`\`
+error: No AWS profile selected and no [default] profile exists in ~/.aws/config
+code: NO_PROFILE_SELECTED
+\`\`\`
+
+Cause: \`aws sso login --profile dev\` never creates a \`[default]\` section, so
+\`~/.aws/config\` may contain only named profiles (\`[profile dev]\`, \`[profile admin]\`,
+etc.) with no default fallback. aws-axi lists the profiles it found.
+
+**Immediate actions (pick one):**
+
+| Method | Example |
+|---|---|
+| Per-command flag | \`npx -y aws-axi whoami --profile dev\` |
+| Shell export | \`export AWS_PROFILE=dev\` |
+| aws-axi env default | \`export AWS_AXI_PROFILE=dev\` |
+
+**\`AWS_AXI_PROFILE\`** is the aws-axi-level default profile env var. It has the
+lowest precedence: \`--profile\` > \`AWS_PROFILE\` > \`AWS_DEFAULT_PROFILE\` > \`AWS_AXI_PROFILE\`.
+Use it to pin a repo or agent session to a profile without affecting the system-wide
+\`AWS_PROFILE\` used by other tools.
+
+**As an agent:** \`NO_PROFILE_SELECTED\` (exit 253) means retry with a profile — it does NOT
+mean "the operator is logged out" or "credentials are missing". Read the \`found:\` list in
+the error output and re-invoke with \`--profile <name>\`. Do NOT ask the operator to run
+\`aws sso login\` — that will not help.
+
+### \`NO_CREDENTIALS\` — no AWS config at all
+
+Run \`aws sso login --profile <name>\` or \`aws configure\` to set up credentials first.
+
+### \`AUTH_EXPIRED\` — profile exists but SSO token stale
+
+Run \`aws sso login --profile <name>\` to refresh the session.
 `;
+
 }

@@ -12,7 +12,7 @@
  */
 import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
-import { awsJson } from "../aws.js";
+import { awsJson, awsRaw } from "../aws.js";
 
 interface StsCallerIdentity {
   readonly Account: string;
@@ -37,6 +37,11 @@ export interface WhoamiRunOptions {
   readonly context?: AwsContext;
   /** Override the aws binary path — for testing via real stub scripts. */
   readonly binary?: string;
+  /**
+   * Override path to ~/.aws/config for NO_PROFILE_SELECTED diagnostics.
+   * Injectable for tests so they never read the developer's real config.
+   */
+  readonly configPath?: string;
 }
 
 export const WHOAMI_HELP = `usage: aws-axi whoami [--profile <name>] [--region <region>]
@@ -68,17 +73,50 @@ function detectCredentialSource(context: AwsContext | undefined): string {
   if (process.env["AWS_ROLE_ARN"]) {
     return "assume-role";
   }
-  const profile = context?.profile ?? process.env["AWS_PROFILE"];
-  if (profile) {
-    return `profile:${profile}`;
+  // context.profile already includes AWS_PROFILE / AWS_DEFAULT_PROFILE /
+  // AWS_AXI_PROFILE — resolved by stripContextArgs in context.ts.
+  if (context?.profile) {
+    return `profile:${context.profile}`;
   }
   return "default";
 }
 
 /**
+ * Ask the aws CLI for the profile's configured region.
+ * `aws configure get region` reads from ~/.aws/config — no network call.
+ * Returns "unknown" on any error (including missing region config) so callers
+ * can degrade gracefully without crashing.
+ *
+ * Consistent with the "delegate credential resolution to aws CLI" design:
+ * we ask the CLI, not parse INI files, for authoritative config values.
+ */
+async function getProfileRegion(options: {
+  readonly binary: string | undefined;
+  readonly context: AwsContext | undefined;
+}): Promise<string> {
+  try {
+    const result = await awsRaw(["configure", "get", "region"], {
+      binary: options.binary,
+      context: options.context,
+    });
+    // ENOENT sentinel means the aws binary is missing — degrade silently.
+    if (result.exitCode === 0 && result.stderr !== "ENOENT") {
+      const region = result.stdout.trim();
+      if (region) {
+        return region;
+      }
+    }
+  } catch {
+    // Defensive — awsRaw should only throw on ENOENT, but degrade regardless.
+  }
+  return "unknown";
+}
+
+/**
  * Core logic — testable without the CLI layer.
- * Throws AxiError (NO_CREDENTIALS / AUTH_EXPIRED / SERVICE_CLIENT_ERROR) on
- * any aws failure; the CLI formats and exits appropriately.
+ * Throws AxiError (NO_CREDENTIALS / NO_PROFILE_SELECTED / AUTH_EXPIRED /
+ * SERVICE_CLIENT_ERROR) on any aws failure; the CLI formats and exits
+ * appropriately.
  */
 export async function whoamiRun(options: WhoamiRunOptions): Promise<WhoamiResult> {
   const identity = await awsJson<StsCallerIdentity>(
@@ -86,16 +124,21 @@ export async function whoamiRun(options: WhoamiRunOptions): Promise<WhoamiResult
     {
       binary: options.binary,
       context: options.context,
+      configPath: options.configPath,
     },
   );
 
-  const effectiveProfile =
-    options.context?.profile ?? process.env["AWS_PROFILE"] ?? "default";
+  // context.profile already reflects --profile / AWS_PROFILE / AWS_DEFAULT_PROFILE /
+  // AWS_AXI_PROFILE resolution (done by stripContextArgs). Report exactly what was used.
+  const effectiveProfile = options.context?.profile ?? "default";
+
+  // Region: context flag > AWS_REGION > AWS_DEFAULT_REGION > profile config (via CLI)
   const effectiveRegion =
     options.context?.region ??
     process.env["AWS_REGION"] ??
     process.env["AWS_DEFAULT_REGION"] ??
-    "unknown";
+    (await getProfileRegion({ binary: options.binary, context: options.context }));
+
   const credentialSource = detectCredentialSource(options.context);
 
   return {

@@ -20,6 +20,7 @@ export { AxiError };
 export type AwsErrorCode =
   | "USAGE_ERROR"
   | "NO_CREDENTIALS"
+  | "NO_PROFILE_SELECTED"
   | "AUTH_EXPIRED"
   | "SERVICE_CLIENT_ERROR"
   | "AWS_NOT_INSTALLED"
@@ -147,12 +148,35 @@ export function parseAwsError(
   };
 }
 
+/**
+ * Build a NO_PROFILE_SELECTED ParsedAwsError with a profile list.
+ *
+ * @param namedProfiles - profiles found in ~/.aws/config (sso-session blocks excluded)
+ */
+export function buildNoProfileSelectedError(namedProfiles: readonly string[]): ParsedAwsError {
+  const example = namedProfiles[0] ?? "dev";
+  return {
+    code: "NO_PROFILE_SELECTED",
+    botoCode: undefined,
+    operation: undefined,
+    message:
+      "No AWS profile selected and no [default] profile exists in ~/.aws/config",
+    suggestions: [
+      `Found profiles: ${namedProfiles.join(", ")}  (from ~/.aws/config)`,
+      `Pass a profile:  aws-axi <command> --profile ${example}`,
+      `Or export it:    export AWS_PROFILE=${example}`,
+    ],
+  };
+}
+
 /** Map an AwsErrorCode to the aws-axi process exit code. */
 export function awsExitCode(code: AwsErrorCode): number {
   switch (code) {
     case "USAGE_ERROR":
       return 252;
     case "NO_CREDENTIALS":
+      return 253;
+    case "NO_PROFILE_SELECTED":
       return 253;
     case "AUTH_EXPIRED":
       return 253;

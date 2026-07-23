@@ -184,7 +184,9 @@ describe("awsJson", () => {
     expect(result.Arn).toBe("arn:aws:iam::123456789012:user/test");
   });
 
-  it("throws AxiError with NO_CREDENTIALS on credentials error", async () => {
+  it("throws AxiError with NO_CREDENTIALS on credentials error (no profiles in config)", async () => {
+    // Inject a nonexistent configPath so the enrichment finds no named profiles
+    // and keeps the error as NO_CREDENTIALS — regression guard for the empty-config path.
     const stub = createStub({
       stdout: "",
       stderr: "Unable to locate credentials",
@@ -192,7 +194,10 @@ describe("awsJson", () => {
     });
 
     await expect(
-      awsJson(["sts", "get-caller-identity"], { binary: stub }),
+      awsJson(["sts", "get-caller-identity"], {
+        binary: stub,
+        configPath: "/nonexistent/path/to/.aws/config",
+      }),
     ).rejects.toBeInstanceOf(AxiError);
 
     try {
@@ -201,7 +206,10 @@ describe("awsJson", () => {
         stderr: "Unable to locate credentials",
         exitCode: 255,
       });
-      await awsJson(["sts", "get-caller-identity"], { binary: stub2 });
+      await awsJson(["sts", "get-caller-identity"], {
+        binary: stub2,
+        configPath: "/nonexistent/path/to/.aws/config",
+      });
     } catch (e) {
       expect((e as AxiError).code).toBe("NO_CREDENTIALS");
     }
