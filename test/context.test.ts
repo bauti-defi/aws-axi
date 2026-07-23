@@ -154,6 +154,29 @@ describe("profile precedence — empty-string env vars treated as absent", () =>
     const { context } = stripContextArgs(["whoami"]);
     expect(context.profile).toBeUndefined();
   });
+
+  it("padded-value AWS_PROFILE is NOT trimmed — value passed through as-is so raw aws CLI rejects it too", () => {
+    // nonEmpty() must treat whitespace-only as absent but must NOT trim a
+    // padded value like ' dev '. The raw aws CLI rejects ' dev ' with
+    // "The config profile ( dev ) could not be found"; aws-axi must agree.
+    savedEnv = saveEnv();
+    process.env["AWS_PROFILE"] = " dev ";
+    delete process.env["AWS_DEFAULT_PROFILE"];
+    delete process.env["AWS_AXI_PROFILE"];
+
+    const { context } = stripContextArgs(["whoami"]);
+    expect(context.profile).toBe(" dev ");
+  });
+
+  it("padded-value AWS_AXI_PROFILE is NOT trimmed", () => {
+    savedEnv = saveEnv();
+    delete process.env["AWS_PROFILE"];
+    delete process.env["AWS_DEFAULT_PROFILE"];
+    process.env["AWS_AXI_PROFILE"] = " admin ";
+
+    const { context } = stripContextArgs(["whoami"]);
+    expect(context.profile).toBe(" admin ");
+  });
 });
 
 // ---------------------------------------------------------------------------

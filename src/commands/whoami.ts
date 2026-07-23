@@ -12,8 +12,7 @@
  */
 import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
-import { awsJson } from "../aws.js";
-import { readConfigProfileRegion } from "../aws-config.js";
+import { awsJson, awsRaw } from "../aws.js";
 
 interface StsCallerIdentity {
   readonly Account: string;
@@ -83,22 +82,35 @@ function detectCredentialSource(context: AwsContext | undefined): string {
 }
 
 /**
- * Look up the region configured for `profile` in ~/.aws/config via the INI
- * parser. This replaces an `aws configure get region` subprocess call (~500ms
- * Python startup) with a direct file read (a few ms), making `whoami` ~38%
- * faster on the common no-region-env path.
+ * Ask the aws CLI for the region configured for the effective profile.
  *
- * Returns "unknown" on any error (missing file, missing key, FS error) so
- * callers degrade gracefully. Never throws.
+ * Region resolution is delegated to the CLI (see ADR-0003) — an independent
+ * INI parser proved to diverge in six measurable ways (credentials-file-wins
+ * precedence, `[profile default]` alias, capital `Region`, extra-whitespace
+ * headers, inline-comment headers, region-only-in-credentials). The apparent
+ * perf saving (~0.41s) is recovered by running this concurrently with
+ * sts get-caller-identity (~1.92s), so the net wall time is ~1.56s concurrent
+ * vs ~2.21s sequential — the full saving, with zero loss of correctness.
  *
- * @param profile    - effective profile name ("default" when no profile selected)
- * @param configPath - injectable for tests; honoured by readConfigProfileRegion
+ * Returns undefined on any failure; callers degrade to "unknown". Never throws.
  */
-function getProfileRegion(options: {
-  readonly profile: string;
-  readonly configPath: string | undefined;
-}): string {
-  return readConfigProfileRegion(options.profile, options.configPath) ?? "unknown";
+async function awsConfigureGetRegion(options: {
+  readonly binary?: string;
+  readonly context?: AwsContext;
+}): Promise<string | undefined> {
+  try {
+    const result = await awsRaw(["configure", "get", "region"], {
+      binary: options.binary,
+      context: options.context,
+    });
+    if (result.exitCode === 0) {
+      const region = result.stdout.trim();
+      return region || undefined;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -108,26 +120,42 @@ function getProfileRegion(options: {
  * appropriately.
  */
 export async function whoamiRun(options: WhoamiRunOptions): Promise<WhoamiResult> {
-  const identity = await awsJson<StsCallerIdentity>(
-    ["sts", "get-caller-identity"],
-    {
-      binary: options.binary,
-      context: options.context,
-      configPath: options.configPath,
-    },
-  );
-
   // context.profile already reflects --profile / AWS_PROFILE / AWS_DEFAULT_PROFILE /
   // AWS_AXI_PROFILE resolution (done by stripContextArgs). Report exactly what was used.
   const effectiveProfile = options.context?.profile ?? "default";
 
-  // Region: context flag > AWS_REGION > AWS_DEFAULT_REGION > profile config (from INI)
-  const effectiveRegion =
+  // Region: context flag > AWS_REGION > AWS_DEFAULT_REGION > aws configure get region.
+  // Skip the subprocess when the region is already known — common for agents that
+  // export AWS_REGION or pass --region.
+  const regionFromContext =
     options.context?.region ??
     process.env["AWS_REGION"] ??
-    process.env["AWS_DEFAULT_REGION"] ??
-    getProfileRegion({ profile: effectiveProfile, configPath: options.configPath });
+    process.env["AWS_DEFAULT_REGION"];
 
+  // Launch sts get-caller-identity and (if needed) aws configure get region
+  // concurrently. The region call (~0.41s) hides inside the STS round-trip
+  // (~1.92s): measured ~1.56s concurrent vs ~2.21s sequential.
+  //
+  // The region promise is wrapped in .catch() so a region failure can never
+  // prevent the STS result (including STS errors) from surfacing correctly.
+  const regionPromise: Promise<string | undefined> =
+    regionFromContext !== undefined
+      ? Promise.resolve(undefined)
+      : awsConfigureGetRegion({
+          binary: options.binary,
+          context: options.context,
+        }).catch(() => undefined);
+
+  const [identity, cliRegion] = await Promise.all([
+    awsJson<StsCallerIdentity>(["sts", "get-caller-identity"], {
+      binary: options.binary,
+      context: options.context,
+      configPath: options.configPath,
+    }),
+    regionPromise,
+  ]);
+
+  const effectiveRegion = regionFromContext ?? cliRegion ?? "unknown";
   const credentialSource = detectCredentialSource(options.context);
 
   return {

@@ -56,6 +56,46 @@ afterEach(() => {
   }
 });
 
+/**
+ * Multi-dispatch stub: routes on $1 so that sts get-caller-identity and
+ * aws configure get region can be called concurrently with correct responses.
+ *
+ * @param identityJson  - JSON to emit for the `sts` subcommand
+ * @param configureRegion - region string to emit for `configure get region`;
+ *   undefined means exit 1 (profile has no region / not found)
+ *   empty string means exit 0 with empty stdout (region = "unknown" after trim)
+ */
+function createMultiDispatchStub(options: {
+  readonly identityJson: string;
+  readonly configureRegion?: string;
+}): string {
+  const dir = mkdtempSync(join(tmpdir(), "aws-axi-whoami-multi-"));
+  tempDirs.push(dir);
+  const p = join(dir, "aws");
+
+  function shellQuote(s: string): string {
+    return `'${s.replaceAll("'", "'\\''")}'`;
+  }
+
+  const configureCmd =
+    options.configureRegion !== undefined
+      ? `printf '%s' ${shellQuote(options.configureRegion)}; exit 0`
+      : "exit 1";
+
+  const script = [
+    "#!/bin/sh",
+    `case "$1" in`,
+    `  sts) printf '%s' ${shellQuote(options.identityJson)}; exit 0;;`,
+    `  configure) ${configureCmd};;`,
+    `  *) exit 1;;`,
+    "esac",
+  ].join("\n");
+
+  writeFileSync(p, script);
+  chmodSync(p, 0o755);
+  return p;
+}
+
 // ---------------------------------------------------------------------------
 // The fused TOON block (happy path)
 // ---------------------------------------------------------------------------
@@ -96,10 +136,12 @@ describe("whoamiRun — happy path", () => {
   });
 
   it("falls back to 'default' profile when none specified", async () => {
-    const stub = createStub({
-      stdout:
+    // Multi-dispatch stub: configure get region runs concurrently (context has
+    // no region). configure exits 1 → "unknown"; test only checks profile.
+    const stub = createMultiDispatchStub({
+      identityJson:
         '{"Account":"999999999999","UserId":"AIDATEST","Arn":"arn:aws:iam::999999999999:user/nobody"}',
-      exitCode: 0,
+      configureRegion: undefined,
     });
 
     const result = await whoamiRun({
@@ -217,20 +259,12 @@ describe("whoamiRun — credential errors", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Region resolution — reads from ~/.aws/config via INI parser (avoids subprocess)
+// Region resolution — delegates to `aws configure get region` (CLI-authoritative)
 // ---------------------------------------------------------------------------
 
-// Helper: write a temp config file and return its path.
-function makeWhoamiConfig(content: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-whoami-cfg-"));
-  tempDirs.push(dir);
-  const p = join(dir, "config");
-  writeFileSync(p, content, "utf-8");
-  return p;
-}
-
 describe("whoamiRun — region resolution", () => {
-  it("reports region from context when supplied (context takes precedence)", async () => {
+  it("reports region from context when supplied (context takes precedence, no CLI call)", async () => {
+    // region in context → configure get region is NOT called
     const stub = createStub({
       stdout:
         '{"Account":"123456789012","UserId":"U1","Arn":"arn:aws:iam::123456789012:user/test"}',
@@ -245,41 +279,43 @@ describe("whoamiRun — region resolution", () => {
     expect(result.whoami.region).toBe("eu-west-1");
   });
 
-  it("reads region from ~/.aws/config when context has no region", async () => {
-    // INI-based lookup: no subprocess needed.
-    const configPath = makeWhoamiConfig("[profile dev]\nregion = us-west-2\n");
-    const stub = createStub({
-      stdout: '{"Account":"123456789012","UserId":"U1","Arn":"arn:aws:iam::123456789012:user/test"}',
-      exitCode: 0,
+  it("reads region from 'aws configure get region' when context has no region", async () => {
+    // Both STS and configure get region run concurrently through the same stub.
+    const stub = createMultiDispatchStub({
+      identityJson:
+        '{"Account":"123456789012","UserId":"U1","Arn":"arn:aws:iam::123456789012:user/test"}',
+      configureRegion: "ap-southeast-1",
     });
 
     const result = await whoamiRun({
       context: { profile: "dev", region: undefined },
       binary: stub,
-      configPath,
+      configPath: EMPTY_CONFIG_PATH,
     });
-    expect(result.whoami.region).toBe("us-west-2");
+    expect(result.whoami.region).toBe("ap-southeast-1");
   });
 
-  it("degrades to 'unknown' when profile has no region in config", async () => {
-    const configPath = makeWhoamiConfig("[profile dev]\nsso_session = example\n");
-    const stub = createStub({
-      stdout: '{"Account":"123456789012","UserId":"U1","Arn":"arn:aws:iam::123456789012:user/test"}',
-      exitCode: 0,
+  it("degrades to 'unknown' when 'aws configure get region' exits non-zero (profile has no region)", async () => {
+    const stub = createMultiDispatchStub({
+      identityJson:
+        '{"Account":"123456789012","UserId":"U1","Arn":"arn:aws:iam::123456789012:user/test"}',
+      configureRegion: undefined, // configure exits 1 → no region
     });
 
     const result = await whoamiRun({
       context: { profile: "dev", region: undefined },
       binary: stub,
-      configPath,
+      configPath: EMPTY_CONFIG_PATH,
     });
     expect(result.whoami.region).toBe("unknown");
   });
 
-  it("degrades to 'unknown' when config file is absent", async () => {
-    const stub = createStub({
-      stdout: '{"Account":"123456789012","UserId":"U1","Arn":"arn:aws:iam::123456789012:user/test"}',
-      exitCode: 0,
+  it("degrades to 'unknown' when 'aws configure get region' returns empty output", async () => {
+    // exit 0 but empty stdout → treated as "not set" by stdout.trim() || undefined
+    const stub = createMultiDispatchStub({
+      identityJson:
+        '{"Account":"123456789012","UserId":"U1","Arn":"arn:aws:iam::123456789012:user/test"}',
+      configureRegion: "", // empty
     });
 
     const result = await whoamiRun({
@@ -315,10 +351,10 @@ describe("whoamiRun — accurate profile reporting", () => {
   });
 
   it("reports 'default' when no profile is in context (real [default] credential chain)", async () => {
-    const stub = createStub({
-      stdout:
+    const stub = createMultiDispatchStub({
+      identityJson:
         '{"Account":"999999999999","UserId":"AIDATEST","Arn":"arn:aws:iam::999999999999:user/nobody"}',
-      exitCode: 0,
+      configureRegion: undefined,
     });
 
     const result = await whoamiRun({
@@ -339,8 +375,11 @@ describe("whoamiRun — accurate profile reporting", () => {
     });
 
     const result = await whoamiRun({
-      context: { profile: "dev", region: undefined },
+      // Provide a region so configure get region is not called — this test is
+      // about credentialSource, not region resolution.
+      context: { profile: "dev", region: "us-east-1" },
       binary: stub,
+      configPath: EMPTY_CONFIG_PATH,
     });
 
     expect(result.whoami.profile).toBe("dev");

@@ -9,7 +9,7 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { parseAwsConfigProfiles, readAwsConfigProfiles, readConfigProfileRegion } from "../src/aws-config.js";
+import { parseAwsConfigProfiles, readAwsConfigProfiles } from "../src/aws-config.js";
 
 const tempDirs: string[] = [];
 
@@ -240,63 +240,3 @@ describe("readAwsConfigProfiles — AWS_CONFIG_FILE env override", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// readConfigProfileRegion — per-profile region lookup (F5)
-// ---------------------------------------------------------------------------
-
-describe("readConfigProfileRegion — region lookup from config", () => {
-  it("returns region for a [profile x] section", () => {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
-    tempDirs.push(dir);
-    const configPath = join(dir, "config");
-    writeFileSync(
-      configPath,
-      "[profile dev]\nregion = us-west-2\n[profile admin]\nregion = eu-west-1\n",
-      "utf-8",
-    );
-    expect(readConfigProfileRegion("dev", configPath)).toBe("us-west-2");
-    expect(readConfigProfileRegion("admin", configPath)).toBe("eu-west-1");
-  });
-
-  it("returns region for the [default] section", () => {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
-    tempDirs.push(dir);
-    const configPath = join(dir, "config");
-    writeFileSync(configPath, "[default]\nregion = ap-southeast-1\n", "utf-8");
-    expect(readConfigProfileRegion("default", configPath)).toBe("ap-southeast-1");
-  });
-
-  it("returns undefined when profile has no region key", () => {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
-    tempDirs.push(dir);
-    const configPath = join(dir, "config");
-    writeFileSync(configPath, "[profile dev]\nsso_session = example\n", "utf-8");
-    expect(readConfigProfileRegion("dev", configPath)).toBeUndefined();
-  });
-
-  it("returns undefined when config file is absent", () => {
-    expect(readConfigProfileRegion("dev", "/nonexistent/path/.aws/config")).toBeUndefined();
-  });
-
-  it("returns undefined when profile does not exist in config", () => {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
-    tempDirs.push(dir);
-    const configPath = join(dir, "config");
-    writeFileSync(configPath, "[profile other]\nregion = us-east-1\n", "utf-8");
-    expect(readConfigProfileRegion("dev", configPath)).toBeUndefined();
-  });
-
-  it("stops reading at the next section header (does not bleed between sections)", () => {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
-    tempDirs.push(dir);
-    const configPath = join(dir, "config");
-    writeFileSync(
-      configPath,
-      "[profile dev]\n[profile admin]\nregion = eu-west-1\n",
-      "utf-8",
-    );
-    // dev has no region of its own (admin's region must not bleed in)
-    expect(readConfigProfileRegion("dev", configPath)).toBeUndefined();
-    expect(readConfigProfileRegion("admin", configPath)).toBe("eu-west-1");
-  });
-});

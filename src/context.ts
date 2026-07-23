@@ -17,7 +17,10 @@ export interface AwsContext {
  * suppress lower-precedence env vars like AWS_AXI_PROFILE.
  */
 function nonEmpty(value: string | undefined): string | undefined {
-  return value?.trim() ? value.trim() : undefined;
+  // Treat whitespace-only values as absent (same as undefined). But do NOT trim
+  // a padded value like " dev " — the raw `aws` CLI rejects it with "The config
+  // profile ( dev ) could not be found"; aws-axi must agree, not silently succeed.
+  return value?.trim() ? value : undefined;
 }
 
 /**

@@ -1,11 +1,13 @@
 /**
- * AWS config file parser — diagnostic and telemetry use only.
+ * AWS config file parser — diagnostics only.
  *
- * Reads ~/.aws/config to:
- *   1. Discover the available profile names (for NO_PROFILE_SELECTED diagnostics).
- *   2. Read a profile's configured region (for whoami — avoids an extra subprocess).
+ * Reads ~/.aws/config exclusively to discover available profile names so that
+ * a `NO_PROFILE_SELECTED` error can list them. This is the only permitted use
+ * of local config-file parsing in aws-axi (see ADR-0003).
  *
- * This is NEVER used to mint or validate credentials — the AWS CLI owns that.
+ * Any value aws-axi *reports* as fact about the session (profile, region,
+ * credential source) must come from the `aws` CLI — never from an independent
+ * re-parse of AWS config files.
  *
  * configPath is injectable so tests can point at a fake file without touching
  * the developer's real ~/.aws/config.
@@ -89,66 +91,3 @@ export function readAwsConfigProfiles(configPath?: string): string[] {
   }
 }
 
-/**
- * Read the region configured for a specific profile in ~/.aws/config.
- *
- * Used by whoami to resolve region without an extra `aws configure get`
- * subprocess — a few-ms file read vs ~500ms of Python AWS CLI startup.
- *
- * Resolution order for the config file path follows AWS_CONFIG_FILE / default,
- * same as readAwsConfigProfiles.
- *
- * Returns undefined if the profile section is absent, or if it has no `region`
- * key. Callers should fall back to "unknown" in that case.
- *
- * Never throws — FS errors degrade silently.
- *
- * @param profile     - profile name ("default" for [default], "dev" for [profile dev])
- * @param configPath  - override for testing; takes precedence over AWS_CONFIG_FILE
- */
-export function readConfigProfileRegion(profile: string, configPath?: string): string | undefined {
-  const path = configPath ?? process.env["AWS_CONFIG_FILE"] ?? join(homedir(), ".aws", "config");
-
-  if (!existsSync(path)) {
-    return undefined;
-  }
-
-  try {
-    const content = readFileSync(path, "utf-8");
-    // The section header for the target profile:
-    //   "default"     → [default]
-    //   any other     → [profile <name>]
-    const targetHeader = profile === "default" ? "[default]" : `[profile ${profile}]`;
-    let inSection = false;
-
-    for (const rawLine of content.split(/\r?\n/)) {
-      const line = rawLine.trim();
-
-      // Skip blank lines and comments
-      if (line === "" || line.startsWith("#") || line.startsWith(";")) {
-        continue;
-      }
-
-      if (line.startsWith("[")) {
-        // New section — check if it's our target
-        inSection = line === targetHeader;
-        continue;
-      }
-
-      if (inSection) {
-        const eqIdx = line.indexOf("=");
-        if (eqIdx !== -1) {
-          const key = line.slice(0, eqIdx).trim();
-          const val = line.slice(eqIdx + 1).trim();
-          if (key === "region" && val) {
-            return val;
-          }
-        }
-      }
-    }
-  } catch {
-    // Swallow FS errors — telemetry path must not throw
-  }
-
-  return undefined;
-}
