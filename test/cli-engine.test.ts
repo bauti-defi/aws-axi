@@ -9,11 +9,16 @@
  * Uses the fake-svc fixture model via AWS_DATA_PATH injection.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { main } from "../src/cli.js";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
+
+afterEach(() => {
+  releaseStubBins();
+});
 
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
 
@@ -28,9 +33,6 @@ interface StubSpec {
 }
 
 function createStub(spec: StubSpec): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-cli-engine-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
 
   function shellQuote(s: string): string {
     return `'${s.replaceAll("'", "'\\''")}'`;
@@ -49,8 +51,7 @@ function createStub(spec: StubSpec): string {
     .filter(Boolean)
     .join("\n");
 
-  writeFileSync(p, lines);
-  chmodSync(p, 0o755);
+  const p = stubBin(lines);
   return p;
 }
 

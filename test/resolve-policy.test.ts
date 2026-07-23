@@ -3,11 +3,16 @@
  * Uses real stub `aws` binaries — no mocks at the exec seam.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
+import { rmSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { resolvePolicy } from "../src/resolve/policy.js";
 import { AxiError } from "axi-sdk-js";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
+
+afterEach(() => {
+  releaseStubBins();
+});
 
 const tempDirs: string[] = [];
 
@@ -20,9 +25,6 @@ function createStub(spec: {
   stderr?: string;
   exitCode?: number;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-resolve-policy-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
   const lines = [
     "#!/bin/sh",
     spec.stdout !== undefined ? `printf '%s' ${shellQuote(spec.stdout)}` : "",
@@ -33,8 +35,7 @@ function createStub(spec: {
   ]
     .filter(Boolean)
     .join("\n");
-  writeFileSync(p, lines);
-  chmodSync(p, 0o755);
+  const p = stubBin(lines);
   return p;
 }
 
@@ -173,14 +174,7 @@ describe("resolvePolicy — name input", () => {
         },
       ],
     });
-    const successDir = mkdtempSync(join(tmpdir(), "aws-axi-resolve-policy-hit-"));
-    tempDirs.push(successDir);
-    const successScript = join(successDir, "aws");
-    writeFileSync(
-      successScript,
-      `#!/bin/sh\nprintf '%s' ${shellQuote(listJson)}\nexit 0`,
-    );
-    chmodSync(successScript, 0o755);
+    const successScript = stubBin(`#!/bin/sh\nprintf '%s' ${shellQuote(listJson)}\nexit 0`);
 
     const cache = new Map();
     const first = await resolvePolicy({
@@ -236,10 +230,7 @@ describe("resolvePolicy — name input", () => {
     const dir = mkdtempSync(join(tmpdir(), "aws-axi-resolve-policy-multi-"));
     tempDirs.push(dir);
     const countFile = join(dir, "count");
-    const stub = join(dir, "aws");
-    writeFileSync(
-      stub,
-      [
+    const stub = stubBin([
         "#!/bin/sh",
         `COUNT=$(cat "${countFile}" 2>/dev/null || echo 0)`,
         `echo $((COUNT + 1)) > "${countFile}"`,
@@ -249,9 +240,7 @@ describe("resolvePolicy — name input", () => {
         `  printf '%s' ${shellQuote(page2)}`,
         "fi",
         "exit 0",
-      ].join("\n"),
-    );
-    chmodSync(stub, 0o755);
+      ].join("\n"));
 
     const result = await resolvePolicy({
       nameOrArn: "TargetPolicy",

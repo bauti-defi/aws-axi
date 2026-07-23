@@ -6,7 +6,7 @@
  * live AWS credentials. No real buckets are created or deleted.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import type { S3LsResult } from "../src/commands/s3.js";
@@ -20,6 +20,11 @@ import {
   S3_PAGE_SIZE,
 } from "../src/commands/s3.js";
 import { AxiError } from "axi-sdk-js";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
+
+afterEach(() => {
+  releaseStubBins();
+});
 
 // ---------------------------------------------------------------------------
 // Stub factory
@@ -32,9 +37,6 @@ function createStub(spec: {
   stderr?: string;
   exitCode?: number;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
 
   function shellQuote(s: string): string {
     return `'${s.replaceAll("'", "'\\''")}'`;
@@ -53,8 +55,7 @@ function createStub(spec: {
     .filter(Boolean)
     .join("\n");
 
-  writeFileSync(p, lines);
-  chmodSync(p, 0o755);
+  const p = stubBin(lines);
   return p;
 }
 
@@ -205,11 +206,7 @@ describe("s3LsRun — list objects (with S3 URI)", () => {
 
   it("passes --starting-token when startingToken option provided", async () => {
     // Stub that echoes its args so we can inspect them.
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-args-"));
-    tempDirs.push(dir);
-    const p = join(dir, "aws");
-    writeFileSync(p, `#!/bin/sh\necho "$@"\nexit 0`);
-    chmodSync(p, 0o755);
+    const p = stubBin(`#!/bin/sh\necho "$@"\nexit 0`);
 
     const result = await s3LsRun({
       prefix: "s3://my-bucket/",
@@ -219,20 +216,13 @@ describe("s3LsRun — list objects (with S3 URI)", () => {
 
     // The args check is done by inspecting stdout (which the stub echoes),
     // so we run it a different way: use a stub that checks for the flag.
-    const dir2 = mkdtempSync(join(tmpdir(), "aws-axi-s3-args2-"));
-    tempDirs.push(dir2);
-    const p2 = join(dir2, "aws");
-    writeFileSync(
-      p2,
-      `#!/bin/sh
+    const p2 = stubBin(`#!/bin/sh
 if echo "$@" | grep -q "starting-token"; then
   printf '{"Contents":[],"KeyCount":0,"MaxKeys":20,"IsTruncated":false,"Name":"my-bucket","Prefix":""}'
   exit 0
 fi
 exit 1
-`,
-    );
-    chmodSync(p2, 0o755);
+`);
 
     const result2 = await s3LsRun({
       prefix: "s3://my-bucket/",
@@ -357,21 +347,14 @@ describe("s3CreateBucketRun — idempotent create", () => {
   it("emits LocationConstraint when --region is specified and not us-east-1", async () => {
     // The stub FAILS if create-bucket-configuration is absent, proving the
     // LocationConstraint IS emitted for non-us-east-1 explicit --region.
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-loc-"));
-    tempDirs.push(dir);
-    const p = join(dir, "aws");
-    writeFileSync(
-      p,
-      `#!/bin/sh
+    const p = stubBin(`#!/bin/sh
 if echo "$@" | grep -q "LocationConstraint=eu-west-1"; then
   printf '{"Location":"/region-bucket"}'
   exit 0
 fi
 printf 'An error occurred (IllegalLocationConstraintException) when calling the CreateBucket operation: Missing LocationConstraint.' >&2
 exit 255
-`,
-    );
-    chmodSync(p, 0o755);
+`);
 
     const result = await s3CreateBucketRun({
       bucket: "region-bucket",
@@ -386,12 +369,7 @@ exit 255
     //   configure get region → returns "eu-west-2"
     //   create-bucket with LocationConstraint=eu-west-2 → success
     //   create-bucket without LocationConstraint → failure (proves the constraint was added)
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-cfg-region-"));
-    tempDirs.push(dir);
-    const p = join(dir, "aws");
-    writeFileSync(
-      p,
-      `#!/bin/sh
+    const p = stubBin(`#!/bin/sh
 if echo "$@" | grep -q "configure get region"; then
   printf 'eu-west-2'
   exit 0
@@ -402,9 +380,7 @@ if echo "$@" | grep -q "LocationConstraint=eu-west-2"; then
 fi
 printf 'An error occurred (IllegalLocationConstraintException) when calling the CreateBucket operation: Missing or wrong LocationConstraint.' >&2
 exit 255
-`,
-    );
-    chmodSync(p, 0o755);
+`);
 
     // No options.region, no context.region — must fall back to configure get region.
     const result = await s3CreateBucketRun({
@@ -418,12 +394,7 @@ exit 255
   it("omits LocationConstraint when profile config region is us-east-1", async () => {
     // Stub: configure get region → "us-east-1"; create-bucket WITHOUT constraint → success.
     // If LocationConstraint is (wrongly) added, the stub returns an error.
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-use1-"));
-    tempDirs.push(dir);
-    const p = join(dir, "aws");
-    writeFileSync(
-      p,
-      `#!/bin/sh
+    const p = stubBin(`#!/bin/sh
 if echo "$@" | grep -q "configure get region"; then
   printf 'us-east-1'
   exit 0
@@ -434,9 +405,7 @@ if echo "$@" | grep -q "create-bucket-configuration"; then
 fi
 printf '{"Location":"/us-east-1-bucket"}'
 exit 0
-`,
-    );
-    chmodSync(p, 0o755);
+`);
 
     const result = await s3CreateBucketRun({
       bucket: "us-east-1-bucket",
@@ -447,29 +416,18 @@ exit 0
 
   it("throws USAGE_ERROR when no region can be determined from any source", async () => {
     // Stub: configure get region exits 1 (not configured); create-bucket never reached.
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-no-region-"));
-    tempDirs.push(dir);
-    const p = join(dir, "aws");
-    writeFileSync(
-      p,
-      `#!/bin/sh
+    const p = stubBin(`#!/bin/sh
 if echo "$@" | grep -q "configure get region"; then
   exit 1
 fi
 exit 1
-`,
-    );
-    chmodSync(p, 0o755);
+`);
 
     await expect(
       s3CreateBucketRun({ bucket: "no-region-bucket", binary: p }),
     ).rejects.toBeInstanceOf(AxiError);
 
-    const dir2 = mkdtempSync(join(tmpdir(), "aws-axi-s3-no-region2-"));
-    tempDirs.push(dir2);
-    const p2 = join(dir2, "aws");
-    writeFileSync(p2, `#!/bin/sh\nif echo "$@" | grep -q "configure get region"; then\n  exit 1\nfi\nexit 1`);
-    chmodSync(p2, 0o755);
+    const p2 = stubBin(`#!/bin/sh\nif echo "$@" | grep -q "configure get region"; then\n  exit 1\nfi\nexit 1`);
 
     try {
       await s3CreateBucketRun({ bucket: "no-region-bucket-2", binary: p2 });
@@ -646,13 +604,10 @@ describe("s3Command — equals-form flag parsing (ADR-0002 compliance)", () => {
   it("ls --starting-token=TOK forwards the token to the aws call (equals form)", async () => {
     // Stub exits non-zero if --starting-token is NOT present in the argv it receives.
     // This proves the token is correctly extracted from the equals form and forwarded.
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-cmd-st-"));
-    tempDirs.push(dir);
-    const p = join(dir, "aws");
     const bucketPayload = JSON.stringify({
       Buckets: [{ Name: "b", CreationDate: "2024-01-01T00:00:00+00:00" }],
     });
-    writeFileSync(p, [
+    const p = stubBin([
       "#!/bin/sh",
       `if echo "$@" | grep -q 'starting-token'; then`,
       `  printf '${bucketPayload}'`,
@@ -661,7 +616,6 @@ describe("s3Command — equals-form flag parsing (ADR-0002 compliance)", () => {
       "printf 'token-not-forwarded' >&2",
       "exit 1",
     ].join("\n"));
-    chmodSync(p, 0o755);
 
     // RED for old code: parseFlag(indexOf) doesn't find "--starting-token" in
     // ["--starting-token=TOK"] → startingToken is undefined → s3LsRun omits
@@ -678,13 +632,10 @@ describe("s3Command — equals-form flag parsing (ADR-0002 compliance)", () => {
   // ── ls --bucket-name-prefix=foo ─────────────────────────────────────────────
   it("ls --bucket-name-prefix=foo translates to --prefix foo in the aws call (equals form)", async () => {
     // Stub exits non-zero if --prefix is NOT present — proves translation ran.
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-cmd-bnp-"));
-    tempDirs.push(dir);
-    const p = join(dir, "aws");
     const bucketPayload = JSON.stringify({
       Buckets: [{ Name: "foo-bucket", CreationDate: "2024-01-01T00:00:00+00:00" }],
     });
-    writeFileSync(p, [
+    const p = stubBin([
       "#!/bin/sh",
       // The aws call will contain: s3api list-buckets --max-items 20 --prefix foo
       `if echo "$@" | grep -q -- '--prefix'; then`,
@@ -694,7 +645,6 @@ describe("s3Command — equals-form flag parsing (ADR-0002 compliance)", () => {
       "printf 'prefix-not-forwarded' >&2",
       "exit 1",
     ].join("\n"));
-    chmodSync(p, 0o755);
 
     // RED for old code: parseFlag(indexOf) returns undefined for "--bucket-name-prefix"
     // → bucketNamePrefix is undefined → no --prefix injected → stub exits 1.
@@ -752,21 +702,14 @@ describe("s3Command — --flag=false honours explicit false on write paths", () 
     // Stub: fails with exit 1 if `--dryrun` appears anywhere in its argv.
     // Pre-fix (ca9a326): hasFlag("--dryrun=false") → true → --dryrun forwarded → stub exits 1.
     // Post-fix:          flagIsTrue("--dryrun=false") → false → --dryrun NOT forwarded → stub exits 0.
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-dryrun-cp-"));
-    tempDirs.push(dir);
-    const p = join(dir, "aws");
-    writeFileSync(
-      p,
-      `#!/bin/sh
+    const p = stubBin(`#!/bin/sh
 if echo "$@" | grep -q -- '--dryrun'; then
   printf 'FAIL: --dryrun was forwarded, but --dryrun=false was given' >&2
   exit 1
 fi
 printf 'copy: f.txt to s3://b/f.txt\n'
 exit 0
-`,
-    );
-    chmodSync(p, 0o755);
+`);
 
     const result = await s3Command(
       ["cp", "f.txt", "s3://b/f.txt", "--dryrun=false"],
@@ -783,21 +726,14 @@ exit 0
   it("cp --dryrun (bare) still forwards --dryrun to aws (existing behaviour unchanged)", async () => {
     // Regression guard: bare --dryrun must still set dryRun=true.
     // Stub: fails if --dryrun is NOT in argv (proves it was forwarded).
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-dryrun-bare-"));
-    tempDirs.push(dir);
-    const p = join(dir, "aws");
-    writeFileSync(
-      p,
-      `#!/bin/sh
+    const p = stubBin(`#!/bin/sh
 if echo "$@" | grep -q -- '--dryrun'; then
   printf '(dryrun) copy: f.txt to s3://b/f.txt\n'
   exit 0
 fi
 printf 'FAIL: --dryrun was NOT forwarded' >&2
 exit 1
-`,
-    );
-    chmodSync(p, 0o755);
+`);
 
     const result = await s3Command(["cp", "f.txt", "s3://b/f.txt", "--dryrun"], undefined, p);
     expect(result["dryRun"]).toBe(true);
@@ -807,21 +743,14 @@ exit 1
   it("rm --dryrun=false does NOT pass --dryrun to aws (object is deleted)", async () => {
     // Pre-fix: hasFlag → true → --dryrun forwarded → stub exits 1 (FAIL).
     // Post-fix: flagIsTrue → false → --dryrun NOT forwarded → stub exits 0.
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-dryrun-rm-"));
-    tempDirs.push(dir);
-    const p = join(dir, "aws");
-    writeFileSync(
-      p,
-      `#!/bin/sh
+    const p = stubBin(`#!/bin/sh
 if echo "$@" | grep -q -- '--dryrun'; then
   printf 'FAIL: --dryrun was forwarded, but --dryrun=false was given' >&2
   exit 1
 fi
 printf 'delete: s3://b/old.txt\n'
 exit 0
-`,
-    );
-    chmodSync(p, 0o755);
+`);
 
     const result = await s3Command(["rm", "s3://b/old.txt", "--dryrun=false"], undefined, p);
     expect(result["dryRun"]).toBe(false);
@@ -835,9 +764,6 @@ exit 0
     // Post-fix: flagIsTrue("--recursive=false") → false → recursive=false → --delimiter / present.
     //
     // Stub: fails if --delimiter is absent from its argv.
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-recursive-"));
-    tempDirs.push(dir);
-    const p = join(dir, "aws");
     // Use an ETag without embedded double-quotes so printf does not swallow
     // the backslash escapes that JSON.stringify would otherwise introduce.
     const objResponse = JSON.stringify({
@@ -848,18 +774,14 @@ exit 0
       Name: "b",
       Prefix: "",
     });
-    writeFileSync(
-      p,
-      `#!/bin/sh
+    const p = stubBin(`#!/bin/sh
 if echo "$@" | grep -q -- '--delimiter'; then
   printf '${objResponse}'
   exit 0
 fi
 printf 'FAIL: --delimiter was NOT passed; listing recurses (expected non-recursive)' >&2
 exit 1
-`,
-    );
-    chmodSync(p, 0o755);
+`);
 
     const result = await s3Command(["ls", "s3://b/", "--recursive=false"], undefined, p);
     // Listing succeeded with --delimiter present; objects projected correctly.
@@ -869,9 +791,6 @@ exit 1
   it("ls s3://b/ --recursive (bare) omits --delimiter / from aws (recursive listing)", async () => {
     // Regression guard: bare --recursive must still set recursive=true → no --delimiter.
     // Stub: fails if --delimiter IS in argv.
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-recursive-bare-"));
-    tempDirs.push(dir);
-    const p = join(dir, "aws");
     // Use an ETag without embedded double-quotes (same reason as above).
     const objResponse = JSON.stringify({
       Contents: [{ Key: "a/b.txt", Size: 2, LastModified: "2024-01-01T00:00:00+00:00", ETag: "def456", StorageClass: "STANDARD" }],
@@ -881,18 +800,14 @@ exit 1
       Name: "b",
       Prefix: "",
     });
-    writeFileSync(
-      p,
-      `#!/bin/sh
+    const p = stubBin(`#!/bin/sh
 if echo "$@" | grep -q -- '--delimiter'; then
   printf 'FAIL: --delimiter was passed; expected recursive (no delimiter)' >&2
   exit 1
 fi
 printf '${objResponse}'
 exit 0
-`,
-    );
-    chmodSync(p, 0o755);
+`);
 
     const result = await s3Command(["ls", "s3://b/", "--recursive"], undefined, p);
     expect(result["objects"]).toBeDefined();

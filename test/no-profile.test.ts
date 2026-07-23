@@ -8,12 +8,7 @@
  *   - Tests that expect NO_PROFILE_SELECTED inject a configPath with named profiles.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import {
-  writeFileSync,
-  chmodSync,
-  rmSync,
-  mkdtempSync,
-} from "node:fs";
+import { writeFileSync, rmSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { awsJson, awsExec } from "../src/aws.js";
@@ -23,6 +18,11 @@ import { lambdaRun } from "../src/commands/lambda.js";
 import { resolveBucket } from "../src/resolve/bucket.js";
 import { AxiError } from "axi-sdk-js";
 import { fileURLToPath } from "node:url";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
+
+afterEach(() => {
+  releaseStubBins();
+});
 
 /** Botocore fixture data dir for waitRun tests (fake-svc waiter model). */
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
@@ -48,9 +48,6 @@ function createStub(spec: {
   stderr?: string;
   exitCode?: number;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-noprofile-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
 
   function shellQuote(s: string): string {
     return `'${s.replaceAll("'", "'\\''")}'`;
@@ -69,8 +66,7 @@ function createStub(spec: {
     .filter(Boolean)
     .join("\n");
 
-  writeFileSync(p, lines);
-  chmodSync(p, 0o755);
+  const p = stubBin(lines);
   return p;
 }
 

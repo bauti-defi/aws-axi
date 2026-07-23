@@ -30,6 +30,15 @@
  *   The harness has discriminating power: it sees plaintext when it should and
  *   redacts when it should.
  *
+ * Timing note:
+ *   Every test here spawns the REAL aws binary (a bundled Python CLI), which
+ *   costs 0.61 s warm and 3.17 s cold on a dev box — measured. Against bun's
+ *   default 5000 ms per-test timeout that is only ~1.6x headroom, and it ran
+ *   out during the 0.5.0 release: "--reveal no (two-arg)" timed out at
+ *   5090 ms. Unlike the stub-based suites this cannot be made cheaper by
+ *   pooling (see test/helpers/stub-bin.ts) — the real binary is the point —
+ *   so the suite runs under `bun test --timeout 20000` instead.
+ *
  * Redaction ops verified / NOT guarded:
  *   guarded  : secretsmanager get-secret-value — AWS always returns SecretString
  *              in plaintext; no server-side redaction.

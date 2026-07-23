@@ -3,11 +3,16 @@
  * No mocks — the full exec seam runs at a subprocess boundary.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { resolveBucket } from "../src/resolve/bucket.js";
 import { AxiError } from "axi-sdk-js";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
+
+afterEach(() => {
+  releaseStubBins();
+});
 
 // ---------------------------------------------------------------------------
 // Stub factory
@@ -20,9 +25,6 @@ function createStub(spec: {
   stderr?: string;
   exitCode?: number;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-resolve-bucket-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
 
   function shellQuote(s: string): string {
     return `'${s.replaceAll("'", "'\\''")}'`;
@@ -41,8 +43,7 @@ function createStub(spec: {
     .filter(Boolean)
     .join("\n");
 
-  writeFileSync(p, lines);
-  chmodSync(p, 0o755);
+  const p = stubBin(lines);
   return p;
 }
 

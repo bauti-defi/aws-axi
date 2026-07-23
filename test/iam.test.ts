@@ -3,11 +3,16 @@
  * No mocks — the full `awsJson` exec seam runs with a subprocess boundary.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { iamRun } from "../src/commands/iam.js";
 import { AxiError } from "axi-sdk-js";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
+
+afterEach(() => {
+  releaseStubBins();
+});
 
 const tempDirs: string[] = [];
 
@@ -20,9 +25,6 @@ function createStub(spec: {
   stderr?: string;
   exitCode?: number;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-iam-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
   const lines = [
     "#!/bin/sh",
     spec.stdout !== undefined ? `printf '%s' ${shellQuote(spec.stdout)}` : "",
@@ -33,8 +35,7 @@ function createStub(spec: {
   ]
     .filter(Boolean)
     .join("\n");
-  writeFileSync(p, lines);
-  chmodSync(p, 0o755);
+  const p = stubBin(lines);
   return p;
 }
 

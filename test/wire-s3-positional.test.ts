@@ -38,17 +38,15 @@
  *   - No secrets/ssm coverage (already in wire-reveal.test.ts)
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import {
-  writeFileSync,
-  chmodSync,
-  rmSync,
-  mkdtempSync,
-  readFileSync,
-  existsSync,
-} from "node:fs";
+import { rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { s3Command } from "../src/commands/s3.js";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
+
+afterEach(() => {
+  releaseStubBins();
+});
 
 // ---------------------------------------------------------------------------
 // Stub factory
@@ -65,12 +63,8 @@ const tempDirs: string[] = [];
  * invoked (harness dead → liveness assertion below will fail).
  */
 function createArgvLoggingStub(logFile: string): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-s3-wire-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
   // Each argv token on its own line — mirrors how `$@` expands per-element.
-  writeFileSync(p, `#!/bin/sh\nprintf '%s\\n' "$@" > ${logFile}\nexit 0\n`);
-  chmodSync(p, 0o755);
+  const p = stubBin(`#!/bin/sh\nprintf '%s\\n' "$@" > ${logFile}\nexit 0\n`);
   return p;
 }
 

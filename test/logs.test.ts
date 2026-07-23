@@ -5,7 +5,7 @@
  * a real stub shell script injected through the `binary` seam.
  */
 import { describe, it, expect, afterEach, beforeEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AxiError } from "axi-sdk-js";
@@ -24,6 +24,11 @@ import {
   extractLogGroupName,
   _clearCache,
 } from "../src/resolve/log-group.js";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
+
+afterEach(() => {
+  releaseStubBins();
+});
 
 // ─── Stub factory ─────────────────────────────────────────────────────────────
 
@@ -40,9 +45,6 @@ function shellQuote(s: string): string {
 }
 
 function createStub(spec: StubSpec): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-logs-stub-"));
-  tempDirs.push(dir);
-  const path = join(dir, "aws");
 
   const lines = [
     "#!/bin/sh",
@@ -57,8 +59,7 @@ function createStub(spec: StubSpec): string {
     .filter(Boolean)
     .join("\n");
 
-  writeFileSync(path, lines);
-  chmodSync(path, 0o755);
+  const path = stubBin(lines);
   return path;
 }
 

@@ -3,11 +3,16 @@
  * Uses real stub `aws` binaries — no mocks at the exec seam.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { resolveRole } from "../src/resolve/role.js";
 import { AxiError } from "axi-sdk-js";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
+
+afterEach(() => {
+  releaseStubBins();
+});
 
 const tempDirs: string[] = [];
 
@@ -20,9 +25,6 @@ function createStub(spec: {
   stderr?: string;
   exitCode?: number;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-resolve-role-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
   const lines = [
     "#!/bin/sh",
     spec.stdout !== undefined ? `printf '%s' ${shellQuote(spec.stdout)}` : "",
@@ -33,8 +35,7 @@ function createStub(spec: {
   ]
     .filter(Boolean)
     .join("\n");
-  writeFileSync(p, lines);
-  chmodSync(p, 0o755);
+  const p = stubBin(lines);
   return p;
 }
 
@@ -80,11 +81,7 @@ describe("resolveRole — ARN input", () => {
 
   it("returns cached result on second call with same ARN", async () => {
     let callCount = 0;
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-resolve-role-cache-"));
-    tempDirs.push(dir);
-    const p = join(dir, "aws");
-    writeFileSync(p, `#!/bin/sh\necho "call $((callCount++))" >&2\nexit 1`);
-    chmodSync(p, 0o755);
+    const p = stubBin(`#!/bin/sh\necho "call $((callCount++))" >&2\nexit 1`);
 
     const cache = new Map();
     const arn = "arn:aws:iam::123456789012:role/cached-role";
@@ -164,11 +161,7 @@ describe("resolveRole — name input", () => {
       },
     });
     // A stub that succeeds the first time, fails the second (proves caching)
-    const successDir = mkdtempSync(join(tmpdir(), "aws-axi-resolve-role-hit-"));
-    tempDirs.push(successDir);
-    const successScript = join(successDir, "aws");
-    writeFileSync(successScript, `#!/bin/sh\nprintf '%s' ${shellQuote(roleJson)}\nexit 0`);
-    chmodSync(successScript, 0o755);
+    const successScript = stubBin(`#!/bin/sh\nprintf '%s' ${shellQuote(roleJson)}\nexit 0`);
 
     const cache = new Map();
     const first = await resolveRole({
