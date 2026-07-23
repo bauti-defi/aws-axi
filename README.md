@@ -234,7 +234,9 @@ Where the ergonomics differ, here is the map both ways:
   | `NO_PROFILE_SELECTED` | 253 | Named profiles exist but none was selected — pass `--profile <name>` or `export AWS_PROFILE=<name>`; **not** an auth failure |
   | `AUTH_EXPIRED` | 253 | Profile exists but SSO token stale — run `aws sso login --profile <name>` |
   | `SERVICE_CLIENT_ERROR` | 254 | AWS service or client error |
-  | *(other)* | 255 | General error; `0` for `DryRunOperation` success |
+  | `AWS_NOT_INSTALLED` | 127 | `aws` binary not found in PATH |
+  | `DRY_RUN_SUCCESS` | 0 | `DryRunOperation` success signal (not an error) |
+  | `UNKNOWN` | 255 | General / unrecognized error |
 - **Redaction** — `ssm` and `secretsmanager` overlays redact values unless `--reveal` is passed.
 - **Idempotency** — overlay mutations (e.g. `s3 create-bucket`) report what changed and are safe to re-run.
 - **No `.env` loading (installed CLI)** — the distributed launcher never reads `.env` from the current

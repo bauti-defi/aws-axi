@@ -1,7 +1,7 @@
 # ADR-0003: CLI delegation for all values aws-axi reports as fact
 
-**Status:** Accepted
-**Date:** 2026-07-23
+**Status:** Accepted  
+**Date:** 2026-07-23  
 **PR:** #71 (cycle 3)
 
 ## Context
@@ -117,3 +117,6 @@ None. The concurrent approach is both correct and fast. The only thing removed i
   directly should read this ADR first and re-run the six divergence cases above.
 - `docs/specs/2026-07-11-aws-axi-design.md` has no claims about INI parsing for resolution
   (it predates the parser); no update needed there.
+- `test/adr-0003-config-isolation.test.ts` mechanically enforces the single-importer
+  invariant: it fails with an ADR-pointing message if any `src/` file other than `src/aws.ts`
+  imports `src/aws-config.ts`. CI will catch any regression.
