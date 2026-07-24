@@ -30,6 +30,7 @@ import { describeLogGroupsRun, filterRun } from "../src/commands/logs.js";
 import { kmsRun } from "../src/commands/kms.js";
 import { ssmRun } from "../src/commands/ssm.js";
 import { main } from "../src/cli.js";
+import { useEnvGuard } from "./helpers/env-guard.js";
 
 // ── Stub factory ────────────────────────────────────────────────────────────────
 
@@ -191,6 +192,10 @@ afterEach(() => {
     }
   }
 });
+
+// Guard the full process.env (and process.exitCode) around each test.
+// See test/helpers/env-guard.ts for the rationale and the guard test.
+useEnvGuard();
 
 // ── captureMain helper (same pattern as overlay-fallthrough.test.ts) ─────────
 

@@ -45,9 +45,10 @@
  *   not guarded: ssm get-parameter — without --with-decryption, AWS returns
  *              ciphertext from the server; this harness confirms that separately.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import type { Server } from "bun";
 import { main } from "../src/cli.js";
+import { useEnvGuard } from "./helpers/env-guard.js";
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 
@@ -180,48 +181,9 @@ afterAll(async () => {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe("wire-harness: real aws binary + fake SecretsManager endpoint", () => {
-  // ── Env isolation hooks ──────────────────────────────────────────────────────
-  //
-  // captureMain saves/restores the env in an inline try/finally. When Bun
-  // abandons a timed-out test's promise, that finally may not run before the
-  // next test begins, leaking AWS_ACCESS_KEY_ID (and friends) into the env.
-  // Downstream tests that assert credentialSource="profile:X" then see
-  // credentialSource="env-keys" and fail nondeterministically.
-  //
-  // These hooks are the authoritative cleanup: the framework guarantees they
-  // run even after a timeout, so captureMain's finally becomes belt-and-
-  // suspenders rather than the last line of defence.
-  //
-  // Keys enumerated here match FAKE_ENV plus AWS_ENDPOINT_URL (the full set
-  // that captureMain injects for every test in this describe block).
-  const GUARDED_ENV_KEYS = [
-    "AWS_ACCESS_KEY_ID",
-    "AWS_SECRET_ACCESS_KEY",
-    "AWS_DEFAULT_REGION",
-    "AWS_CONFIG_FILE",
-    "AWS_SHARED_CREDENTIALS_FILE",
-    "AWS_ENDPOINT_URL",
-  ] as const;
-
-  let savedEnvSnapshot: Partial<Record<string, string | undefined>> = {};
-
-  beforeEach(() => {
-    savedEnvSnapshot = {};
-    for (const key of GUARDED_ENV_KEYS) {
-      savedEnvSnapshot[key] = process.env[key];
-    }
-  });
-
-  afterEach(() => {
-    for (const key of GUARDED_ENV_KEYS) {
-      const saved = savedEnvSnapshot[key];
-      if (saved === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = saved;
-      }
-    }
-  });
+  // Guard the full process.env (and process.exitCode) around each test.
+  // See test/helpers/env-guard.ts for the rationale and the guard test.
+  useEnvGuard();
   /**
    * Anchor test 1: harness CAN see the plaintext.
    * If this goes GREEN, the harness has discriminating power — a harness that

@@ -22,6 +22,7 @@ import { writeFileSync, chmodSync, rmSync, mkdtempSync, readFileSync } from "nod
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { AxiError } from "axi-sdk-js";
+import { useEnvGuard } from "./helpers/env-guard.js";
 import type { LambdaRunResult, LambdaListResult, LambdaFunctionSummary, LambdaInvokeResult } from "../src/commands/lambda.js";
 import { lambdaRun, lambdaCommand, LAMBDA_HELP } from "../src/commands/lambda.js";
 import { main } from "../src/cli.js";
@@ -936,6 +937,10 @@ async function captureMain(
 // Revert-proof: remove the `if (hasQuery)` bypass in runInvoke → this fails.
 
 describe("lambda invoke --query bypass — captureMain", () => {
+  // Guard the full process.env (and process.exitCode) around each test.
+  // See test/helpers/env-guard.ts for the rationale and the guard test.
+  useEnvGuard();
+
   /**
    * Stub that simulates `aws lambda invoke` AWS CLI behaviour:
    *   - Always writes a payload JSON to the outfile (arg before --output).
