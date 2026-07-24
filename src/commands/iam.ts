@@ -24,8 +24,7 @@ import { fallThroughToEngine } from "../engine.js";
 import {
   buildPassthrough,
   collectPassthroughFlags,
-  extractPositionals,
-  locateFlag,
+  resolveKeyArg,
 } from "../overlay-args.js";
 
 // ---------------------------------------------------------------------------
@@ -190,89 +189,6 @@ examples:
 // ---------------------------------------------------------------------------
 
 const DEFAULT_MAX_ITEMS = "100";
-
-// ---------------------------------------------------------------------------
-// Shared helper: positional-or-flag arg resolution
-// ---------------------------------------------------------------------------
-
-/**
- * Resolve a key argument that real `aws` accepts only as a named flag
- * (e.g. --role-name, --policy-arn) but aws-axi historically also accepted
- * as a bare positional.
- *
- * Under ADR-0002 (superset input contract), BOTH forms are accepted:
- *   <value>              bare positional — aws-axi extension; real aws rejects this
- *   --<flag> <value>     flag form       — real aws's only accepted form
- *   --<flag>=<value>     equals form     — real aws's equals variant
- *
- * Conflict (both positional AND flag in the same call) → USAGE_ERROR that
- * names both conflicting values so the caller knows what to fix.
- *
- * Uses extractPositionals() so flag values (e.g. "my-role" in "--role-name
- * my-role") are never mis-identified as the positional argument.
- *
- * ── Where #63 plugs in ────────────────────────────────────────────────────────
- * lambda get-function has the identical defect: it accepts --function-name
- * positionally only (src/commands/lambda.ts:426–432). Once overlay-args.ts
- * (PR #86) is no longer contended, move this helper there and close #63 with:
- *
- *   const fnName = resolveKeyArg({
- *     args: options.args, flagName: "--function-name",
- *     label: "function name/ARN",
- *     examples: ["Usage: aws-axi lambda get-function <name>",
- *                "Usage: aws-axi lambda get-function --function-name <name>"],
- *   });
- *
- * @param args      Full args array for the operation (before any slicing).
- * @param flagName  Flag name in --kebab-case (e.g. "--role-name").
- * @param label     Human-readable description for error messages.
- * @param examples  Hint strings appended to every USAGE_ERROR.
- * @returns         Resolved value string.
- */
-function resolveKeyArg({
-  args,
-  flagName,
-  label,
-  examples,
-}: {
-  readonly args: readonly string[];
-  readonly flagName: string;
-  readonly label: string;
-  readonly examples: readonly string[];
-}): string {
-  // extractPositionals() correctly skips flag values (e.g. "my-role" in
-  // "--role-name my-role" is NOT returned as a positional — it's consumed
-  // as the value of the preceding flag). See overlay-args.ts for the full
-  // algorithm.
-  const positionals = extractPositionals(args);
-  const positional = positionals[0] as string | undefined;
-
-  // Flag form: --flag value  or  --flag=value
-  const flagLoc = locateFlag(args, flagName);
-  const flagValue = flagLoc?.value;
-
-  // Conflict: both forms in the same call — real aws can't hit this (it
-  // doesn't accept positionals for these ops) so we define the policy:
-  // USAGE_ERROR naming both values, forcing the caller to pick one form.
-  if (positional !== undefined && flagValue !== undefined) {
-    throw new AxiError(
-      `Conflicting ${label}: positional '${positional}' and ${flagName} '${flagValue}'. Provide one form only.`,
-      "USAGE_ERROR",
-      [...examples],
-    );
-  }
-
-  const value = positional ?? flagValue;
-  if (value === undefined) {
-    throw new AxiError(
-      `${label} is required: provide it positionally or as ${flagName}`,
-      "USAGE_ERROR",
-      [...examples],
-    );
-  }
-
-  return value;
-}
 
 // ---------------------------------------------------------------------------
 // Helpers

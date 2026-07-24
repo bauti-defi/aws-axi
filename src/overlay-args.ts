@@ -472,6 +472,98 @@ export function extractPositionals(
   return result;
 }
 
+// ── resolveKeyArg ────────────────────────────────────────────────────────────
+
+/**
+ * Resolve a key argument that real `aws` accepts only as a named flag
+ * (e.g. --role-name, --policy-arn) but aws-axi historically also accepted
+ * as a bare positional.
+ *
+ * Under ADR-0002 (superset input contract), BOTH forms are accepted:
+ *   <value>              bare positional — aws-axi extension; real aws rejects this
+ *   --<flag> <value>     flag form       — real aws's only accepted form
+ *   --<flag>=<value>     equals form     — real aws's equals variant
+ *
+ * Error cases (all → USAGE_ERROR):
+ *   conflict   — both positional AND flag supplied in the same call; message
+ *                names both conflicting values so the caller knows what to fix.
+ *   duplicate  — same flag appears twice; real aws uses last-wins but aws-axi
+ *                uses first-wins via locateFlag, so this now-reachable case
+ *                would silently diverge. Reject instead so the caller is explicit.
+ *   missing    — neither form provided.
+ *
+ * Uses extractPositionals() so flag values (e.g. "my-role" in "--role-name
+ * my-role") are never mis-identified as the positional argument.
+ *
+ * See also: #63 — lambda get-function and get-function-configuration have the
+ * same positional-only defect. When implementing, call resolveKeyArg AND add
+ * the flag name to ownedFlagNames in the collectPassthroughFlags() call for
+ * each operation (omitting it causes the key flag to be double-forwarded to
+ * the child aws invocation).
+ */
+export function resolveKeyArg({
+  args,
+  flagName,
+  label,
+  examples,
+}: {
+  readonly args: readonly string[];
+  readonly flagName: string;
+  readonly label: string;
+  readonly examples: readonly string[];
+}): string {
+  // Detect duplicate flags: real aws uses last-wins; aws-axi uses first-wins
+  // (via locateFlag). Newly reachable via the flag-form fix — reject explicitly
+  // so the caller is not surprised by silent divergence from real aws behaviour.
+  const eqPrefix = `${flagName}=`;
+  let flagCount = 0;
+  for (const arg of args) {
+    if (arg === flagName || arg.startsWith(eqPrefix)) {
+      flagCount++;
+    }
+  }
+  if (flagCount >= 2) {
+    throw new AxiError(
+      `${flagName} appears ${flagCount} times. Provide it exactly once.`,
+      "USAGE_ERROR",
+      [...examples],
+    );
+  }
+
+  // extractPositionals() correctly skips flag values (e.g. "my-role" in
+  // "--role-name my-role" is NOT returned as a positional — it is consumed
+  // as the value of the preceding flag). See extractPositionals for the full
+  // algorithm.
+  const positionals = extractPositionals(args);
+  const positional = positionals[0] as string | undefined;
+
+  // Flag form: --flag value  or  --flag=value
+  const flagLoc = locateFlag(args, flagName);
+  const flagValue = flagLoc?.value;
+
+  // Conflict: both forms in the same call — real aws cannot hit this (it does
+  // not accept positionals for these operations) so we define the policy:
+  // USAGE_ERROR naming both values, forcing the caller to pick one form.
+  if (positional !== undefined && flagValue !== undefined) {
+    throw new AxiError(
+      `Conflicting ${label}: positional '${positional}' and ${flagName} '${flagValue}'. Provide one form only.`,
+      "USAGE_ERROR",
+      [...examples],
+    );
+  }
+
+  const value = positional ?? flagValue;
+  if (value === undefined) {
+    throw new AxiError(
+      `${label} is required: provide it positionally or as ${flagName}`,
+      "USAGE_ERROR",
+      [...examples],
+    );
+  }
+
+  return value;
+}
+
 // ── extractFlag ──────────────────────────────────────────────────────────────
 
 /**

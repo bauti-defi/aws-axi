@@ -533,10 +533,20 @@ describe("iamRun — list-attached-role-policies — flag form (Part 1 fix)", ()
       binary: stub,
     });
 
-    const captured = readFileSync(capturePath, "utf-8").trim();
-    // Child aws must receive --role-name (not the role name as a bare positional)
-    expect(captured).toContain("--role-name");
-    expect(captured).toContain("twin-markets-prod-role");
+    // Split into tokens — toEqual on the exact array is duplicate-blind-free:
+    // if --role-name appeared twice (ownedFlagNames regression), the length would
+    // mismatch and the test turns RED.
+    const tokens = readFileSync(capturePath, "utf-8").trim().split(/\s+/);
+    expect(tokens).toEqual([
+      "iam",
+      "list-attached-role-policies",
+      "--role-name",
+      "twin-markets-prod-role",
+      "--max-items",
+      "100",
+      "--output",
+      "json",
+    ]);
     // Overlay projection must still work
     expect(result["roleName"]).toBe("twin-markets-prod-role");
     expect(result["count"]).toBe(2);
@@ -571,9 +581,17 @@ describe("iamRun — list-attached-role-policies — flag form (Part 1 fix)", ()
     });
 
     expect(result["roleName"]).toBe("twin-markets-prod-role");
-    const captured = readFileSync(capturePath, "utf-8").trim();
-    expect(captured).toContain("--role-name");
-    expect(captured).toContain("twin-markets-prod-role");
+    const tokens = readFileSync(capturePath, "utf-8").trim().split(/\s+/);
+    expect(tokens).toEqual([
+      "iam",
+      "list-attached-role-policies",
+      "--role-name",
+      "twin-markets-prod-role",
+      "--max-items",
+      "100",
+      "--output",
+      "json",
+    ]);
     try { rmSync(capturePath); } catch { /* best-effort */ }
   });
 
@@ -594,6 +612,49 @@ describe("iamRun — list-attached-role-policies — flag form (Part 1 fix)", ()
       expect((e as AxiError).message).toContain("other-role");
     }
   });
+
+  it("flag form + passthrough flag: --role-name forwarded once, passthrough flag survives", async () => {
+    // Mutation: revert ownedFlagNames to NOT include "--role-name" →
+    // collectPassthroughFlags forwards --role-name into passthrough → child
+    // argv gains a second --role-name → toEqual on exact token array turns RED.
+    const capturePath = join(tmpdir(), `iam-larp-pt-${process.pid}.txt`);
+    const stub = makeArgCapturingStub(capturePath, LIST_ATTACHED_POLICIES_RESPONSE);
+
+    await iamRun({
+      op: "list-attached-role-policies",
+      args: ["--role-name", "my-role", "--no-paginate"],
+      binary: stub,
+    });
+
+    const tokens = readFileSync(capturePath, "utf-8").trim().split(/\s+/);
+    expect(tokens).toEqual([
+      "iam",
+      "list-attached-role-policies",
+      "--role-name",
+      "my-role",
+      "--max-items",
+      "100",
+      "--no-paginate",
+      "--output",
+      "json",
+    ]);
+    try { rmSync(capturePath); } catch { /* best-effort */ }
+  });
+
+  it("throws USAGE_ERROR when --role-name appears more than once", async () => {
+    const stub = createStub({ stdout: "", exitCode: 0 });
+    try {
+      await iamRun({
+        op: "list-attached-role-policies",
+        args: ["--role-name", "role-a", "--role-name", "role-b"],
+        binary: stub,
+      });
+      expect(true).toBe(false);
+    } catch (e) {
+      expect(e).toBeInstanceOf(AxiError);
+      expect((e as AxiError).code).toBe("USAGE_ERROR");
+    }
+  });
 });
 
 describe("iamRun — get-role — flag form (Part 1 fix)", () => {
@@ -607,9 +668,10 @@ describe("iamRun — get-role — flag form (Part 1 fix)", () => {
       binary: stub,
     });
 
-    const captured = readFileSync(capturePath, "utf-8").trim();
-    expect(captured).toContain("--role-name");
-    expect(captured).toContain("my-role");
+    // Exact token array — duplicate-blind-free: --role-name appearing twice
+    // would produce a 6-element array and toEqual would turn RED.
+    const tokens = readFileSync(capturePath, "utf-8").trim().split(/\s+/);
+    expect(tokens).toEqual(["iam", "get-role", "--role-name", "my-role", "--output", "json"]);
     // Overlay projection still works
     const role = result["role"] as Record<string, unknown>;
     expect(role["name"]).toBe("my-role");
@@ -648,6 +710,41 @@ describe("iamRun — get-role — flag form (Part 1 fix)", () => {
       expect((e as AxiError).message).toContain("other-role");
     }
   });
+
+  it("flag form + passthrough flag: --role-name forwarded once, passthrough flag survives", async () => {
+    // Mutation: revert ownedFlagNames to NOT include "--role-name" →
+    // collectPassthroughFlags forwards --role-name into passthrough → child
+    // argv gains a second --role-name → toEqual on exact token array turns RED.
+    const capturePath = join(tmpdir(), `iam-gr-pt-${process.pid}.txt`);
+    const stub = makeArgCapturingStub(capturePath, GET_ROLE_RESPONSE);
+
+    await iamRun({
+      op: "get-role",
+      args: ["--role-name", "my-role", "--no-paginate"],
+      binary: stub,
+    });
+
+    const tokens = readFileSync(capturePath, "utf-8").trim().split(/\s+/);
+    expect(tokens).toEqual([
+      "iam", "get-role", "--role-name", "my-role", "--no-paginate", "--output", "json",
+    ]);
+    try { rmSync(capturePath); } catch { /* best-effort */ }
+  });
+
+  it("throws USAGE_ERROR when --role-name appears more than once for get-role", async () => {
+    const stub = createStub({ stdout: "", exitCode: 0 });
+    try {
+      await iamRun({
+        op: "get-role",
+        args: ["--role-name", "role-a", "--role-name", "role-b"],
+        binary: stub,
+      });
+      expect(true).toBe(false);
+    } catch (e) {
+      expect(e).toBeInstanceOf(AxiError);
+      expect((e as AxiError).code).toBe("USAGE_ERROR");
+    }
+  });
 });
 
 describe("iamRun — get-policy — flag form (Part 1 fix)", () => {
@@ -662,9 +759,10 @@ describe("iamRun — get-policy — flag form (Part 1 fix)", () => {
       binary: stub,
     });
 
-    const captured = readFileSync(capturePath, "utf-8").trim();
-    expect(captured).toContain("--policy-arn");
-    expect(captured).toContain(TEST_ARN);
+    // Exact token array — duplicate-blind-free: --policy-arn appearing twice
+    // would produce a 6-element array and toEqual would turn RED.
+    const tokens = readFileSync(capturePath, "utf-8").trim().split(/\s+/);
+    expect(tokens).toEqual(["iam", "get-policy", "--policy-arn", TEST_ARN, "--output", "json"]);
     const policy = result["policy"] as Record<string, unknown>;
     expect(policy["name"]).toBe("AdministratorAccess");
     try { rmSync(capturePath); } catch { /* best-effort */ }
@@ -707,6 +805,134 @@ describe("iamRun — get-policy — flag form (Part 1 fix)", () => {
       expect((e as AxiError).message).toContain("AdministratorAccess");
     }
   });
+
+  it("flag form + passthrough flag: --policy-arn forwarded once, passthrough flag survives", async () => {
+    // Mutation: revert ownedFlagNames to NOT include "--policy-arn" →
+    // collectPassthroughFlags forwards --policy-arn into passthrough → child
+    // argv gains a second --policy-arn → toEqual on exact token array turns RED.
+    const capturePath = join(tmpdir(), `iam-gp-pt-${process.pid}.txt`);
+    const TEST_ARN = "arn:aws:iam::aws:policy/AdministratorAccess";
+    const stub = makeArgCapturingStub(capturePath, GET_POLICY_RESPONSE);
+
+    await iamRun({
+      op: "get-policy",
+      args: ["--policy-arn", TEST_ARN, "--no-paginate"],
+      binary: stub,
+    });
+
+    const tokens = readFileSync(capturePath, "utf-8").trim().split(/\s+/);
+    expect(tokens).toEqual([
+      "iam", "get-policy", "--policy-arn", TEST_ARN, "--no-paginate", "--output", "json",
+    ]);
+    try { rmSync(capturePath); } catch { /* best-effort */ }
+  });
+
+  it("throws USAGE_ERROR when --policy-arn appears more than once", async () => {
+    const stub = createStub({ stdout: "", exitCode: 0 });
+    try {
+      await iamRun({
+        op: "get-policy",
+        args: [
+          "--policy-arn", "arn:aws:iam::aws:policy/AdministratorAccess",
+          "--policy-arn", "arn:aws:iam::aws:policy/ReadOnlyAccess",
+        ],
+        binary: stub,
+      });
+      expect(true).toBe(false);
+    } catch (e) {
+      expect(e).toBeInstanceOf(AxiError);
+      expect((e as AxiError).code).toBe("USAGE_ERROR");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Guards the `args` vs `args.slice(1)` change at the three key-arg call sites.
+//
+// The three runners pass the FULL args to collectPassthroughFlags; they used to
+// pass args.slice(1). Reverting that is invisible to every test above, because
+// they all place the passthrough flag AFTER the key. Measured divergence:
+//
+//   ["--role-name","my-role","--no-paginate"]  full=[--no-paginate] slice1=[--no-paginate]  same
+//   ["--no-paginate","--role-name","my-role"]  full=[--no-paginate] slice1=[]               DIFFERS
+//   ["--no-paginate","my-role"]                full=[--no-paginate] slice1=[]               DIFFERS
+//
+// Only a passthrough flag placed BEFORE the key detects the revert. Dropping a
+// user's flag silently violates the ADR-0002 superset contract, so it is pinned
+// here for all three operations in both the flag and positional forms.
+// ---------------------------------------------------------------------------
+
+describe("iamRun — passthrough flag BEFORE key arg (guards args vs args.slice(1))", () => {
+  it("get-role, flag form: leading --no-paginate survives", async () => {
+    const capturePath = join(tmpdir(), `iam-gr-pre-${process.pid}.txt`);
+    const stub = makeArgCapturingStub(capturePath, GET_ROLE_RESPONSE);
+
+    await iamRun({
+      op: "get-role",
+      args: ["--no-paginate", "--role-name", "my-role"],
+      binary: stub,
+    });
+
+    const tokens = readFileSync(capturePath, "utf-8").trim().split(/\s+/);
+    expect(tokens).toEqual([
+      "iam", "get-role", "--role-name", "my-role", "--no-paginate", "--output", "json",
+    ]);
+    try { rmSync(capturePath); } catch { /* best-effort */ }
+  });
+
+  it("get-role, positional form: leading --no-paginate survives", async () => {
+    const capturePath = join(tmpdir(), `iam-gr-pre-pos-${process.pid}.txt`);
+    const stub = makeArgCapturingStub(capturePath, GET_ROLE_RESPONSE);
+
+    await iamRun({
+      op: "get-role",
+      args: ["--no-paginate", "my-role"],
+      binary: stub,
+    });
+
+    const tokens = readFileSync(capturePath, "utf-8").trim().split(/\s+/);
+    expect(tokens).toEqual([
+      "iam", "get-role", "--role-name", "my-role", "--no-paginate", "--output", "json",
+    ]);
+    try { rmSync(capturePath); } catch { /* best-effort */ }
+  });
+
+  it("get-policy, flag form: leading --no-paginate survives", async () => {
+    const capturePath = join(tmpdir(), `iam-gp-pre-${process.pid}.txt`);
+    const stub = makeArgCapturingStub(capturePath, GET_POLICY_RESPONSE);
+
+    await iamRun({
+      op: "get-policy",
+      args: ["--no-paginate", "--policy-arn", "arn:aws:iam::aws:policy/AdministratorAccess"],
+      binary: stub,
+    });
+
+    const tokens = readFileSync(capturePath, "utf-8").trim().split(/\s+/);
+    expect(tokens).toEqual([
+      "iam", "get-policy", "--policy-arn", "arn:aws:iam::aws:policy/AdministratorAccess",
+      "--no-paginate", "--output", "json",
+    ]);
+    try { rmSync(capturePath); } catch { /* best-effort */ }
+  });
+
+  it("list-attached-role-policies, flag form: leading --no-paginate survives", async () => {
+    const capturePath = join(tmpdir(), `iam-larp-pre-${process.pid}.txt`);
+    const stub = makeArgCapturingStub(capturePath, LIST_ATTACHED_POLICIES_RESPONSE);
+
+    await iamRun({
+      op: "list-attached-role-policies",
+      args: ["--no-paginate", "--role-name", "my-role"],
+      binary: stub,
+    });
+
+    const tokens = readFileSync(capturePath, "utf-8").trim().split(/\s+/);
+    // --max-items 100 is the overlay's own pagination cap, injected by this op.
+    expect(tokens).toEqual([
+      "iam", "list-attached-role-policies", "--role-name", "my-role",
+      "--max-items", "100", "--no-paginate", "--output", "json",
+    ]);
+    try { rmSync(capturePath); } catch { /* best-effort */ }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -715,17 +941,23 @@ describe("iamRun — get-policy — flag form (Part 1 fix)", () => {
 // Reported against a valid --profile admin SSO session: get-policy returned
 // NO_CREDENTIALS while other operations (logs describe-log-groups) succeeded.
 //
-// Investigation: after PR #79 (structural enrichment), awsJson routes through
-// awsRaw which is the single enrichment site. The enrichment path for get-policy
-// is now: iamRun → awsJson → awsRaw → parseAwsError → enrichNoCredsError.
+// Structural argument for why this cannot originate inside aws-axi:
+//   parseAwsError() in errors.ts is the SINGLE emission site for NO_CREDENTIALS
+//   (line 133: `if (NO_CREDS_PATTERNS.some(re => re.test(stderr)))`). It takes
+//   no service or operation argument — classification is global, not per-operation.
+//   An IAM-specific false NO_CREDENTIALS is therefore architecturally impossible:
+//   the same NO_CREDS_PATTERNS gate applies identically to every service. These
+//   tests confirm the observable contract; they also passed against pre-#79 code
+//   (the single-site constraint predates that refactor).
 //
 // These tests prove that get-policy (overlay path) classifies errors correctly:
 //   - A botocore AccessDenied error → SERVICE_CLIENT_ERROR (not NO_CREDENTIALS)
 //   - A real "Unable to locate credentials" error → NO_CREDENTIALS (correct)
 //
-// Result: Part 2 does NOT reproduce on current main (23bfffe). The #79
-// structural fix (single-site enrichment via awsRaw) eliminated the divergent
-// code paths that could have caused misclassification. Only Part 1 ships.
+// Result: Part 2 does NOT reproduce on any code path. The single-site constraint
+// (errors.ts:133) eliminates misclassification by construction. The live-SSO
+// report may involve AWS CLI version differences, profile ordering, or environment
+// factors outside aws-axi — tracked in the follow-up issue.
 // ---------------------------------------------------------------------------
 
 describe("iamRun — get-policy — error classification (Part 2 evidence)", () => {
