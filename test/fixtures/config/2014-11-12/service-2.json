@@ -1,0 +1,38 @@
+{
+  "version": "2.0",
+  "metadata": {
+    "apiVersion": "2014-11-12",
+    "serviceId": "Config Service"
+  },
+  "operations": {
+    "DescribeConfigurationRecorders": {
+      "name": "DescribeConfigurationRecorders",
+      "http": {
+        "method": "POST",
+        "requestUri": "/"
+      },
+      "output": {
+        "shape": "DescribeConfigurationRecordersResponse"
+      }
+    }
+  },
+  "shapes": {
+    "DescribeConfigurationRecordersResponse": {
+      "type": "structure",
+      "members": {
+        "ConfigurationRecorders": { "shape": "ConfigurationRecorderList" }
+      }
+    },
+    "ConfigurationRecorderList": {
+      "type": "list",
+      "member": { "shape": "ConfigurationRecorder" }
+    },
+    "ConfigurationRecorder": {
+      "type": "structure",
+      "members": {
+        "name": { "shape": "RecorderName" }
+      }
+    },
+    "RecorderName": { "type": "string" }
+  }
+}
