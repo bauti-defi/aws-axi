@@ -53,6 +53,8 @@ Run `npx -y aws-axi --help` for global flags, or `npx -y aws-axi <command> --hel
 - **Overlay superset contract**: enriched overlays accept all flags the real `aws` CLI accepts — overlays change the *output*, never restrict the *input*. Unknown flags (`--filters`, `--path-prefix`, `--grant-tokens`, etc.) are forwarded verbatim. One exception: `--output` is stripped (aws-axi forces `--output json` internally and reformats as TOON; passing `--output text` has no effect).
 - **`--query` bypass**: `--query` is forwarded to the underlying `aws` call; when present, aws-axi returns the raw JMESPath result instead of the curated TOON projection. Output is **unbounded** — botocore auto-pages all results (the default cap is suppressed). To bound output size when using `--query`, pass `--max-items N` (or `--limit N` on `logs`). **Exception — secret redaction takes precedence over `--query`**: on `secretsmanager get-secret-value`, using `--query` without `--reveal` is a hard error (USAGE_ERROR). AWS always returns `SecretString` in plaintext; `--query` alone would bypass redaction. Pass `--reveal` to explicitly opt in, then `--query` applies normally.
 - **Engine-path operations are NOT redacted**: aws-axi only redacts output on its hand-polished overlays (the commands listed above). Operations that route through the generic engine — any AWS operation not in the overlay list, including `secretsmanager batch-get-secret-value` — are forwarded directly to the `aws` CLI and their output is returned verbatim with **no redaction**. If you call a non-overlay secretsmanager operation, the response will include plaintext `SecretString` values without any `--reveal` requirement.
+- **Two-arg flag gotcha**: if a flag value accidentally looks like another flag (e.g. `--max-items --profile`), aws-axi throws `USAGE_ERROR` immediately rather than silently mis-assigning the next flag as the value. Fix: use the equals form (`--max-items=<value>`) or reorder so the value comes before the next flag.
+- **Duplicate owned flags: last-wins**: when the same flag appears more than once (e.g. `--role-name old --role-name new`), the last value wins — matching real `aws` CLI behaviour. This makes it safe to override a default the overlay may have injected.
 
 ## Troubleshooting
 
@@ -121,5 +123,8 @@ not help. Add `--region <region>` to the command or export `AWS_DEFAULT_REGION`.
 Run `aws sso login --profile <name>` or `aws configure` to set up credentials first.
 
 ### `AUTH_EXPIRED` — SSO token missing, stale, or invalid
+
+**As an agent:** `AUTH_EXPIRED` (exit 253) means the SSO token needs refreshing — NOT a
+configuration problem. Do NOT change `--region` or `--profile` — that will not help.
 
 Run `aws sso login --profile <name>` to re-authenticate.
