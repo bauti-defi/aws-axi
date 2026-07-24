@@ -22,14 +22,29 @@
  *   - expect(output).toContain(fakeLauncher) to fail
  *   - expect(output).not.toContain("aws-axi.js") to fail
  */
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "bun:test";
 import { main } from "../src/cli.js";
+import { useEnvGuard } from "./helpers/env-guard.js";
 
 // ---------------------------------------------------------------------------
 // Residual #1 regression guard — banner argv[1] patch
 // ---------------------------------------------------------------------------
 
 describe("main — banner bin: field uses AWS_AXI_BIN launcher path (residual #1)", () => {
+  // Guard process.env (covers AWS_AXI_BIN) and process.exitCode.
+  // See test/helpers/env-guard.ts for the rationale and the guard test.
+  useEnvGuard();
+
+  // Guard process.argv[1], which this test patches alongside AWS_AXI_BIN.
+  // useEnvGuard() snapshots process.env only, so argv requires its own hook.
+  let savedArgv1: string;
+  beforeEach(() => {
+    savedArgv1 = process.argv[1]!;
+  });
+  afterEach(() => {
+    process.argv[1] = savedArgv1;
+  });
+
   it(
     "patches process.argv[1] to AWS_AXI_BIN before homeHeaderOutput runs",
     async () => {

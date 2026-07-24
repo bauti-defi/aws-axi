@@ -79,6 +79,10 @@ export function useEnvGuard(): void {
     }
     // Restore exit code (captureMain also resets this, but its finally may not
     // run on timeout — belt-and-suspenders here too).
-    process.exitCode = exitCodeSnapshot;
+    // NOTE: assigning `undefined` is a no-op in Bun — it does NOT clear a
+    // previously-set non-zero code. Use 0 (the clean baseline) when the
+    // snapshot was undefined. captureMain documents the same trap with:
+    // "Reset to 0 (NOT undefined — that is a no-op in Bun)".
+    process.exitCode = exitCodeSnapshot ?? 0;
   });
 }
