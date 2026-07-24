@@ -244,10 +244,13 @@ describe("wire: s3 rm — two-arg boolean flags do not shift S3 URI (positional 
   /**
    * --recursive false: the target URI must be at argv[rm+1], not "false".
    *
-   * Note: --recursive is forwarded to aws s3 rm as a passthrough flag
-   * (collectPassthroughFlags treats it as an unknown value-flag and will
-   * forward it with its "false" value).  The key invariant is the target URI
-   * position — it must not be displaced by the "false" literal.
+   * This test covers the POSITIONAL-EXTRACTION fix (2d7b784): extractPositionals
+   * treats --recursive as a boolean (S3_BOOL_FLAGS) and does not eat "false" as
+   * its positional, so the target URI lands correctly.
+   *
+   * A separate describe block below (#66) covers the PASSTHROUGH fix: after
+   * extractPositionals, collectPassthroughFlags must also not forward the literal
+   * "false" to the child aws.
    *
    * Pre-fix (2d7b784): naive filter → target = "false" → argv[rm+1] = "false" 🔴
    * Post-fix:          extractPositionals → target = "s3://bucket/prefix/"    ✅
@@ -916,5 +919,187 @@ describe("wire: s3 cp/rm — POSIX `--` end-of-options separator: forwarded, doe
     expect(argv).toContain("*.log");
     // -- forwarded to child.
     expect(argv).toContain("--");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// s3 rm / s3 cp — --recursive false must NOT forward literal "false" to child
+//
+// Bug (#66): --recursive is absent from ownedBoolFlags in the cp/rm dispatch
+// paths. collectPassthroughFlags falls back to the heuristic: the next
+// non-`--` token is consumed as the flag's value, so ["--recursive","false"]
+// is forwarded verbatim to the child aws, which rejects it with:
+//   "Unknown options: false"
+//
+// Fix: add "--recursive" to ownedBoolFlags in both cp/rm collectPassthroughFlags
+// calls. Re-inject bare "--recursive" when flagIsTrue(rest,"--recursive") is true.
+//
+// Step-0 observed child argv on main @ 9e2fec1 (pre-fix):
+//   rm: ["s3","rm","s3://bucket/prefix/","--recursive","false","--output","json"]
+//   cp: ["s3","cp","s3://src/","./dst/","--recursive","false","--output","json"]
+//
+// Both contain a literal "false" token that real `aws` rejects.
+// ---------------------------------------------------------------------------
+
+describe("wire: s3 rm/cp — --recursive false must NOT forward literal false to child (#66)", () => {
+  /**
+   * Liveness anchor — no flags, stub must be invoked.
+   */
+  it("anchor: stub IS invoked for s3 rm <uri> (no flags)", async () => {
+    const logFile = join(tmpdir(), `s3-rec-anchor-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(["rm", "s3://bucket/key"], undefined, binary);
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0); // harness alive
+    expect(argv).toContain("rm");
+    expect(argv).toContain("s3://bucket/key");
+  });
+
+  /**
+   * PRIMARY BUG (rm) — `--recursive false` must NOT forward "false" to child.
+   *
+   * Pre-fix (@9e2fec1):
+   *   collectPassthroughFlags treats --recursive as unknown value-flag
+   *   → heuristic consumes "false" as value
+   *   → ["--recursive","false"] forwarded to child → aws rejects with
+   *     "Unknown options: false"
+   *   → argv contains "false"  🔴
+   *
+   * Post-fix:
+   *   "--recursive" in ownedBoolFlags → skipped by collectPassthroughFlags
+   *   flagIsTrue(...,"--recursive") = false → not re-injected
+   *   → "false" absent from child argv  ✅
+   *   → "--recursive" absent from child argv  ✅
+   */
+  it("rm --recursive false <uri>: false NOT in child argv, --recursive NOT forwarded", async () => {
+    const logFile = join(tmpdir(), `s3-rm-rec-false-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["rm", "--recursive", "false", "s3://bucket/prefix/"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0); // liveness
+    // "false" must never reach the child.
+    expect(argv).not.toContain("false");
+    // User said "do not recurse" → --recursive must not be forwarded.
+    expect(argv).not.toContain("--recursive");
+    // The target URI must still be correct.
+    const rmIdx = argv.indexOf("rm");
+    expect(rmIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[rmIdx + 1]).toBe("s3://bucket/prefix/");
+  });
+
+  /**
+   * REGRESSION GUARD (rm) — bare `--recursive` must still reach child.
+   *
+   * `s3 rm --recursive s3://bucket/prefix/`
+   *
+   * This is the real use case: delete a prefix tree recursively.
+   * After the fix, --recursive must be re-injected when flagIsTrue is true.
+   */
+  it("rm --recursive <uri> (bare): --recursive IS forwarded, no false in argv", async () => {
+    const logFile = join(tmpdir(), `s3-rm-rec-bare-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["rm", "--recursive", "s3://bucket/prefix/"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0); // liveness
+    // --recursive must be forwarded to child (bare flag → user wants recursive delete).
+    expect(argv).toContain("--recursive");
+    // "false" must never appear.
+    expect(argv).not.toContain("false");
+    // Target URI correct.
+    const rmIdx = argv.indexOf("rm");
+    expect(rmIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[rmIdx + 1]).toBe("s3://bucket/prefix/");
+  });
+
+  /**
+   * Equals form (rm) — `--recursive=false` must not forward false.
+   */
+  it("rm --recursive=false <uri>: false absent, --recursive absent", async () => {
+    const logFile = join(tmpdir(), `s3-rm-rec-eqfalse-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["rm", "--recursive=false", "s3://bucket/prefix/"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0);
+    expect(argv).not.toContain("false");
+    // --recursive=false: user disabled recursion → nothing forwarded.
+    expect(argv.some((t) => t.startsWith("--recursive"))).toBe(false);
+  });
+
+  /**
+   * PRIMARY BUG (cp) — `--recursive false` must NOT forward "false" to child.
+   *
+   * Pre-fix (@9e2fec1):
+   *   collectPassthroughFlags heuristic → ["--recursive","false"] forwarded
+   *   → aws rejects "Unknown options: false"
+   *   → argv contains "false"  🔴
+   *
+   * Post-fix:
+   *   "--recursive" in ownedBoolFlags → stripped; flagIsTrue = false → not injected
+   *   → "false" absent  ✅
+   */
+  it("cp --recursive false <src> <dst>: false NOT in child argv, --recursive NOT forwarded", async () => {
+    const logFile = join(tmpdir(), `s3-cp-rec-false-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["cp", "--recursive", "false", "s3://src/", "./dst/"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0); // liveness
+    expect(argv).not.toContain("false");
+    expect(argv).not.toContain("--recursive");
+    // Source/dest must still be correct.
+    const cpIdx = argv.indexOf("cp");
+    expect(cpIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[cpIdx + 1]).toBe("s3://src/");
+    expect(argv[cpIdx + 2]).toBe("./dst/");
+  });
+
+  /**
+   * REGRESSION GUARD (cp) — bare `--recursive` must still reach child.
+   *
+   * `s3 cp --recursive s3://src/ ./dst/` — copy entire directory tree.
+   */
+  it("cp --recursive <src> <dst> (bare): --recursive IS forwarded, no false in argv", async () => {
+    const logFile = join(tmpdir(), `s3-cp-rec-bare-${Date.now()}.log`);
+    const binary = createArgvLoggingStub(logFile);
+
+    await s3Command(
+      ["cp", "--recursive", "s3://src/", "./dst/"],
+      undefined,
+      binary,
+    );
+
+    const argv = readArgv(logFile);
+    expect(argv.length).toBeGreaterThan(0); // liveness
+    expect(argv).toContain("--recursive");
+    expect(argv).not.toContain("false");
+    const cpIdx = argv.indexOf("cp");
+    expect(cpIdx).toBeGreaterThanOrEqual(0);
+    expect(argv[cpIdx + 1]).toBe("s3://src/");
+    expect(argv[cpIdx + 2]).toBe("./dst/");
   });
 });
