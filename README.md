@@ -199,6 +199,9 @@ Where the ergonomics differ, here is the map both ways:
 | `aws ec2 describe-instances --output json`             | `aws-axi ec2 describe-instances`                       | Output is always TOON; `--output` is ignored (stripped)                     |
 | `aws ec2 describe-instances --filters Name=...,Values=...` | `aws-axi ec2 describe-instances --filters Name=...,Values=...` | `--filters` (and any other aws flag) forwarded verbatim; output is still enriched TOON |
 | `aws iam list-roles --query 'Roles[].RoleName'`        | `aws-axi iam list-roles --query 'Roles[].RoleName'`   | `--query` forwarded; JMESPath applied by aws CLI; overlay projection bypassed |
+| `aws iam get-role --role-name my-role`                 | `aws-axi iam get-role --role-name my-role` **or** `aws-axi iam get-role my-role` | aws-axi also accepts the positional form (aws-axi extension); flag form follows real aws |
+| `aws iam get-policy --policy-arn arn:…`                | `aws-axi iam get-policy --policy-arn arn:…` **or** `aws-axi iam get-policy arn:…` | Same dual-form support |
+| `aws iam list-attached-role-policies --role-name r`    | `aws-axi iam list-attached-role-policies --role-name r` **or** `aws-axi iam list-attached-role-policies r` | Same dual-form support |
 | `aws sts get-caller-identity`                          | `aws-axi whoami`                                       | Fused with profile, region, and credential source                          |
 | *(no equivalent)*                                      | `aws-axi`                                              | No-arg dashboard: current identity + region                                |
 | `aws s3 ls s3://bucket/`                               | `aws-axi s3 ls s3://bucket/`                           | Same; `--delimiter /` added (matches real non-recursive behavior); output capped + TOON (use `--starting-token` to page; `--query` bypasses cap) |
@@ -248,6 +251,11 @@ Where the ergonomics differ, here is the map both ways:
   change the output, never restrict the input. Exception: `--output` is stripped (always `json` internally);
   `--query` is forwarded verbatim, bypasses the overlay's curated projection, and suppresses the
   default `--max-items` cap (botocore auto-pages to completion; explicit `--max-items` still wins).
+- **Two-arg flag form** — `--flag <value>` is the normal form. If the value token starts with `--`,
+  aws-axi throws `USAGE_ERROR` immediately rather than silently treating another flag as a value. Fix:
+  use the equals form (`--flag=<value>`) or reorder so the value precedes the next flag.
+- **Duplicate owned flags** — if the same flag appears more than once (e.g. `--role-name old
+  --role-name new`), the last value wins — matching real `aws` CLI behaviour.
 
 ## Reporting issues
 
