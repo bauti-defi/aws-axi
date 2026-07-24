@@ -230,6 +230,7 @@ Where the ergonomics differ, here is the map both ways:
   | Code | Exit | Meaning |
   |---|---|---|
   | `USAGE_ERROR` | 252 | Bad flag or argument |
+  | `NO_REGION` | 252 | No AWS region configured — pass `--region`, set `AWS_DEFAULT_REGION`, or `aws configure set region` |
   | `NO_CREDENTIALS` | 253 | No AWS credentials found — run `aws sso login` |
   | `NO_PROFILE_SELECTED` | 253 | Named profiles exist but none was selected — pass `--profile <name>` or `export AWS_PROFILE=<name>`; **not** an auth failure |
   | `AUTH_EXPIRED` | 253 | SSO token missing, stale, or invalid — run `aws sso login --profile <name>` |

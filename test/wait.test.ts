@@ -419,6 +419,113 @@ describe("waitRun — credential error propagation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// NO_REGION propagation — must surface real cause, never fabricate a timeout
+// ---------------------------------------------------------------------------
+
+describe("waitRun — NO_REGION propagated cleanly (not buried in false budget message)", () => {
+  it("region-less failure surfaces as NO_REGION (not SERVICE_CLIENT_ERROR budget)", async () => {
+    // Simulate the aws CLI emitting the region-not-configured message.
+    // This matches the byte-exact fixture in test/fixtures/region-errors/no-region.txt
+    // (leading \n is intentional — that is what the real aws binary emits).
+    const regionErrStderr =
+      "\nYou must specify a region. You can also configure your region by running \"aws configure\".\n";
+    const stub = createStub({
+      stdout: "",
+      stderr: regionErrStderr,
+      exitCode: 253,
+    });
+
+    const err = await waitRun({
+      service: "fake-svc",
+      waiterName: WAITER_KEBAB,
+      flags: [],
+      binary: stub,
+      dataDir: FIXTURES_DIR,
+      configPath: "/nonexistent/path/to/.aws/config",
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(AxiError);
+    // Must be NO_REGION, not SERVICE_CLIENT_ERROR
+    expect((err as AxiError).code).toBe("NO_REGION");
+    // Must NOT reference the polling budget (the call never polled)
+    const fullText = `${(err as AxiError).message} ${(err as AxiError).suggestions.join(" ")}`;
+    expect(fullText).not.toContain("polls");
+    expect(fullText).not.toContain("600s");
+    expect(fullText).not.toContain("budget");
+  });
+
+  it("region-less failure message mentions region configuration", async () => {
+    const stub = createStub({
+      stdout: "",
+      stderr:
+        "\nYou must specify a region. You can also configure your region by running \"aws configure\".\n",
+      exitCode: 253,
+    });
+
+    const err = await waitRun({
+      service: "fake-svc",
+      waiterName: WAITER_KEBAB,
+      flags: [],
+      binary: stub,
+      dataDir: FIXTURES_DIR,
+      configPath: "/nonexistent/path/to/.aws/config",
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(AxiError);
+    const allText = `${(err as AxiError).message} ${(err as AxiError).suggestions.join(" ")}`;
+    expect(allText.toLowerCase()).toContain("region");
+  });
+});
+
+describe("waitRun — unknown non-zero exit surfaces real cause (not fabricated budget)", () => {
+  it("mystery failure (UNKNOWN stderr) emits real stderr as headline, not budget message", async () => {
+    const stub = createStub({
+      stdout: "",
+      stderr: "Network error: connection refused",
+      exitCode: 255,
+    });
+
+    const err = await waitRun({
+      service: "fake-svc",
+      waiterName: WAITER_KEBAB,
+      flags: [],
+      binary: stub,
+      dataDir: FIXTURES_DIR,
+      configPath: "/nonexistent/path/to/.aws/config",
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(AxiError);
+    expect((err as AxiError).code).toBe("SERVICE_CLIENT_ERROR");
+    // Headline must contain the real error, NOT a fabricated 600s budget message
+    expect((err as AxiError).message).toContain("Network error: connection refused");
+    expect((err as AxiError).message).not.toContain("600s");
+    expect((err as AxiError).message).not.toContain("polls");
+  });
+
+  it("max-attempts exhaustion still reports the budget (the one genuine polling case)", async () => {
+    const stub = createStub({
+      stdout: "",
+      stderr: "Waiter ItemReady failed: Max attempts exceeded",
+      exitCode: 255,
+    });
+
+    const err = await waitRun({
+      service: "fake-svc",
+      waiterName: WAITER_KEBAB,
+      flags: [],
+      binary: stub,
+      dataDir: FIXTURES_DIR,
+    }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(AxiError);
+    expect((err as AxiError).code).toBe("SERVICE_CLIENT_ERROR");
+    // Budget message IS correct here — polling genuinely ran and exhausted
+    const fullText = `${(err as AxiError).message} ${(err as AxiError).suggestions.join(" ")}`;
+    expect(fullText).toMatch(/100s|20[^0-9]+5s|5s[^0-9]+20/);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // waitCommand adapter — arg parsing
 // ---------------------------------------------------------------------------
 

@@ -215,15 +215,34 @@ export async function waitRun(options: WaitRunOptions): Promise<WaitResult> {
     );
   }
 
-  // 4c. Timeout: max attempts exhausted (or unknown non-zero exit).
+  // 4c. Genuine budget exhaustion — polling ran and max attempts were hit.
+  //     This is the ONLY branch that should reference the polling budget.
+  //     Guard: botocore always emits "Max attempts exceeded" on waiter timeout.
+  if (/max attempts exceeded/i.test(botoMsg)) {
+    throw new AxiError(
+      `Waiter '${options.waiterName}' for service '${options.service}' did not reach success state ` +
+        `within budget: ${waiterDef.maxAttempts} polls × ${waiterDef.delay}s = ${budgetSeconds}s`,
+      "SERVICE_CLIENT_ERROR",
+      [
+        `Polls ${waiterDef.operation} every ${waiterDef.delay}s, up to ${waiterDef.maxAttempts} times (${budgetSeconds}s total)`,
+        `Resource may still be transitioning — retry with a longer budget or check its current state`,
+        ...(botoMsg ? [`AWS: ${botoMsg}`] : []),
+      ],
+    );
+  }
+
+  // 4d. Unknown non-zero exit: not a taxonomy code, not terminal, not a timeout.
+  //     Surface the real cause as the headline. NEVER fabricate a budget message
+  //     for a call that may not have polled at all (e.g. a pre-flight region check
+  //     that fails before the first DescribeInstances is ever sent).
   throw new AxiError(
-    `Waiter '${options.waiterName}' for service '${options.service}' did not reach success state ` +
-      `within budget: ${waiterDef.maxAttempts} polls × ${waiterDef.delay}s = ${budgetSeconds}s`,
+    botoMsg
+      ? `Waiter '${options.waiterName}' for service '${options.service}' failed: ${botoMsg}`
+      : `Waiter '${options.waiterName}' for service '${options.service}' failed (exit ${result.exitCode})`,
     "SERVICE_CLIENT_ERROR",
     [
-      `Polls ${waiterDef.operation} every ${waiterDef.delay}s, up to ${waiterDef.maxAttempts} times (${budgetSeconds}s total)`,
-      `Resource may still be transitioning — retry with a longer budget or check its current state`,
-      ...(botoMsg ? [`AWS: ${botoMsg}`] : []),
+      ...(botoMsg ? [] : ["No error detail returned by AWS"]),
+      `Check that the region is configured, credentials are valid, and the resource exists`,
     ],
   );
 }
