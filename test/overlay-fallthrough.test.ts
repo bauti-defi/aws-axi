@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { main } from "../src/cli.js";
+import { useEnvGuard } from "./helpers/env-guard.js";
 
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
 
@@ -63,6 +64,10 @@ afterEach(() => {
     }
   }
 });
+
+// Guard the full process.env (and process.exitCode) around each test.
+// See test/helpers/env-guard.ts for the rationale and the guard test.
+useEnvGuard();
 
 /** Capture stdout + exitCode from main(), same approach as cli-engine.test.ts. */
 async function captureMain(

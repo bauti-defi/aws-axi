@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { whoamiRun } from "../src/commands/whoami.js";
 import { AxiError } from "axi-sdk-js";
 import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
+import { useEnvGuard } from "./helpers/env-guard.js";
 
 afterEach(() => {
   releaseStubBins();
@@ -254,16 +255,11 @@ describe("whoamiRun — credential errors", () => {
 
 // ── Env keys that affect detectCredentialSource ────────────────────────────
 // detectCredentialSource reads process.env directly (no injection seam).
-// If a prior test (e.g. wire-reveal.test.ts) leaks AWS_ACCESS_KEY_ID into
-// the process env (via a timed-out test whose captureMain finally never ran),
-// credentialSource returns "env-keys" instead of "profile:X", breaking the
-// assertions below. These hooks snap the env to a known-clean state so the
-// two describe blocks are immune to whatever leaked.
-// Keys cleaned by beforeEach in the two describe blocks below.
-// Covers both the credentialSource detection (AWS_ACCESS_KEY_ID etc.) and
-// region resolution (AWS_REGION / AWS_DEFAULT_REGION — whoamiRun reads these
-// from process.env directly, so a parent shell's AWS_REGION bypasses the
-// configure-get-region path that the region-resolution tests exercise).
+// These keys are deleted in beforeEach so each test starts with a clean slate,
+// regardless of what the developer has set in their shell environment (e.g.
+// an AWS_ACCESS_KEY_ID that would make credentialSource return "env-keys"
+// instead of "profile:X"). useEnvGuard() snapshots the full env first and
+// restores it in afterEach, so the deletion is automatically undone.
 const CREDENTIAL_ENV_KEYS = [
   "AWS_ACCESS_KEY_ID",
   "AWS_SECRET_ACCESS_KEY",
@@ -275,25 +271,13 @@ const CREDENTIAL_ENV_KEYS = [
 ] as const;
 
 describe("whoamiRun — region resolution", () => {
-  let savedCredEnv: Partial<Record<string, string | undefined>> = {};
-
+  // Snapshot-based env + exitCode restore. See test/helpers/env-guard.ts.
+  useEnvGuard();
+  // Delete credential-related keys so tests are clean even under an AWS-
+  // credentialed shell. Runs after useEnvGuard()'s beforeEach (declaration
+  // order), so the snapshot captures the originals and afterEach restores them.
   beforeEach(() => {
-    savedCredEnv = {};
-    for (const key of CREDENTIAL_ENV_KEYS) {
-      savedCredEnv[key] = process.env[key];
-      delete process.env[key];
-    }
-  });
-
-  afterEach(() => {
-    for (const key of CREDENTIAL_ENV_KEYS) {
-      const saved = savedCredEnv[key];
-      if (saved === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = saved;
-      }
-    }
+    for (const key of CREDENTIAL_ENV_KEYS) delete process.env[key];
   });
 
   it("reports region from context when supplied (context takes precedence, no CLI call)", async () => {
@@ -365,25 +349,10 @@ describe("whoamiRun — region resolution", () => {
 // ---------------------------------------------------------------------------
 
 describe("whoamiRun — accurate profile reporting", () => {
-  let savedCredEnv: Partial<Record<string, string | undefined>> = {};
-
+  // Same pattern as "region resolution" above: snapshot-restore + delete.
+  useEnvGuard();
   beforeEach(() => {
-    savedCredEnv = {};
-    for (const key of CREDENTIAL_ENV_KEYS) {
-      savedCredEnv[key] = process.env[key];
-      delete process.env[key];
-    }
-  });
-
-  afterEach(() => {
-    for (const key of CREDENTIAL_ENV_KEYS) {
-      const saved = savedCredEnv[key];
-      if (saved === undefined) {
-        delete process.env[key];
-      } else {
-        process.env[key] = saved;
-      }
-    }
+    for (const key of CREDENTIAL_ENV_KEYS) delete process.env[key];
   });
 
   it("reports the profile from context (covers AWS_DEFAULT_PROFILE path)", async () => {
