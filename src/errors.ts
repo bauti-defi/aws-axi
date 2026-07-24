@@ -87,24 +87,36 @@ const SSO_AUTH_EXPIRED_PATTERNS: RegExp[] = [
 ];
 
 /**
- * Region-not-configured patterns — captured from aws-cli/2.33.13 on macOS.
+ * Region-not-configured patterns — captured from real aws binaries:
+ *   aws-cli/2.33.13: no dedicated handler → plain text
+ *   aws-cli/2.34.0+: NoRegionErrorHandler → enhanced format (default since 2.34.0)
  *
- * Emitted when no region can be resolved from any source (profile, env vars,
- * instance metadata). The message is precise and actionable; aws-axi surfaces
- * it as `NO_REGION`/252 so agents know to add `--region`, set
- * `AWS_DEFAULT_REGION`, or configure the profile — NOT to re-authenticate.
+ * Two stderr shapes (both after normalization — leading \n + "aws: [ERROR]: " stripped):
  *
- * Checked AFTER SSO patterns and NO_CREDS patterns (completely disjoint message
- * space) and AFTER BOTOCORE_RE (this message is never a botocore structured
- * error). Applied to the same `normalized` value (leading \n + "aws: [ERROR]: "
- * prefix stripped) so both aws-cli 2.33.x and >= 2.34.0 forms match.
+ *   2.33.x:   "You must specify a region. You can also configure your region..."
+ *   ≥ 2.34.0: "An error occurred (NoRegion): You must specify a region..."
+ *
+ * The ≥ 2.34.0 form does NOT match BOTOCORE_RE because it lacks "when calling
+ * the <Op> operation:" — it falls through to this check. The 2.33.x form never
+ * matched BOTOCORE_RE either. Both are caught by the single anchored pattern below.
+ *
+ * ^ is load-bearing. Removing it would cause region wording inside botocore
+ * error bodies (e.g. "You must specify a region for this resource" inside an
+ * InvalidParameterValue body) to flip from SERVICE_CLIENT_ERROR/254 to NO_REGION.
+ * The (?:An error occurred \(NoRegion\): )? optional prefix is specific enough
+ * that no other message body can false-positive through it.
+ *
+ * Fixture verification: byte-exact captures from official amazon/aws-cli
+ * containers (2.33.13 and 2.34.0/2.36.2/2.36.7 — the ≥2.34 variants are
+ * byte-identical to each other). See test/fixtures/region-errors/README.md.
  *
  * Adversarial invariants (tested in test/errors.test.ts):
- *   - region message must never classify as AUTH_EXPIRED
+ *   - region message (both forms) must never classify as AUTH_EXPIRED
  *   - SSO expired message must never classify as NO_REGION
+ *   - botocore body echoing region wording must stay SERVICE_CLIENT_ERROR
  */
 const NO_REGION_PATTERNS: RegExp[] = [
-  /^You must specify a region/i,
+  /^(?:An error occurred \(NoRegion\): )?You must specify a region/i,
 ];
 
 /** Parse a raw stderr string + exit code into a structured error descriptor. */

@@ -420,7 +420,13 @@ describe("parseAwsError — NO_REGION (region-not-configured)", () => {
     expect(awsExitCode(result.code)).toBe(252);
   });
 
-  it("maps 'aws: [ERROR]: You must specify a region' to NO_REGION (2.34.0 prefix fixture)", () => {
+  /**
+   * Captured: aws-cli/2.34.0 (and 2.36.2/2.36.7 — byte-identical to each other).
+   * NoRegionErrorHandler wraps the message in the enhanced format:
+   * "\naws: [ERROR]: An error occurred (NoRegion): You must specify a region. ...\n"
+   * cmp-verified against official amazon/aws-cli containers.
+   */
+  it("maps 'aws: [ERROR]: An error occurred (NoRegion): ...' to NO_REGION (>=2.34.0 fixture)", () => {
     const stderr = regionFixture("no-region-prefixed-2.34.txt");
     const result = parseAwsError(stderr, 253);
     expect(result.code).toBe("NO_REGION");
@@ -469,7 +475,7 @@ describe("parseAwsError — NO_REGION does NOT overlap with AUTH_EXPIRED", () =>
     expect(result.code).toBe("NO_REGION");
   });
 
-  it("region message (2.34.0 prefix) does not classify as AUTH_EXPIRED", () => {
+  it("region message (>=2.34.0 enhanced form) does not classify as AUTH_EXPIRED", () => {
     const result = parseAwsError(regionFixture("no-region-prefixed-2.34.txt"), 253);
     expect(result.code).not.toBe("AUTH_EXPIRED");
     expect(result.code).toBe("NO_REGION");
