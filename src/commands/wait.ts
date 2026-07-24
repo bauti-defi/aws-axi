@@ -19,7 +19,7 @@
  */
 import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
-import { awsRaw, parseAndEnrichAwsError } from "../aws.js";
+import { awsRaw } from "../aws.js";
 import { loadService, getWaiter, pascalToKebab, type ServiceModel } from "../model.js";
 
 // ── Public types ──────────────────────────────────────────────────────────────
@@ -173,7 +173,7 @@ export async function waitRun(options: WaitRunOptions): Promise<WaitResult> {
   //    The kebab waiter name is passed unchanged — that is what `aws` expects.
   const result = await awsRaw(
     [options.service, "wait", options.waiterName, ...options.flags],
-    { binary: options.binary, context: options.context },
+    { binary: options.binary, context: options.context, configPath: options.configPath },
   );
 
   // 3. Success
@@ -190,11 +190,14 @@ export async function waitRun(options: WaitRunOptions): Promise<WaitResult> {
   }
 
   // 4a. Propagate well-known taxonomy errors (no-credentials, auth-expired, …)
-  // Use parseAndEnrichAwsError so NO_CREDENTIALS is upgraded to NO_PROFILE_SELECTED
-  // when named profiles exist in ~/.aws/config but none was selected.
-  const parsed = parseAndEnrichAwsError(result, options.context, options.configPath);
-  if (parsed.code !== "UNKNOWN") {
-    throw new AxiError(parsed.message, parsed.code, [...parsed.suggestions]);
+  // awsRaw guarantees result.error is set for every non-zero exit. Guard
+  // against undefined defensively (unreachable today, but narrows the type
+  // compiler-visibly so future edits above cannot silently produce undefined.message).
+  if (result.error === undefined) {
+    throw new AxiError("Unexpected non-zero exit with no error descriptor", "UNKNOWN");
+  }
+  if (result.error.code !== "UNKNOWN") {
+    throw new AxiError(result.error.message, result.error.code, [...result.error.suggestions]);
   }
 
   const botoMsg = result.stderr.trim();

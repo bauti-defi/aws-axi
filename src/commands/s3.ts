@@ -19,7 +19,7 @@
  *   S3_HELP                     → help text
  */
 import { AxiError } from "axi-sdk-js";
-import { awsJson, awsRaw, awsExec, parseAndEnrichAwsError } from "../aws.js";
+import { awsJson, awsRaw, awsExec } from "../aws.js";
 import type { AwsContext } from "../context.js";
 import { fallThroughToEngine } from "../engine.js";
 import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrue, hasFlag, extractPositionals } from "../overlay-args.js";
@@ -562,6 +562,7 @@ export async function s3CreateBucketRun(
   const result = await awsRaw(args, {
     binary: options.binary,
     context: options.context,
+    configPath: options.configPath,
   });
 
   // ── success ───────────────────────────────────────────────────────────────
@@ -582,10 +583,13 @@ export async function s3CreateBucketRun(
   }
 
   // ── idempotent: bucket already owned by this caller ───────────────────────
-  // Use parseAndEnrichAwsError so NO_CREDENTIALS is upgraded to NO_PROFILE_SELECTED
-  // when named profiles exist in ~/.aws/config but none was selected.
-  const parsed = parseAndEnrichAwsError(result, options.context, options.configPath);
-  if (parsed.botoCode === "BucketAlreadyOwnedByYou") {
+  // awsRaw guarantees result.error is set for every non-zero exit. Guard
+  // against undefined defensively (unreachable today, but narrows the type
+  // so a future edit above cannot silently produce undefined.message).
+  if (result.error === undefined) {
+    throw new AxiError("Unexpected non-zero exit with no error descriptor", "UNKNOWN");
+  }
+  if (result.error.botoCode === "BucketAlreadyOwnedByYou") {
     return {
       created: false,
       idempotent: true,
@@ -594,7 +598,7 @@ export async function s3CreateBucketRun(
   }
 
   // ── all other errors (BucketAlreadyExists, auth, etc.) ───────────────────
-  throw new AxiError(parsed.message, parsed.code, [...parsed.suggestions]);
+  throw new AxiError(result.error.message, result.error.code, [...result.error.suggestions]);
 }
 
 // ---------------------------------------------------------------------------

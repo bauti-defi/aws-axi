@@ -14,7 +14,7 @@
  *   resolveBucket(options) → BucketInfo
  */
 import { AxiError } from "axi-sdk-js";
-import { awsRaw, parseAndEnrichAwsError } from "../aws.js";
+import { awsRaw } from "../aws.js";
 import type { AwsContext } from "../context.js";
 
 export interface BucketInfo {
@@ -64,7 +64,7 @@ export async function resolveBucket(
 
   const result = await awsRaw(
     ["s3api", "head-bucket", "--bucket", options.bucket],
-    { binary: options.binary, context: options.context },
+    { binary: options.binary, context: options.context, configPath: options.configPath },
   );
 
   if (result.exitCode === 0) {
@@ -73,17 +73,20 @@ export async function resolveBucket(
     return info;
   }
 
-  // Use parseAndEnrichAwsError so NO_CREDENTIALS is upgraded to NO_PROFILE_SELECTED
-  // when named profiles exist in ~/.aws/config but none was selected.
-  const parsed = parseAndEnrichAwsError(result, options.context, options.configPath);
+  // awsRaw guarantees result.error is set for every non-zero exit. Guard
+  // against undefined defensively (unreachable today) to keep the type
+  // narrowing sound without a non-null assertion.
+  if (result.error === undefined) {
+    throw new AxiError("Unexpected non-zero exit with no error descriptor", "UNKNOWN");
+  }
 
   // Handle "bucket does not exist" as a known non-error state.
-  if (parsed.botoCode !== undefined && NOT_FOUND_CODES.has(parsed.botoCode)) {
+  if (result.error.botoCode !== undefined && NOT_FOUND_CODES.has(result.error.botoCode)) {
     const info: BucketInfo = { exists: false };
     cache.set(key, info);
     return info;
   }
 
   // Propagate everything else as a structured error.
-  throw new AxiError(parsed.message, parsed.code, [...parsed.suggestions]);
+  throw new AxiError(result.error.message, result.error.code, [...result.error.suggestions]);
 }

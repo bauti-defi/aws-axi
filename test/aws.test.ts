@@ -6,7 +6,7 @@
  * boundary without requiring live AWS credentials.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { awsRaw, awsJson, awsExec } from "../src/aws.js";
@@ -93,8 +93,11 @@ describe("awsRaw", () => {
       stderr: "Unable to locate credentials",
       exitCode: 255,
     });
+    // Inject a nonexistent configPath so enrichment never reads the developer's real
+    // ~/.aws/config — ADR-0003 requires all tests to be config-file-isolated.
     const result = await awsRaw(["sts", "get-caller-identity"], {
       binary: stub,
+      configPath: "/nonexistent/path/.aws/config",
     });
     expect(result.exitCode).toBe(255);
     expect(result.stderr).toContain("Unable to locate credentials");
@@ -146,6 +149,214 @@ describe("awsRaw", () => {
       context: { profile: undefined, region: "eu-west-1" },
     });
     expect(result.stdout.trim()).toBe("eu-west-1");
+  });
+
+  // ── Structural enrichment (result.error field) ──────────────────────────────
+  //
+  // These tests are the behavioral proof of the #72 structural fix.
+  // awsRaw must populate result.error with the parsed+enriched ParsedAwsError
+  // on every non-zero exit, so NO consumer can bypass enrichment by failing to
+  // call parseAndEnrichAwsError — the correct error is already in the result.
+
+  it("populates result.error with NO_CREDENTIALS on credential failure (no named profiles)", async () => {
+    const stub = createStub({
+      stderr: "Unable to locate credentials",
+      exitCode: 253,
+    });
+    // Inject a nonexistent configPath so enrichment finds no profiles → stays NO_CREDENTIALS
+    const result = await awsRaw(["sts", "get-caller-identity"], {
+      binary: stub,
+      configPath: "/nonexistent/path/.aws/config",
+    });
+    expect(result.exitCode).toBe(253);
+    // error must be present and carry the enriched classification
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe("NO_CREDENTIALS");
+  });
+
+  it("populates result.error with NO_PROFILE_SELECTED when named profiles exist but no profile was selected", async () => {
+    // Write a fake ~/.aws/config with a named profile so enrichment can upgrade
+    const tmpDir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
+    const configPath = join(tmpDir, "config");
+    writeFileSync(
+      configPath,
+      "[profile dev]\nregion = us-east-1\n[profile prod]\nregion = eu-west-1\n",
+    );
+
+    const stub = createStub({
+      stderr: "Unable to locate credentials",
+      exitCode: 253,
+    });
+
+    const result = await awsRaw(["sts", "get-caller-identity"], {
+      binary: stub,
+      configPath,
+    });
+
+    expect(result.exitCode).toBe(253);
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe("NO_PROFILE_SELECTED");
+    // Profile names must appear in suggestions so the agent / user can act on them
+    const suggestions = result.error!.suggestions.join(" ");
+    expect(suggestions).toContain("dev");
+    expect(suggestions).toContain("prod");
+
+    // Cleanup
+    rmSync(tmpDir, { recursive: true });
+  });
+
+  it("result.error is undefined when exit code is 0 (success)", async () => {
+    const stub = createStub({ stdout: '{"ok":true}', exitCode: 0 });
+    const result = await awsRaw(["sts", "get-caller-identity"], { binary: stub });
+    expect(result.exitCode).toBe(0);
+    expect(result.error).toBeUndefined();
+  });
+
+  it("populates result.error with SERVICE_CLIENT_ERROR on botocore errors", async () => {
+    const stub = createStub({
+      stderr: "An error occurred (AccessDenied) when calling the GetCallerIdentity operation: Access Denied",
+      exitCode: 254,
+    });
+    const result = await awsRaw(["sts", "get-caller-identity"], { binary: stub });
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe("SERVICE_CLIENT_ERROR");
+    expect(result.error!.botoCode).toBe("AccessDenied");
+    expect(result.error!.operation).toBe("GetCallerIdentity");
+  });
+
+  it("result.error enrichment respects context.profile — skips upgrade when profile was selected", async () => {
+    // When a profile was already selected (context.profile is set), NO_CREDENTIALS
+    // must NOT be upgraded to NO_PROFILE_SELECTED even if named profiles exist.
+    const tmpDir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
+    const configPath = join(tmpDir, "config");
+    writeFileSync(configPath, "[profile dev]\nregion = us-east-1\n");
+
+    const stub = createStub({
+      stderr: "Unable to locate credentials",
+      exitCode: 253,
+    });
+
+    const result = await awsRaw(["sts", "get-caller-identity"], {
+      binary: stub,
+      context: { profile: "dev", region: undefined },
+      configPath,
+    });
+
+    expect(result.error).toBeDefined();
+    // Profile was selected — error stays NO_CREDENTIALS (the profile itself has no valid creds)
+    expect(result.error!.code).toBe("NO_CREDENTIALS");
+
+    rmSync(tmpDir, { recursive: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-surface agreement — awsRaw / awsExec / awsJson must classify identically
+// ---------------------------------------------------------------------------
+//
+// This is the behavioral proof of blocker-2's fix (PR #79 review).
+// awsExec and awsJson route through awsRaw; a future enrichment added inside
+// awsRaw therefore reaches all three surfaces without additional wiring.
+// Any divergence here means the consolidation has been broken.
+
+describe("cross-surface classification agreement — awsRaw / awsExec / awsJson", () => {
+  const NO_CREDS_STDERR = "Unable to locate credentials";
+  const ACCESS_DENIED_STDERR =
+    "An error occurred (AccessDenied) when calling the GetCallerIdentity operation: Access Denied";
+  const DRY_RUN_STDERR =
+    "An error occurred (DryRunOperation) when calling the RunInstances operation: Request would have succeeded.";
+
+  it("awsRaw and awsExec agree on NO_CREDENTIALS code for identical stderr", async () => {
+    const rawStub = createStub({ stderr: NO_CREDS_STDERR, exitCode: 253 });
+    const execStub = createStub({ stderr: NO_CREDS_STDERR, exitCode: 253 });
+
+    const rawResult = await awsRaw(["sts", "get-caller-identity"], {
+      binary: rawStub,
+      configPath: "/nonexistent/path/.aws/config",
+    });
+
+    let execCode: string | undefined;
+    try {
+      await awsExec(["sts", "get-caller-identity"], {
+        binary: execStub,
+        configPath: "/nonexistent/path/.aws/config",
+      });
+    } catch (e) {
+      execCode = (e as { code?: string }).code;
+    }
+
+    expect(rawResult.error?.code).toBe("NO_CREDENTIALS");
+    expect(execCode).toBe(rawResult.error?.code);
+  });
+
+  it("awsRaw and awsJson agree on NO_CREDENTIALS code for identical stderr", async () => {
+    const rawStub = createStub({ stderr: NO_CREDS_STDERR, exitCode: 253 });
+    const jsonStub = createStub({ stderr: NO_CREDS_STDERR, exitCode: 253 });
+
+    const rawResult = await awsRaw(["sts", "get-caller-identity"], {
+      binary: rawStub,
+      configPath: "/nonexistent/path/.aws/config",
+    });
+
+    let jsonCode: string | undefined;
+    try {
+      await awsJson(["sts", "get-caller-identity"], {
+        binary: jsonStub,
+        configPath: "/nonexistent/path/.aws/config",
+      });
+    } catch (e) {
+      jsonCode = (e as { code?: string }).code;
+    }
+
+    expect(rawResult.error?.code).toBe("NO_CREDENTIALS");
+    expect(jsonCode).toBe(rawResult.error?.code);
+  });
+
+  it("awsRaw, awsExec, awsJson agree on SERVICE_CLIENT_ERROR for ACCESS_DENIED", async () => {
+    const stubs = [1, 2, 3].map(() =>
+      createStub({ stderr: ACCESS_DENIED_STDERR, exitCode: 254 }),
+    );
+
+    const rawResult = await awsRaw(["sts", "get-caller-identity"], {
+      binary: stubs[0]!,
+      configPath: "/nonexistent/path/.aws/config",
+    });
+
+    const codes: string[] = [];
+    for (const stub of [stubs[1]!, stubs[2]!]) {
+      try {
+        // awsExec first, awsJson second
+        if (stub === stubs[1]) {
+          await awsExec(["sts", "get-caller-identity"], { binary: stub, configPath: "/nonexistent/path/.aws/config" });
+        } else {
+          await awsJson(["sts", "get-caller-identity"], { binary: stub, configPath: "/nonexistent/path/.aws/config" });
+        }
+      } catch (e) {
+        codes.push((e as { code?: string }).code ?? "");
+      }
+    }
+
+    expect(rawResult.error?.code).toBe("SERVICE_CLIENT_ERROR");
+    expect(codes).toEqual(["SERVICE_CLIENT_ERROR", "SERVICE_CLIENT_ERROR"]);
+  });
+
+  it("DRY_RUN_SUCCESS: awsRaw exposes it in result.error, awsJson returns {} (by design)", async () => {
+    const rawStub = createStub({ stderr: DRY_RUN_STDERR, exitCode: 255 });
+    const jsonStub = createStub({ stderr: DRY_RUN_STDERR, exitCode: 255 });
+
+    const rawResult = await awsRaw(["ec2", "run-instances", "--dry-run"], {
+      binary: rawStub,
+      configPath: "/nonexistent/path/.aws/config",
+    });
+    // awsRaw surfaces DRY_RUN_SUCCESS in result.error (non-zero exit — it IS an error at the process level)
+    expect(rawResult.error?.code).toBe("DRY_RUN_SUCCESS");
+
+    // awsJson translates DRY_RUN_SUCCESS into an empty-object success return — by design
+    const jsonResult = await awsJson(["ec2", "run-instances", "--dry-run"], {
+      binary: jsonStub,
+      configPath: "/nonexistent/path/.aws/config",
+    });
+    expect(jsonResult).toEqual({});
   });
 });
 

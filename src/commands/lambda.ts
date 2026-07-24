@@ -31,7 +31,7 @@ import { tmpdir } from "node:os";
 import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import type { AwsRunOptions } from "../aws.js";
-import { awsJson, awsRaw, parseAndEnrichAwsError } from "../aws.js";
+import { awsJson, awsRaw } from "../aws.js";
 import { resolveRole } from "../resolve/role.js";
 import { resolveSg } from "../resolve/sg.js";
 import { resolveSubnet } from "../resolve/subnet.js";
@@ -257,7 +257,7 @@ function countString(n: number, nextToken: string | undefined): string {
 }
 
 function toRunOpts(options: LambdaRunOptions): AwsRunOptions {
-  return { binary: options.binary, context: options.context };
+  return { binary: options.binary, context: options.context, configPath: options.configPath };
 }
 
 // ─── Enrichment helpers ───────────────────────────────────────────────────────
@@ -569,10 +569,17 @@ async function runInvoke(
     // is a function-level outcome — surfaced as a result field, not an error.
     // NOTE: do NOT conflate HTTP StatusCode (200/400/...) with process exit code.
     if (metadataResult.exitCode !== 0) {
-      // parseAndEnrichAwsError upgrades NO_CREDENTIALS → NO_PROFILE_SELECTED when
-      // named profiles exist in ~/.aws/config but none was selected.
-      const parsed = parseAndEnrichAwsError(metadataResult, options.context, options.configPath);
-      throw new AxiError(parsed.message, parsed.code, [...parsed.suggestions]);
+      // awsRaw guarantees metadataResult.error is set for every non-zero exit.
+      // Guard against undefined defensively (unreachable today) to keep the
+      // compiler-narrowing sound without a non-null assertion.
+      if (metadataResult.error === undefined) {
+        throw new AxiError("Unexpected non-zero exit with no error descriptor", "UNKNOWN");
+      }
+      throw new AxiError(
+        metadataResult.error.message,
+        metadataResult.error.code,
+        [...metadataResult.error.suggestions],
+      );
     }
 
     // --query bypass: the AWS CLI has already applied JMESPath to the metadata

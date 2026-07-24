@@ -24,6 +24,19 @@
  * src/aws-config.ts directly.
  *
  * Cross-reference: docs/adr/0003-cli-delegation-for-reported-values.md
+ *
+ * RELATIONSHIP TO #72 STRUCTURAL FIX:
+ *
+ * After the #72 structural enrichment fix, awsRaw itself computes and returns
+ * result.error (a parsed + enriched ParsedAwsError) for every non-zero exit.
+ * Command and resolve modules simply read result.error — they no longer need
+ * to import parseAwsError or parseAndEnrichAwsError at all.
+ *
+ * This guard is now a backstop: it catches the most common regression shapes
+ * (static imports of parseAwsError / mapAwsError in commands / resolve dirs).
+ * It is no longer the primary line of defence — the structural guarantee in
+ * awsRaw is. See test/aws.test.ts ("Structural enrichment" suite) for the
+ * behavioural proof.
  */
 import { describe, it, expect } from "bun:test";
 import { readdirSync, readFileSync } from "node:fs";
@@ -118,18 +131,23 @@ describe("ADR-0003 invariant — src/aws-config.ts has exactly one importer in s
 //
 // After PR #71 closed the NO_PROFILE_SELECTED gap in awsExec and awsJson,
 // three awsRaw consumers still called parseAwsError off the raw ExecResult
-// (wait.ts:188, s3.ts:580, bucket.ts:71) and one called mapAwsError (lambda.ts:567).
-// These missed the enrichNoCredsError call, so those command paths emitted the
-// old NO_CREDENTIALS + "Run `aws sso login`" message regardless of whether named
+// (wait.ts, s3.ts, bucket.ts) and one called mapAwsError (lambda.ts). These
+// missed the enrichNoCredsError call, so those paths emitted the old
+// NO_CREDENTIALS + "Run `aws sso login`" message regardless of whether named
 // profiles existed — exactly the silent-stop failure mode #70 was filed to fix.
 //
-// The fix: export parseAndEnrichAwsError from src/aws.ts, which wraps both
-// parseAwsError and enrichNoCredsError. Command/resolve modules must use it
-// instead of importing parseAwsError or mapAwsError from errors.ts directly.
+// PR #72 structural fix: awsRaw now computes result.error (parsed + enriched
+// ParsedAwsError) for every non-zero exit. Command/resolve modules read
+// result.error directly — they have no reason to import parseAwsError or
+// mapAwsError from errors.ts, and must not do so.
 //
-// This guard enforces that invariant statically: if a new src/commands/*.ts or
-// src/resolve/*.ts file imports parseAwsError or mapAwsError from errors.ts,
-// this test fails with a clear explanation of why and how to fix it.
+// This guard is a backstop for the most common regression shape (static imports
+// of parseAwsError / mapAwsError in commands / resolve dirs). Dynamic imports
+// and namespace imports are not caught here; the structural guarantee in awsRaw
+// (result.error always populated) is the primary defense against those shapes.
+//
+// If a new src/commands/*.ts or src/resolve/*.ts file imports parseAwsError or
+// mapAwsError from errors.ts, this test fails with a clear explanation.
 
 const COMMANDS_DIR = join(REPO_ROOT, "src", "commands");
 const RESOLVE_DIR = join(REPO_ROOT, "src", "resolve");
@@ -146,7 +164,7 @@ function importsRawErrorParsers(content: string): boolean {
   );
 }
 
-describe("ADR-0003 corollary — command/resolve modules must use parseAndEnrichAwsError, not raw error parsers", () => {
+describe("ADR-0003 corollary — command/resolve modules must not import parseAwsError or mapAwsError from errors.ts", () => {
   it("no src/commands/*.ts file imports parseAwsError or mapAwsError from errors.ts", () => {
     const files = collectTsFiles(COMMANDS_DIR);
     const violators: string[] = [];
@@ -168,10 +186,9 @@ describe("ADR-0003 corollary — command/resolve modules must use parseAndEnrich
         `enrichNoCredsError upgrade that converts NO_CREDENTIALS to NO_PROFILE_SELECTED\n` +
         `when named profiles exist in ~/.aws/config. This recreates the exact silent-stop\n` +
         `failure mode that #70 was filed to fix.\n\n` +
-        `FIX: import parseAndEnrichAwsError from "../aws.js" and call it with\n` +
-        `(result, options.context, options.configPath) instead of calling parseAwsError\n` +
-        `(result.stderr, result.exitCode) or mapAwsError(result.stderr, result.exitCode).\n` +
-        `parseAndEnrichAwsError does both parse + enrich in one call.\n\n` +
+        `FIX: awsRaw already computes result.error (a fully enriched ParsedAwsError)\n` +
+        `for every non-zero exit. Read result.error directly — no extra imports needed.\n` +
+        `Pass configPath in your AwsRunOptions so enrichment uses the correct config file.\n\n` +
         `See: docs/adr/0003-cli-delegation-for-reported-values.md`,
     ).toEqual([]);
   });
@@ -192,18 +209,26 @@ describe("ADR-0003 corollary — command/resolve modules must use parseAndEnrich
       `ADR-0003 corollary violation: src/resolve/*.ts files must not import\n` +
         `parseAwsError or mapAwsError directly from errors.ts.\n` +
         `Violating file(s): ${violators.join(", ")}\n` +
+        `FIX: read result.error from the awsRaw return value — it is already enriched.\n` +
+        `Pass configPath in AwsRunOptions so enrichment uses the correct config file.\n` +
         `See the message from the commands/ check above for the full explanation.`,
     ).toEqual([]);
   });
 
-  it("the guard is not vacuous — src/aws.ts still exports parseAndEnrichAwsError", () => {
+  it("the guard is not vacuous — awsRaw populates result.error at the enrichment site", () => {
     const awsTsContent = readFileSync(join(REPO_ROOT, "src", "aws.ts"), "utf-8");
+    // Assert on the population site ({ ...result, error }) rather than the type
+    // declaration (readonly error?:), so this guard goes red if the enrichment
+    // block is deleted even if the field remains declared.
+    // The behavioural proof is in test/aws.test.ts ("Structural enrichment" suite):
+    // all 5 tests there go red when this block is deleted (see PR #79 mutation matrix).
     expect(
       awsTsContent,
-      `src/aws.ts no longer exports parseAndEnrichAwsError.\n` +
-        `If the function was renamed or removed, update this guard and the command/resolve\n` +
-        `modules that use it.\n` +
+      `awsRaw no longer populates result.error in src/aws.ts.\n` +
+        `The #72 structural fix requires awsRaw to compute and return a { ...result, error }\n` +
+        `object for every non-zero exit so no consumer can bypass enrichment.\n` +
+        `If this block was removed, restore it and re-run the structural enrichment tests.\n` +
         `See: docs/adr/0003-cli-delegation-for-reported-values.md`,
-    ).toContain("export function parseAndEnrichAwsError");
+    ).toContain("return { ...result, error };");
   });
 });
