@@ -1,0 +1,32 @@
+{
+  "version": "2.0",
+  "metadata": {
+    "apiVersion": "2014-10-06",
+    "serviceId": "CodeDeploy"
+  },
+  "operations": {
+    "ListApplications": {
+      "name": "ListApplications",
+      "http": {
+        "method": "POST",
+        "requestUri": "/"
+      },
+      "output": {
+        "shape": "ListApplicationsOutput"
+      }
+    }
+  },
+  "shapes": {
+    "ListApplicationsOutput": {
+      "type": "structure",
+      "members": {
+        "applications": { "shape": "ApplicationsList" }
+      }
+    },
+    "ApplicationsList": {
+      "type": "list",
+      "member": { "shape": "ApplicationName" }
+    },
+    "ApplicationName": { "type": "string" }
+  }
+}

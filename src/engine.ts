@@ -50,6 +50,42 @@ export interface EngineRunOptions {
 const DEFAULT_MAX_ITEMS = 50;
 
 /**
+ * Maps AWS CLI top-level command names to their botocore model directory names
+ * when the two differ.
+ *
+ * Most CLI services are 1:1 with a botocore directory (e.g. "sqs" → "sqs/",
+ * "ec2" → "ec2/"). This table covers the known exceptions enumerated by
+ * diffing `awscli/data/ac.index` (421 top-level commands) against the botocore
+ * data directory (416 dirs) on AWS CLI v2.33.x.
+ *
+ * Alias contract: the alias applies ONLY to model lookup (for validation); the
+ * child-process argv always uses the original CLI name because that is what
+ * `aws <service> <op>` expects on the wire.
+ *
+ * Deliberate non-entries:
+ *   - `ddb`: not a botocore alias. It is an `awscli` high-level command (only
+ *     `put` / `select`) with its own argument grammar. Aliasing it to `dynamodb`
+ *     would silently accept invalid input. Tracked in a follow-up issue.
+ *   - CLI meta-commands (`configure`, `login`, `logout`, `history`, `cli-dev`)
+ *     are not AWS services and correctly produce USAGE_ERROR if passed as service.
+ *
+ * Exported so the inverse direction (`s3 → s3api` for waiters in #76) can be
+ * derived from a single source of truth rather than a separate hand-maintained
+ * table in a second file.
+ *
+ * NOTE: uses `Object.create(null)` to sever the prototype chain — prevents
+ * inherited Object.prototype keys (`toString`, `constructor`, etc.) from being
+ * resolved as botocore model names by the `Object.hasOwn` guard below.
+ */
+export const SERVICE_ALIASES: Readonly<Record<string, string>> = Object.freeze(
+  Object.assign(Object.create(null) as Record<string, string>, {
+    s3api: "s3",
+    configservice: "config",
+    deploy: "codedeploy",
+  }),
+);
+
+/**
  * Convert a botocore PascalCase parameter name to its CLI --flag form.
  * "Bucket"    → "--bucket"
  * "QueueUrl"  → "--queue-url"
@@ -167,10 +203,19 @@ export async function engineRun(
   const { service, operation, context, binary, dataDir } = options;
   const maxItemsCap = options.maxItems ?? DEFAULT_MAX_ITEMS;
 
+  // Resolve botocore model name: some CLI service names differ from the
+  // botocore directory name. Use the alias for model lookup only; the wire
+  // call (awsArgs) always uses the original CLI service name.
+  // Object.hasOwn guards against prototype-chain lookups (SERVICE_ALIASES uses
+  // Object.create(null) but the hasOwn guard makes the contract explicit).
+  const modelService = Object.hasOwn(SERVICE_ALIASES, service)
+    ? (SERVICE_ALIASES[service] as string)
+    : service;
+
   // ── 1. Load service model ──────────────────────────────────────────────────
   let model: ServiceModel;
   try {
-    model = loadService(service, { dataDir });
+    model = loadService(modelService, { dataDir });
   } catch (err) {
     throw new AxiError(
       `Unknown service '${service}': ${err instanceof Error ? err.message : String(err)}`,
