@@ -865,14 +865,25 @@ export async function s3Command(
       // (i.e. perform the real copy).  hasFlag would treat --dryrun=false as true,
       // silently performing a dry-run and reporting success with no copy on the wire.
       const dryRun = flagIsTrue(rest, "--dryrun");
+      // --recursive is a boolean flag for s3 cp (directory tree copy).  Read it
+      // before collectPassthroughFlags so we can re-inject it as a bare flag when
+      // truthy.  Without this, --recursive false would be forwarded verbatim and
+      // real aws would reject it with "Unknown options: false" (#66).
+      const recursive = flagIsTrue(rest, "--recursive");
       // Strip identified positionals first. Once bare positionals are absent,
       // the heuristic safely identifies all remaining bare tokens as flag values.
-      // --dryrun is a boolean overlay flag (no value follows); pass in ownedBoolFlags.
+      // --dryrun and --recursive are boolean overlay flags (no value follows);
+      // pass both in ownedBoolFlags so collectPassthroughFlags does not consume
+      // the token after --recursive as its value.
       const argsForPassthrough = stripPositionals(rest, source, destination);
-      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, [], ["--dryrun"]);
+      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, [], ["--dryrun", "--recursive"]);
+      // Re-inject --recursive as a bare flag when the user enabled it.
+      // collectPassthroughFlags stripped it from rawPassthrough; we add it back
+      // here so the child aws sees the flag it understands (no "true"/"false" value).
+      const passthroughWithRecursive = recursive ? [...rawPassthrough, "--recursive"] : rawPassthrough;
       // s3 cp uses awsExec (text output) — --query is forwarded verbatim but
       // there is no overlay projection to bypass, so hasQuery is intentionally unused.
-      const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+      const { passthrough, hasQuery } = buildPassthrough(passthroughWithRecursive);
       void hasQuery;
       const result = await s3CpRun({ source, destination, dryRun, passthrough, context, binary });
       return result as unknown as Record<string, unknown>;
@@ -895,12 +906,24 @@ export async function s3Command(
       // (i.e. perform the real delete).  hasFlag would treat --dryrun=false as true,
       // silently skipping the delete and reporting success (fails safe but still wrong).
       const dryRun = flagIsTrue(rest, "--dryrun");
+      // --recursive is a boolean flag for s3 rm (prefix tree deletion).  Read it
+      // before collectPassthroughFlags so we can re-inject it as a bare flag when
+      // truthy.  Without this, --recursive false would be forwarded verbatim and
+      // real aws would reject it with "Unknown options: false" (#66).
+      const recursive = flagIsTrue(rest, "--recursive");
       // Strip the target URI positional to prevent heuristic from eating it.
+      // --dryrun and --recursive are boolean overlay flags (no value follows);
+      // pass both in ownedBoolFlags so collectPassthroughFlags does not consume
+      // the token after --recursive as its value.
       const argsForPassthrough = stripPositionals(rest, target);
-      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, [], ["--dryrun"]);
+      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, [], ["--dryrun", "--recursive"]);
+      // Re-inject --recursive as a bare flag when the user enabled it.
+      // collectPassthroughFlags stripped it from rawPassthrough; we add it back
+      // here so the child aws sees the flag it understands (no "true"/"false" value).
+      const passthroughWithRecursive = recursive ? [...rawPassthrough, "--recursive"] : rawPassthrough;
       // s3 rm uses awsExec (text output) — --query is forwarded verbatim but
       // there is no overlay projection to bypass, so hasQuery is intentionally unused.
-      const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+      const { passthrough, hasQuery } = buildPassthrough(passthroughWithRecursive);
       void hasQuery;
       const result = await s3RmRun({ target, dryRun, passthrough, context, binary });
       return result as unknown as Record<string, unknown>;
