@@ -14,7 +14,7 @@
  *   resolveBucket(options) → BucketInfo
  */
 import { AxiError } from "axi-sdk-js";
-import { awsRaw, parseAndEnrichAwsError } from "../aws.js";
+import { awsRaw } from "../aws.js";
 import type { AwsContext } from "../context.js";
 
 export interface BucketInfo {
@@ -64,7 +64,7 @@ export async function resolveBucket(
 
   const result = await awsRaw(
     ["s3api", "head-bucket", "--bucket", options.bucket],
-    { binary: options.binary, context: options.context },
+    { binary: options.binary, context: options.context, configPath: options.configPath },
   );
 
   if (result.exitCode === 0) {
@@ -73,9 +73,10 @@ export async function resolveBucket(
     return info;
   }
 
-  // Use parseAndEnrichAwsError so NO_CREDENTIALS is upgraded to NO_PROFILE_SELECTED
-  // when named profiles exist in ~/.aws/config but none was selected.
-  const parsed = parseAndEnrichAwsError(result, options.context, options.configPath);
+  // awsRaw populates result.error with the enriched ParsedAwsError (including
+  // the NO_CREDENTIALS → NO_PROFILE_SELECTED upgrade) so no separate parse call
+  // is needed.
+  const parsed = result.error!;
 
   // Handle "bucket does not exist" as a known non-error state.
   if (parsed.botoCode !== undefined && NOT_FOUND_CODES.has(parsed.botoCode)) {

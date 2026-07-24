@@ -6,7 +6,7 @@
  * boundary without requiring live AWS credentials.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { awsRaw, awsJson, awsExec } from "../src/aws.js";
@@ -146,6 +146,104 @@ describe("awsRaw", () => {
       context: { profile: undefined, region: "eu-west-1" },
     });
     expect(result.stdout.trim()).toBe("eu-west-1");
+  });
+
+  // ── Structural enrichment (result.error field) ──────────────────────────────
+  //
+  // These tests are the behavioral proof of the #72 structural fix.
+  // awsRaw must populate result.error with the parsed+enriched ParsedAwsError
+  // on every non-zero exit, so NO consumer can bypass enrichment by failing to
+  // call parseAndEnrichAwsError — the correct error is already in the result.
+
+  it("populates result.error with NO_CREDENTIALS on credential failure (no named profiles)", async () => {
+    const stub = createStub({
+      stderr: "Unable to locate credentials",
+      exitCode: 253,
+    });
+    // Inject a nonexistent configPath so enrichment finds no profiles → stays NO_CREDENTIALS
+    const result = await awsRaw(["sts", "get-caller-identity"], {
+      binary: stub,
+      configPath: "/nonexistent/path/.aws/config",
+    });
+    expect(result.exitCode).toBe(253);
+    // error must be present and carry the enriched classification
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe("NO_CREDENTIALS");
+  });
+
+  it("populates result.error with NO_PROFILE_SELECTED when named profiles exist but no profile was selected", async () => {
+    // Write a fake ~/.aws/config with a named profile so enrichment can upgrade
+    const tmpDir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
+    const configPath = join(tmpDir, "config");
+    writeFileSync(
+      configPath,
+      "[profile dev]\nregion = us-east-1\n[profile prod]\nregion = eu-west-1\n",
+    );
+
+    const stub = createStub({
+      stderr: "Unable to locate credentials",
+      exitCode: 253,
+    });
+
+    const result = await awsRaw(["sts", "get-caller-identity"], {
+      binary: stub,
+      configPath,
+    });
+
+    expect(result.exitCode).toBe(253);
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe("NO_PROFILE_SELECTED");
+    // Profile names must appear in suggestions so the agent / user can act on them
+    const suggestions = result.error!.suggestions.join(" ");
+    expect(suggestions).toContain("dev");
+    expect(suggestions).toContain("prod");
+
+    // Cleanup
+    rmSync(tmpDir, { recursive: true });
+  });
+
+  it("result.error is undefined when exit code is 0 (success)", async () => {
+    const stub = createStub({ stdout: '{"ok":true}', exitCode: 0 });
+    const result = await awsRaw(["sts", "get-caller-identity"], { binary: stub });
+    expect(result.exitCode).toBe(0);
+    expect(result.error).toBeUndefined();
+  });
+
+  it("populates result.error with SERVICE_CLIENT_ERROR on botocore errors", async () => {
+    const stub = createStub({
+      stderr: "An error occurred (AccessDenied) when calling the GetCallerIdentity operation: Access Denied",
+      exitCode: 254,
+    });
+    const result = await awsRaw(["sts", "get-caller-identity"], { binary: stub });
+    expect(result.error).toBeDefined();
+    expect(result.error!.code).toBe("SERVICE_CLIENT_ERROR");
+    expect(result.error!.botoCode).toBe("AccessDenied");
+    expect(result.error!.operation).toBe("GetCallerIdentity");
+  });
+
+  it("result.error enrichment respects context.profile — skips upgrade when profile was selected", async () => {
+    // When a profile was already selected (context.profile is set), NO_CREDENTIALS
+    // must NOT be upgraded to NO_PROFILE_SELECTED even if named profiles exist.
+    const tmpDir = mkdtempSync(join(tmpdir(), "aws-axi-cfg-"));
+    const configPath = join(tmpDir, "config");
+    writeFileSync(configPath, "[profile dev]\nregion = us-east-1\n");
+
+    const stub = createStub({
+      stderr: "Unable to locate credentials",
+      exitCode: 253,
+    });
+
+    const result = await awsRaw(["sts", "get-caller-identity"], {
+      binary: stub,
+      context: { profile: "dev", region: undefined },
+      configPath,
+    });
+
+    expect(result.error).toBeDefined();
+    // Profile was selected — error stays NO_CREDENTIALS (the profile itself has no valid creds)
+    expect(result.error!.code).toBe("NO_CREDENTIALS");
+
+    rmSync(tmpDir, { recursive: true });
   });
 });
 

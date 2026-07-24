@@ -31,7 +31,7 @@ import { tmpdir } from "node:os";
 import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import type { AwsRunOptions } from "../aws.js";
-import { awsJson, awsRaw, parseAndEnrichAwsError } from "../aws.js";
+import { awsJson, awsRaw } from "../aws.js";
 import { resolveRole } from "../resolve/role.js";
 import { resolveSg } from "../resolve/sg.js";
 import { resolveSubnet } from "../resolve/subnet.js";
@@ -257,7 +257,7 @@ function countString(n: number, nextToken: string | undefined): string {
 }
 
 function toRunOpts(options: LambdaRunOptions): AwsRunOptions {
-  return { binary: options.binary, context: options.context };
+  return { binary: options.binary, context: options.context, configPath: options.configPath };
 }
 
 // ─── Enrichment helpers ───────────────────────────────────────────────────────
@@ -569,9 +569,10 @@ async function runInvoke(
     // is a function-level outcome — surfaced as a result field, not an error.
     // NOTE: do NOT conflate HTTP StatusCode (200/400/...) with process exit code.
     if (metadataResult.exitCode !== 0) {
-      // parseAndEnrichAwsError upgrades NO_CREDENTIALS → NO_PROFILE_SELECTED when
-      // named profiles exist in ~/.aws/config but none was selected.
-      const parsed = parseAndEnrichAwsError(metadataResult, options.context, options.configPath);
+      // awsRaw populates metadataResult.error with the enriched ParsedAwsError
+      // (including the NO_CREDENTIALS → NO_PROFILE_SELECTED upgrade via configPath
+      // passed through toRunOpts). No separate parse call needed.
+      const parsed = metadataResult.error!;
       throw new AxiError(parsed.message, parsed.code, [...parsed.suggestions]);
     }
 

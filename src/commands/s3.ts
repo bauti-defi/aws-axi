@@ -19,7 +19,7 @@
  *   S3_HELP                     → help text
  */
 import { AxiError } from "axi-sdk-js";
-import { awsJson, awsRaw, awsExec, parseAndEnrichAwsError } from "../aws.js";
+import { awsJson, awsRaw, awsExec } from "../aws.js";
 import type { AwsContext } from "../context.js";
 import { fallThroughToEngine } from "../engine.js";
 import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrue, hasFlag, extractPositionals } from "../overlay-args.js";
@@ -562,6 +562,7 @@ export async function s3CreateBucketRun(
   const result = await awsRaw(args, {
     binary: options.binary,
     context: options.context,
+    configPath: options.configPath,
   });
 
   // ── success ───────────────────────────────────────────────────────────────
@@ -582,9 +583,10 @@ export async function s3CreateBucketRun(
   }
 
   // ── idempotent: bucket already owned by this caller ───────────────────────
-  // Use parseAndEnrichAwsError so NO_CREDENTIALS is upgraded to NO_PROFILE_SELECTED
-  // when named profiles exist in ~/.aws/config but none was selected.
-  const parsed = parseAndEnrichAwsError(result, options.context, options.configPath);
+  // awsRaw populates result.error with the enriched ParsedAwsError (including
+  // the NO_CREDENTIALS → NO_PROFILE_SELECTED upgrade) so no separate parse call
+  // is needed.
+  const parsed = result.error!;
   if (parsed.botoCode === "BucketAlreadyOwnedByYou") {
     return {
       created: false,

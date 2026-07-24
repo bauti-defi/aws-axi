@@ -5,11 +5,21 @@
  * Always appends `--output json`; injects profile/region via child-process env
  * so global flags never conflict with operation-level flags.
  *
- * Four surface levels:
- *   awsRaw                — returns ExecResult; never throws (except for ENOENT)
- *   parseAndEnrichAwsError — combined parse+enrich for awsRaw consumers
- *   awsExec               — returns raw stdout string; throws AxiError on non-zero exit
- *   awsJson               — parses stdout as JSON; throws AxiError on non-zero exit
+ * Three surface levels:
+ *   awsRaw   — returns ExecResult (with error? field populated on non-zero exit);
+ *              never throws except for ENOENT. Enrichment is automatic — callers
+ *              read result.error rather than calling parseAwsError separately.
+ *   awsExec  — returns raw stdout string; throws AxiError on non-zero exit
+ *   awsJson  — parses stdout as JSON; throws AxiError on non-zero exit
+ *
+ * Adding a new error code (#74, #75, #53):
+ *   1. Add the new union member to AwsErrorCode in src/errors.ts.
+ *   2. Add a detection branch in parseAwsError() in src/errors.ts.
+ *   3. Add the exit-code mapping in awsExitCode() in src/errors.ts.
+ *   4. If the code requires context-aware enrichment (like NO_PROFILE_SELECTED),
+ *      add a new enrichment pass in enrichNoCredsError() or a sibling function
+ *      in this file — called inside awsRaw before returning result.error.
+ *   No changes needed in callers: they read result.error and get the new code.
  */
 import { execFile } from "node:child_process";
 import type { AwsContext } from "./context.js";
@@ -26,6 +36,15 @@ export interface ExecResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly exitCode: number;
+  /**
+   * Parsed and enriched error descriptor — populated by awsRaw for every
+   * non-zero exit. Undefined on success (exitCode === 0).
+   *
+   * Use this instead of calling parseAwsError / mapAwsError directly. The
+   * NO_PROFILE_SELECTED enrichment (which requires reading ~/.aws/config) is
+   * already applied here, so callers cannot accidentally bypass it.
+   */
+  readonly error?: ParsedAwsError;
 }
 
 export interface AwsRunOptions {
@@ -74,35 +93,6 @@ function enrichNoCredsError(
   }
 
   return parsed;
-}
-
-/**
- * Combined parse + enrich for awsRaw consumers.
- *
- * Callers that call awsRaw and inspect the raw ExecResult for botoCode values
- * before throwing must use this instead of bare parseAwsError, so the
- * NO_PROFILE_SELECTED upgrade is applied consistently.
- *
- * Seam rationale: awsExec and awsJson both route through enrichNoCredsError.
- * This function provides the same guarantee to awsRaw consumers that need to
- * inspect botoCode before deciding whether/what to throw — without forcing them
- * through the higher-level helpers that throw unconditionally on non-zero exit.
- * A fourth caller that uses parseAndEnrichAwsError instead of parseAwsError
- * automatically gets enrichment; one that calls parseAwsError directly does not.
- * The ADR-0003-style guard in test/adr-0003-config-isolation.test.ts enforces
- * that command/resolve modules never import parseAwsError or mapAwsError from
- * errors.ts directly.
- */
-export function parseAndEnrichAwsError(
-  result: ExecResult,
-  context: AwsContext | undefined,
-  configPath?: string,
-): ParsedAwsError {
-  return enrichNoCredsError(
-    parseAwsError(result.stderr, result.exitCode),
-    context,
-    configPath,
-  );
 }
 
 function buildArgs(userArgs: readonly string[]): string[] {
@@ -168,7 +158,14 @@ async function run(
 
 /**
  * Execute aws and return the raw ExecResult.
+ *
  * Throws AxiError only for ENOENT (aws not installed).
+ *
+ * For every non-zero exit, result.error is populated with a parsed and
+ * enriched ParsedAwsError (including the NO_PROFILE_SELECTED upgrade when
+ * named profiles exist in ~/.aws/config). Callers must read result.error
+ * instead of parsing result.stderr themselves — this is the structural
+ * guarantee that makes enrichment unbypassable at the seam.
  */
 export async function awsRaw(
   args: readonly string[],
@@ -177,6 +174,14 @@ export async function awsRaw(
   const result = await run(args, options);
   if (result.stderr === "ENOENT") {
     throw mapAwsError("ENOENT", 127);
+  }
+  if (result.exitCode !== 0) {
+    const error = enrichNoCredsError(
+      parseAwsError(result.stderr, result.exitCode),
+      options.context,
+      options.configPath,
+    );
+    return { ...result, error };
   }
   return result;
 }
