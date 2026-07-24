@@ -7,19 +7,23 @@
  *
  * Three surface levels:
  *   awsRaw   — returns ExecResult (with error? field populated on non-zero exit);
- *              never throws except for ENOENT. Enrichment is automatic — callers
- *              read result.error rather than calling parseAwsError separately.
- *   awsExec  — returns raw stdout string; throws AxiError on non-zero exit
- *   awsJson  — parses stdout as JSON; throws AxiError on non-zero exit
+ *              never throws except for ENOENT. Callers read result.error for the
+ *              enriched ParsedAwsError rather than parsing stderr themselves.
+ *   awsExec  — routes through awsRaw; returns raw stdout string; throws on failure
+ *   awsJson  — routes through awsRaw; parses stdout as JSON; throws on failure
+ *
+ * Enrichment is single-site: awsRaw calls enrichNoCredsError (and any future
+ * enrichment functions). awsExec and awsJson route through awsRaw, so they
+ * inherit every enrichment automatically — no divergent code paths.
  *
  * Adding a new error code (#74, #75, #53):
  *   1. Add the new union member to AwsErrorCode in src/errors.ts.
  *   2. Add a detection branch in parseAwsError() in src/errors.ts.
  *   3. Add the exit-code mapping in awsExitCode() in src/errors.ts.
  *   4. If the code requires context-aware enrichment (like NO_PROFILE_SELECTED),
- *      add a new enrichment pass in enrichNoCredsError() or a sibling function
- *      in this file — called inside awsRaw before returning result.error.
- *   No changes needed in callers: they read result.error and get the new code.
+ *      add a new enrichment function in this file, call it inside awsRaw before
+ *      `return { ...result, error }`. awsExec and awsJson inherit it automatically.
+ *   5. Add a cross-surface agreement test in test/aws.test.ts to pin the behavior.
  */
 import { execFile } from "node:child_process";
 import type { AwsContext } from "./context.js";
@@ -189,22 +193,18 @@ export async function awsRaw(
 /**
  * Execute aws and return raw stdout string.
  * Throws AxiError on non-zero exit or ENOENT.
+ *
+ * Routes through awsRaw so enrichment is single-site: any new enrichment
+ * wired into awsRaw (see module-level extension guide) is automatically
+ * applied here without additional changes.
  */
 export async function awsExec(
   args: readonly string[],
   options: AwsRunOptions = {},
 ): Promise<string> {
-  const result = await run(args, options);
-  if (result.stderr === "ENOENT") {
-    throw mapAwsError("ENOENT", 127);
-  }
-  if (result.exitCode !== 0) {
-    const parsed = enrichNoCredsError(
-      parseAwsError(result.stderr, result.exitCode),
-      options.context,
-      options.configPath,
-    );
-    throw new AxiError(parsed.message, parsed.code, [...parsed.suggestions]);
+  const result = await awsRaw(args, options);
+  if (result.error !== undefined) {
+    throw new AxiError(result.error.message, result.error.code, [...result.error.suggestions]);
   }
   return result.stdout;
 }
@@ -213,24 +213,23 @@ export async function awsExec(
  * Execute aws and return parsed JSON.
  * DryRunOperation is treated as success and returns `{}`.
  * Throws AxiError on any other non-zero exit or ENOENT.
+ *
+ * Routes through awsRaw so enrichment is single-site: any new enrichment
+ * wired into awsRaw (see module-level extension guide) is automatically
+ * applied here without additional changes.
  */
 export async function awsJson<T = unknown>(
   args: readonly string[],
   options: AwsRunOptions = {},
 ): Promise<T> {
-  const result = await run(args, options);
+  const result = await awsRaw(args, options);
 
-  if (result.stderr === "ENOENT") {
-    throw mapAwsError("ENOENT", 127);
-  }
-
-  if (result.exitCode !== 0) {
-    const base = parseAwsError(result.stderr, result.exitCode);
-    if (base.code === "DRY_RUN_SUCCESS") {
+  if (result.error !== undefined) {
+    // DryRunOperation signals permission-check success — treat as an empty result.
+    if (result.error.code === "DRY_RUN_SUCCESS") {
       return {} as T;
     }
-    const parsed = enrichNoCredsError(base, options.context, options.configPath);
-    throw new AxiError(parsed.message, parsed.code, [...parsed.suggestions]);
+    throw new AxiError(result.error.message, result.error.code, [...result.error.suggestions]);
   }
 
   try {

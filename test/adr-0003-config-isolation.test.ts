@@ -215,15 +215,20 @@ describe("ADR-0003 corollary — command/resolve modules must not import parseAw
     ).toEqual([]);
   });
 
-  it("the guard is not vacuous — ExecResult.error carries the enriched ParsedAwsError (structural #72 guarantee)", () => {
+  it("the guard is not vacuous — awsRaw populates result.error at the enrichment site", () => {
     const awsTsContent = readFileSync(join(REPO_ROOT, "src", "aws.ts"), "utf-8");
+    // Assert on the population site ({ ...result, error }) rather than the type
+    // declaration (readonly error?:), so this guard goes red if the enrichment
+    // block is deleted even if the field remains declared.
+    // The behavioural proof is in test/aws.test.ts ("Structural enrichment" suite):
+    // all 5 tests there go red when this block is deleted (see PR #79 mutation matrix).
     expect(
       awsTsContent,
-      `ExecResult no longer has an 'error?' field in src/aws.ts.\n` +
-        `The #72 structural fix requires awsRaw to compute and return the enriched\n` +
-        `ParsedAwsError in result.error so no consumer can bypass enrichment.\n` +
-        `If the field was renamed or removed, restore it and update all call sites.\n` +
+      `awsRaw no longer populates result.error in src/aws.ts.\n` +
+        `The #72 structural fix requires awsRaw to compute and return a { ...result, error }\n` +
+        `object for every non-zero exit so no consumer can bypass enrichment.\n` +
+        `If this block was removed, restore it and re-run the structural enrichment tests.\n` +
         `See: docs/adr/0003-cli-delegation-for-reported-values.md`,
-    ).toContain("readonly error?:");
+    ).toContain("return { ...result, error }");
   });
 });

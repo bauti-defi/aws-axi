@@ -583,11 +583,13 @@ export async function s3CreateBucketRun(
   }
 
   // ── idempotent: bucket already owned by this caller ───────────────────────
-  // awsRaw populates result.error with the enriched ParsedAwsError (including
-  // the NO_CREDENTIALS → NO_PROFILE_SELECTED upgrade) so no separate parse call
-  // is needed.
-  const parsed = result.error!;
-  if (parsed.botoCode === "BucketAlreadyOwnedByYou") {
+  // awsRaw guarantees result.error is set for every non-zero exit. Guard
+  // against undefined defensively (unreachable today, but narrows the type
+  // so a future edit above cannot silently produce undefined.message).
+  if (result.error === undefined) {
+    throw new AxiError("Unexpected non-zero exit with no error descriptor", "UNKNOWN");
+  }
+  if (result.error.botoCode === "BucketAlreadyOwnedByYou") {
     return {
       created: false,
       idempotent: true,
@@ -596,7 +598,7 @@ export async function s3CreateBucketRun(
   }
 
   // ── all other errors (BucketAlreadyExists, auth, etc.) ───────────────────
-  throw new AxiError(parsed.message, parsed.code, [...parsed.suggestions]);
+  throw new AxiError(result.error.message, result.error.code, [...result.error.suggestions]);
 }
 
 // ---------------------------------------------------------------------------

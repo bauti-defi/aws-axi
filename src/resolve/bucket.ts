@@ -73,18 +73,20 @@ export async function resolveBucket(
     return info;
   }
 
-  // awsRaw populates result.error with the enriched ParsedAwsError (including
-  // the NO_CREDENTIALS → NO_PROFILE_SELECTED upgrade) so no separate parse call
-  // is needed.
-  const parsed = result.error!;
+  // awsRaw guarantees result.error is set for every non-zero exit. Guard
+  // against undefined defensively (unreachable today) to keep the type
+  // narrowing sound without a non-null assertion.
+  if (result.error === undefined) {
+    throw new AxiError("Unexpected non-zero exit with no error descriptor", "UNKNOWN");
+  }
 
   // Handle "bucket does not exist" as a known non-error state.
-  if (parsed.botoCode !== undefined && NOT_FOUND_CODES.has(parsed.botoCode)) {
+  if (result.error.botoCode !== undefined && NOT_FOUND_CODES.has(result.error.botoCode)) {
     const info: BucketInfo = { exists: false };
     cache.set(key, info);
     return info;
   }
 
   // Propagate everything else as a structured error.
-  throw new AxiError(parsed.message, parsed.code, [...parsed.suggestions]);
+  throw new AxiError(result.error.message, result.error.code, [...result.error.suggestions]);
 }

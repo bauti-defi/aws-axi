@@ -190,12 +190,14 @@ export async function waitRun(options: WaitRunOptions): Promise<WaitResult> {
   }
 
   // 4a. Propagate well-known taxonomy errors (no-credentials, auth-expired, …)
-  // awsRaw populates result.error with the enriched ParsedAwsError (including
-  // the NO_CREDENTIALS → NO_PROFILE_SELECTED upgrade) so no separate parse call
-  // is needed.
-  const parsed = result.error!;
-  if (parsed.code !== "UNKNOWN") {
-    throw new AxiError(parsed.message, parsed.code, [...parsed.suggestions]);
+  // awsRaw guarantees result.error is set for every non-zero exit. Guard
+  // against undefined defensively (unreachable today, but narrows the type
+  // compiler-visibly so future edits above cannot silently produce undefined.message).
+  if (result.error === undefined) {
+    throw new AxiError("Unexpected non-zero exit with no error descriptor", "UNKNOWN");
+  }
+  if (result.error.code !== "UNKNOWN") {
+    throw new AxiError(result.error.message, result.error.code, [...result.error.suggestions]);
   }
 
   const botoMsg = result.stderr.trim();

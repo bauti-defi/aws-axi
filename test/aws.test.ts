@@ -93,8 +93,11 @@ describe("awsRaw", () => {
       stderr: "Unable to locate credentials",
       exitCode: 255,
     });
+    // Inject a nonexistent configPath so enrichment never reads the developer's real
+    // ~/.aws/config — ADR-0003 requires all tests to be config-file-isolated.
     const result = await awsRaw(["sts", "get-caller-identity"], {
       binary: stub,
+      configPath: "/nonexistent/path/.aws/config",
     });
     expect(result.exitCode).toBe(255);
     expect(result.stderr).toContain("Unable to locate credentials");
@@ -244,6 +247,116 @@ describe("awsRaw", () => {
     expect(result.error!.code).toBe("NO_CREDENTIALS");
 
     rmSync(tmpDir, { recursive: true });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Cross-surface agreement — awsRaw / awsExec / awsJson must classify identically
+// ---------------------------------------------------------------------------
+//
+// This is the behavioral proof of blocker-2's fix (PR #79 review).
+// awsExec and awsJson route through awsRaw; a future enrichment added inside
+// awsRaw therefore reaches all three surfaces without additional wiring.
+// Any divergence here means the consolidation has been broken.
+
+describe("cross-surface classification agreement — awsRaw / awsExec / awsJson", () => {
+  const NO_CREDS_STDERR = "Unable to locate credentials";
+  const ACCESS_DENIED_STDERR =
+    "An error occurred (AccessDenied) when calling the GetCallerIdentity operation: Access Denied";
+  const DRY_RUN_STDERR =
+    "An error occurred (DryRunOperation) when calling the RunInstances operation: Request would have succeeded.";
+
+  it("awsRaw and awsExec agree on NO_CREDENTIALS code for identical stderr", async () => {
+    const rawStub = createStub({ stderr: NO_CREDS_STDERR, exitCode: 253 });
+    const execStub = createStub({ stderr: NO_CREDS_STDERR, exitCode: 253 });
+
+    const rawResult = await awsRaw(["sts", "get-caller-identity"], {
+      binary: rawStub,
+      configPath: "/nonexistent/path/.aws/config",
+    });
+
+    let execCode: string | undefined;
+    try {
+      await awsExec(["sts", "get-caller-identity"], {
+        binary: execStub,
+        configPath: "/nonexistent/path/.aws/config",
+      });
+    } catch (e) {
+      execCode = (e as { code?: string }).code;
+    }
+
+    expect(rawResult.error?.code).toBe("NO_CREDENTIALS");
+    expect(execCode).toBe(rawResult.error?.code);
+  });
+
+  it("awsRaw and awsJson agree on NO_CREDENTIALS code for identical stderr", async () => {
+    const rawStub = createStub({ stderr: NO_CREDS_STDERR, exitCode: 253 });
+    const jsonStub = createStub({ stderr: NO_CREDS_STDERR, exitCode: 253 });
+
+    const rawResult = await awsRaw(["sts", "get-caller-identity"], {
+      binary: rawStub,
+      configPath: "/nonexistent/path/.aws/config",
+    });
+
+    let jsonCode: string | undefined;
+    try {
+      await awsJson(["sts", "get-caller-identity"], {
+        binary: jsonStub,
+        configPath: "/nonexistent/path/.aws/config",
+      });
+    } catch (e) {
+      jsonCode = (e as { code?: string }).code;
+    }
+
+    expect(rawResult.error?.code).toBe("NO_CREDENTIALS");
+    expect(jsonCode).toBe(rawResult.error?.code);
+  });
+
+  it("awsRaw, awsExec, awsJson agree on SERVICE_CLIENT_ERROR for ACCESS_DENIED", async () => {
+    const stubs = [1, 2, 3].map(() =>
+      createStub({ stderr: ACCESS_DENIED_STDERR, exitCode: 254 }),
+    );
+
+    const rawResult = await awsRaw(["sts", "get-caller-identity"], {
+      binary: stubs[0]!,
+      configPath: "/nonexistent/path/.aws/config",
+    });
+
+    const codes: string[] = [];
+    for (const stub of [stubs[1]!, stubs[2]!]) {
+      try {
+        // awsExec first, awsJson second
+        if (stub === stubs[1]) {
+          await awsExec(["sts", "get-caller-identity"], { binary: stub, configPath: "/nonexistent/path/.aws/config" });
+        } else {
+          await awsJson(["sts", "get-caller-identity"], { binary: stub, configPath: "/nonexistent/path/.aws/config" });
+        }
+      } catch (e) {
+        codes.push((e as { code?: string }).code ?? "");
+      }
+    }
+
+    expect(rawResult.error?.code).toBe("SERVICE_CLIENT_ERROR");
+    expect(codes).toEqual(["SERVICE_CLIENT_ERROR", "SERVICE_CLIENT_ERROR"]);
+  });
+
+  it("DRY_RUN_SUCCESS: awsRaw exposes it in result.error, awsJson returns {} (by design)", async () => {
+    const rawStub = createStub({ stderr: DRY_RUN_STDERR, exitCode: 255 });
+    const jsonStub = createStub({ stderr: DRY_RUN_STDERR, exitCode: 255 });
+
+    const rawResult = await awsRaw(["ec2", "run-instances", "--dry-run"], {
+      binary: rawStub,
+      configPath: "/nonexistent/path/.aws/config",
+    });
+    // awsRaw surfaces DRY_RUN_SUCCESS in result.error (non-zero exit — it IS an error at the process level)
+    expect(rawResult.error?.code).toBe("DRY_RUN_SUCCESS");
+
+    // awsJson translates DRY_RUN_SUCCESS into an empty-object success return — by design
+    const jsonResult = await awsJson(["ec2", "run-instances", "--dry-run"], {
+      binary: jsonStub,
+      configPath: "/nonexistent/path/.aws/config",
+    });
+    expect(jsonResult).toEqual({});
   });
 });
 
