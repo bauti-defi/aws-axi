@@ -93,9 +93,11 @@
  *   |                                                   |             | prefix of another", agreement matrix
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, afterEach } from "bun:test";
 import { extractFlag, locateFlag, hasFlag, flagIsTrue, flagIsTrueStrict } from "../src/overlay-args.js";
 import { _extractTailArgs, _extractFilterArgs } from "../src/commands/logs.js";
+import { s3Command } from "../src/commands/s3.js";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
 
 // ── Reference implementation ────────────────────────────────────────────────
 //
@@ -197,11 +199,11 @@ describe("extractFlag — two-arg form (--flag value)", () => {
     assertExtractFlag(["--flag", "-1"], "--flag", "-1");
   });
 
-  it("returns the NEXT token even when it starts with -- (--flag --other)", () => {
-    // Documented latent behaviour: --flag --other returns "--other" as the value.
-    // This is a known semantic hole (issue filed separately — see PR body).
-    // Do NOT change this behaviour in this PR.
-    assertExtractFlag(["--flag", "--other"], "--flag", "--other");
+  it("throws USAGE_ERROR when the next token starts with -- (--flag --other-flag)", () => {
+    // Fixed in #54: the two-arg form must not consume a following --flag token as
+    // a value.  This was the exact source of the misleading
+    // "--max-items must be a positive integer" error.
+    expect(() => extractFlag(["--flag", "--other"], "--flag")).toThrow();
   });
 
   it("returns first match when two-arg form appears twice (first-wins)", () => {
@@ -232,8 +234,11 @@ describe("extractFlag — non-mutation contract", () => {
     expect(args).toStrictEqual(before);
   });
 
-  it("extractFlag and refExtractFlag agree on every edge case in the matrix", () => {
-    // Comprehensive agreement check: run both over the full matrix and compare.
+  it("extractFlag and refExtractFlag agree on the non-diverging edge cases", () => {
+    // #54 intentionally diverges extractFlag from refExtractFlag on the
+    // ["--flag", "--other"] case (extractFlag now throws; ref still returns
+    // "--other").  That case is tested separately below.  All other cases still
+    // agree — verified here to guard against accidental regressions.
     const cases: [readonly string[], string, string | undefined][] = [
       [["--flag=value"], "--flag", "value"],
       [["--flag", "value"], "--flag", "value"],
@@ -242,7 +247,6 @@ describe("extractFlag — non-mutation contract", () => {
       [["--flag", "-1"], "--flag", "-1"],
       [["--flag"], "--flag", undefined],
       [["--flag", "a", "--flag", "b"], "--flag", "a"],
-      [["--flag", "--other"], "--flag", "--other"],
       [["--limit-type=val"], "--limit", undefined],
       [[], "--flag", undefined],
     ];
@@ -250,6 +254,13 @@ describe("extractFlag — non-mutation contract", () => {
       expect(extractFlag(args, flag)).toStrictEqual(expected);
       expect(refExtractFlag(args, flag)).toStrictEqual(expected);
     }
+  });
+
+  it("refExtractFlag diverges from extractFlag on --flag --other (intentional)", () => {
+    // refExtractFlag retains the OLD behaviour for documentation purposes.
+    // extractFlag (fixed in #54) throws for this input.
+    expect(refExtractFlag(["--flag", "--other"], "--flag")).toBe("--other");
+    expect(() => extractFlag(["--flag", "--other"], "--flag")).toThrow();
   });
 });
 
@@ -375,6 +386,130 @@ describe("locateFlag — extractFlag delegation", () => {
     for (const [args, flag] of cases) {
       expect(extractFlag(args, flag)).toStrictEqual(locateFlag(args, flag)?.value);
     }
+  });
+});
+
+// ── #54: two-arg form rejects --flag-as-value ────────────────────────────────
+//
+// When the two-arg form (--flag <value>) encounters a next token that starts
+// with --, that token is unambiguously another flag, not a value.  locateFlag
+// (and by delegation extractFlag and pullFlag) must throw USAGE_ERROR so the
+// user sees the actual problem instead of a misleading downstream type error.
+//
+// Revert-proof mutations (applied manually during development, each causes RED):
+//   M5: Remove the `next.startsWith("--")` guard → two-arg still returns --other
+//       → "throws when next token starts with --" fails (still returns, no throw)
+//   M6: Guard on `next.startsWith("-")` (single dash) instead of "--"
+//       → --flag -1 throws → "does NOT throw for single-dash value (-1)" fails RED
+//   M7: Guard the throw inside the wrong branch (e.g. after the eqPrefix check)
+//       → same outcome as M5 for two-arg form → M5 tests go RED
+
+describe("locateFlag / extractFlag — throws when next token is a flag (#54)", () => {
+  it("locateFlag throws USAGE_ERROR when next token starts with -- (two-arg form)", () => {
+    // RED before fix: returned { value: "--other", span: 2 }
+    // GREEN after fix: throws
+    expect(() => locateFlag(["--flag", "--other"], "--flag")).toThrow();
+  });
+
+  it("extractFlag throws USAGE_ERROR when next token starts with -- (via locateFlag)", () => {
+    expect(() => extractFlag(["--flag", "--other"], "--flag")).toThrow();
+  });
+
+  it("throws with a USAGE_ERROR mentioning the flag name (#54 exact repro)", () => {
+    // Issue repro: extractFlag(["--max-items", "--profile", "prod"], "--max-items")
+    // Before fix: returned "--profile" → downstream parseInt("--profile") → NaN
+    //   → misleading USAGE_ERROR "must be a positive integer"
+    // After fix: throws immediately naming "--max-items" and "--profile"
+    expect(() =>
+      extractFlag(["--max-items", "--profile", "prod"], "--max-items"),
+    ).toThrow(/--max-items/);
+  });
+
+  it("throws mentioning the offending next-flag token in the error", () => {
+    expect(() =>
+      extractFlag(["--limit", "--since", "15m"], "--limit"),
+    ).toThrow(/--since/);
+  });
+
+  it("USAGE_ERROR error code is set (not a generic Error)", () => {
+    // AxiError must be thrown, not a plain Error — callers depend on the code.
+    let thrown: unknown;
+    try {
+      extractFlag(["--flag", "--other"], "--flag");
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    // AxiError exposes .code
+    expect((thrown as { code?: string }).code).toBe("USAGE_ERROR");
+  });
+
+  it("does NOT throw when the next token starts with a single dash (e.g. -1)", () => {
+    // Single-dash values are valid (--limit -1, --offset -5, etc.).
+    // Only double-dash (--) tokens are rejected.
+    expect(extractFlag(["--flag", "-1"], "--flag")).toBe("-1");
+    expect(extractFlag(["--limit", "-10"], "--limit")).toBe("-10");
+  });
+
+  it("does NOT throw for the equals form even if value starts with --", () => {
+    // --flag=--value is unambiguous: the value is everything after =.
+    // This is the escape hatch if a value genuinely starts with --.
+    expect(extractFlag(["--flag=--other"], "--flag")).toBe("--other");
+  });
+
+  it("does NOT throw when the flag is absent entirely", () => {
+    expect(extractFlag(["--other", "value"], "--flag")).toBeUndefined();
+  });
+
+  it("does NOT throw when the flag is the final token (no next token)", () => {
+    // 'flag is last token' still returns undefined (unchanged behaviour).
+    expect(extractFlag(["--flag"], "--flag")).toBeUndefined();
+  });
+
+  it("throws even when a valid equals form follows later (first-wins is definitive)", () => {
+    // First occurrence is --flag --other-flag (bare + next-is-flag) → throws
+    // immediately.  The equals form at index 2 is never reached: first-wins
+    // means the first occurrence is definitive, whether valid or malformed.
+    // The user should put the equals form first: ["--flag=real", "--other-flag"].
+    expect(() =>
+      extractFlag(["--flag", "--other-flag", "--flag=real"], "--flag"),
+    ).toThrow(/--flag/);
+  });
+
+  it("equals form first → returns value, no throw (even if a later bare form is malformed)", () => {
+    // First occurrence is --flag=real (equals form, valid) → returns "real".
+    // The later bare --flag --other-flag is never reached (first-wins).
+    expect(
+      extractFlag(["--flag=real", "--flag", "--other-flag"], "--flag"),
+    ).toBe("real");
+  });
+});
+
+// ── #54: pullFlag (via _extractTailArgs) inherits the fix ────────────────────
+//
+// pullFlag in logs.ts delegates to locateFlag.  The fix in locateFlag propagates
+// automatically — no change to pullFlag is needed.  These tests verify the
+// inherited behaviour via the exported _extractTailArgs helper.
+
+describe("pullFlag (via _extractTailArgs) — throws when value is a flag (#54)", () => {
+  it("throws USAGE_ERROR when --since is followed by another flag", () => {
+    // _extractTailArgs pulls --since FIRST.  With [--since, --limit, 50] the
+    // --since pull sees --limit as the next token → throws.
+    // Before fix: --since got "--limit" as value → parseSince("--limit") →
+    //   USAGE_ERROR "Cannot parse --since value: \"--limit\"" (misleading)
+    // After fix: throws immediately naming "--since" and "--limit"
+    expect(() =>
+      _extractTailArgs(["/aws/lambda/fn", "--since", "--limit", "50"]),
+    ).toThrow(/--since/);
+  });
+
+  it("throws USAGE_ERROR when --limit is followed directly by another flag", () => {
+    // Input: [fn, --limit, --stream, mystream]
+    // Chain: pull --since first (absent → r1 = same), then pull --limit:
+    //   locateFlag(r1, "--limit") sees "--stream" as next → throws.
+    expect(() =>
+      _extractTailArgs(["/aws/lambda/fn", "--limit", "--stream", "mystream"]),
+    ).toThrow(/--limit/);
   });
 });
 
@@ -693,5 +828,60 @@ describe("flagIsTrueStrict — two-arg form (PR #58 blocker fix)", () => {
 
   it("--flag=true (=-form) → true", () => {
     expect(flagIsTrueStrict(["--flag=true"], "--flag")).toBe(true);
+  });
+});
+
+// ── ADR-0002 carve-out: --exclude/--include with --prefixed values (#54) ──────
+//
+// Real `aws s3 cp --recursive --exclude --weird src dst` accepts `--weird` as the
+// exclude pattern (a file literally named "--weird" on disk).  The #54 guard must
+// NEVER fire for this input.
+//
+// Why it is safe: --exclude and --include are OWNED BY NO OVERLAY.  Every s3 cp
+// call dispatches through collectPassthroughFlags (ownedFlagNames=[], ownedBoolFlags=
+// ["--dryrun","--recursive"]).  collectPassthroughFlags has its OWN heuristic
+// (`!next.startsWith("--")` in the heuristic branch) and DOES NOT CALL locateFlag
+// — `grep locateFlag src/engine.ts` is empty, and the collectPassthroughFlags loop
+// is a separate scan.  The #54 guard lives only in locateFlag; it is unreachable from
+// the passthrough path.
+//
+// The day someone adds "--exclude" to ownedFlagNames or routes s3 cp through
+// locateFlag, either (a) collectPassthroughFlags strips it → pair not forwarded →
+// stub fails → RED, or (b) locateFlag fires on --exclude --weird → throws → RED.
+//
+// Mutation-test applied during development:
+//   + added "--exclude" to ownedBoolFlags in s3.ts cp dispatch
+//   → collectPassthroughFlags stripped --exclude → stub saw no pair → exit 1 → RED
+//   Reverted → GREEN.
+
+describe("ADR-0002 carve-out: --exclude/--include with --prefixed values never reach locateFlag (#54)", () => {
+  afterEach(() => {
+    releaseStubBins();
+  });
+
+  it("s3 cp --exclude --weird: pair forwarded verbatim, no throw", async () => {
+    // Pair-guard stub: exits 0 only when --exclude is immediately followed by --weird.
+    // If the pair is stripped or re-ordered: exits 1 → awsExec throws → test fails.
+    const bin = stubBin(
+      [
+        "#!/bin/sh",
+        "found=0 prev=",
+        'for arg in "$@"; do',
+        '  [ "$prev" = "--exclude" ] && [ "$arg" = "--weird" ] && found=1',
+        '  prev="$arg"',
+        "done",
+        '[ "$found" = "1" ] || { printf "MISSING --exclude --weird pair\\n" >&2; exit 1; }',
+      ].join("\n"),
+    );
+
+    // Must not throw — --exclude is not in any overlay ownedFlagNames, so it goes
+    // through collectPassthroughFlags (not locateFlag).  The pair is forwarded intact.
+    await expect(
+      s3Command(
+        ["cp", "--recursive", "--exclude", "--weird", "/tmp/src", "s3://bkt/dst"],
+        undefined,
+        bin,
+      ),
+    ).resolves.toBeDefined();
   });
 });
