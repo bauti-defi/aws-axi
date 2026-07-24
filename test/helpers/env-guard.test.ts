@@ -1,22 +1,26 @@
 /**
  * Mutation-killable regression guard for useEnvGuard() and restoreExitCode().
  *
- * GUARD-1/2 prove the afterEach body is load-bearing for env cleanup.
- * GUARD-3/4 test restoreExitCode() as a pure function — the only approach that
- * kills the `?? 0` mutant in a full-suite run.
+ * THREE describe blocks; each kills a different mutation family:
  *
- * WHY PURE-FUNCTION TEST FOR exitCode
- * ────────────────────────────────────
- * The ambient-state approach (set process.exitCode = 252 in test N, assert 0
- * in test N+1) is order-dependent. In a full-suite run, earlier captureMain
- * files leave process.exitCode === 0. So beforeEach in GUARD-3 captures
- * exitCodeSnapshot = 0 rather than undefined. The mutant (`exitCodeSnapshot`
- * instead of `exitCodeSnapshot ?? 0`) then restores 0 correctly — the
- * mutation survives. Only in isolated file runs does beforeEach see undefined.
+ *   GUARD-1/2  (ambient env)       prove the afterEach env-restore loops are load-bearing.
+ *   GUARD-3/4  (pure function)     prove the `?? 0` branch in restoreExitCode() is load-bearing.
+ *   GUARD-5/6  (ambient exitCode)  prove the call site in afterEach that calls restoreExitCode()
+ *                                  is load-bearing (wiring guard).
  *
- * A pure-function test has no ambient dependency: it passes undefined directly
- * and asserts the output regardless of what any prior test did to
- * process.exitCode. This is order-independent and cannot be neutralised by CI.
+ * WHY THREE BLOCKS INSTEAD OF ONE
+ * ────────────────────────────────
+ * GUARD-3/4 test restoreExitCode() in isolation — they kill function-body mutants
+ * (e.g. `snapshot ?? 1`, `snapshot as number`) but cannot detect a mutant that
+ * keeps the function intact and bypasses the call site
+ * (`process.exitCode = exitCodeSnapshot` instead of
+ * `process.exitCode = restoreExitCode(exitCodeSnapshot)`). GUARD-5/6 fill that gap.
+ *
+ * GUARD-5/6 are ambient (they depend on process state). They kill mutation C
+ * (delete call-site line) deterministically in any run; they kill mutation D
+ * (bypass the fn at the call site) only when no parallel worker has yet set
+ * process.exitCode = 0 — reliably in isolated file runs, ordering-dependent in
+ * the full suite. The reviewer accepted this limitation ("certain orderings").
  *
  * SIMULATION vs. REAL TIMEOUT
  * ───────────────────────────
@@ -79,5 +83,51 @@ describe("restoreExitCode() — ?? 0 branch is load-bearing", () => {
     expect(restoreExitCode(252)).toBe(252);
     expect(restoreExitCode(0)).toBe(0);
     expect(restoreExitCode(1)).toBe(1);
+  });
+});
+
+describe("useEnvGuard() — exitCode WIRING is load-bearing (GUARD-5/6 backstop)", () => {
+  // Ambient backstop for two call-site mutations:
+  //   C: delete `process.exitCode = restoreExitCode(exitCodeSnapshot)` entirely
+  //   D: bypass to `process.exitCode = exitCodeSnapshot` (the original bug verbatim)
+  //
+  // GUARD-5/6 are complementary to GUARD-3/4 (pure-function):
+  //   GUARD-3/4 kills function-body mutations — they test restoreExitCode() directly
+  //   but cannot detect a mutant that keeps the function intact and skips the call.
+  //   GUARD-5/6 fill that gap for call-site mutations.
+  //
+  // Mutation C (delete the entire line) is caught deterministically in any run:
+  //   GUARD-5 leaks exitCode = 252; afterEach makes NO assignment; exitCode stays
+  //   252; GUARD-6 asserts 0 → FAIL.
+  //
+  // Mutation D (bypass fn: process.exitCode = exitCodeSnapshot) is caught only
+  // when exitCodeSnapshot is undefined — i.e. when this file's process starts fresh
+  // (isolated file run: bun test test/helpers/env-guard.test.ts). In the full suite,
+  // parallel workers may set exitCode = 0 before GUARD-5's beforeEach fires, making
+  // exitCodeSnapshot = 0 and rendering mutation D indistinguishable from correct code.
+  // This is the "certain orderings" limitation the reviewer accepted — mutation D
+  // coverage here is a backstop, not a full-suite guarantee.
+  useEnvGuard();
+
+  it("GUARD-5: leak non-zero exitCode without any restore (anchors GUARD-6)", () => {
+    // Simulate captureMain whose exitCode-reset line was abandoned on timeout.
+    process.exitCode = 252;
+
+    // Confirm injection (anchors GUARD-6: if GUARD-5 never ran, GUARD-6 is
+    // vacuously green — exitCode would still be undefined, which is not 252).
+    expect(process.exitCode).toBe(252);
+  });
+
+  it("GUARD-6: process.exitCode is 0 — afterEach called restoreExitCode(exitCodeSnapshot)", () => {
+    // useEnvGuard's afterEach must have called:
+    //   process.exitCode = restoreExitCode(exitCodeSnapshot)
+    //
+    // Mutation C (delete the entire line): afterEach makes no assignment; exitCode
+    //   is still 252 from GUARD-5 → FAIL. Caught in every run (no ordering dep).
+    // Mutation D (bypass fn → exitCodeSnapshot): if exitCodeSnapshot was undefined
+    //   (fresh process in an isolated file run), undefined assignment is a no-op in
+    //   Bun → exitCode stays 252 → FAIL. In the full suite, parallel workers may
+    //   have set exitCode = 0 first, making mutation D undetectable (accepted limitation).
+    expect(process.exitCode).toBe(0);
   });
 });
