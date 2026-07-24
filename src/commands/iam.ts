@@ -21,7 +21,11 @@ import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import { awsJson } from "../aws.js";
 import { fallThroughToEngine } from "../engine.js";
-import { buildPassthrough, collectPassthroughFlags } from "../overlay-args.js";
+import {
+  buildPassthrough,
+  collectPassthroughFlags,
+  resolveKeyArg,
+} from "../overlay-args.js";
 
 // ---------------------------------------------------------------------------
 // AWS raw response shapes (only fields we project or act on)
@@ -152,11 +156,14 @@ Any flag accepted by \`aws iam <operation>\` (e.g. --path-prefix, --filter,
 never restrict the input contract, only enrich the output.
 
 operations[5] (enriched overlays):
-  list-roles                               list IAM roles (paginated, capped at 100)
-  get-role <name>                          get a role by name
-  list-policies [--scope Local|AWS|All]    list IAM policies (default scope: Local)
-  get-policy <policy-arn>                  get a policy by ARN
-  list-attached-role-policies <role-name>  list policies attached to a role
+  list-roles                                           list IAM roles (paginated, capped at 100)
+  get-role <name>                                      get a role by name
+  get-role --role-name <name>                          flag form (matches real aws)
+  list-policies [--scope Local|AWS|All]                list IAM policies (default scope: Local)
+  get-policy <arn>                                     get a policy by ARN
+  get-policy --policy-arn <arn>                        flag form (matches real aws)
+  list-attached-role-policies <role-name>              list policies attached to a role
+  list-attached-role-policies --role-name <role-name>  flag form (matches real aws)
   (any other iam operation falls through to the generic engine — run \`aws iam help\` to list all)
 
 flags (overlay-specific):
@@ -173,11 +180,14 @@ examples:
   aws-axi iam list-roles --path-prefix /engineering/   # forwarded to aws
   aws-axi iam list-roles --next-token <tok>
   aws-axi iam get-role my-role
-  aws-axi iam get-role my-role --query Role.Arn        # JMESPath bypass
+  aws-axi iam get-role --role-name my-role              # flag form (matches real aws)
+  aws-axi iam get-role my-role --query Role.Arn         # JMESPath bypass
   aws-axi iam list-policies
   aws-axi iam list-policies --scope AWS
   aws-axi iam get-policy arn:aws:iam::aws:policy/AdministratorAccess
+  aws-axi iam get-policy --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
   aws-axi iam list-attached-role-policies my-role
+  aws-axi iam list-attached-role-policies --role-name my-role
 `;
 
 // ---------------------------------------------------------------------------
@@ -332,17 +342,22 @@ async function runGetRole(
   context: AwsContext | undefined,
   binary: string | undefined,
 ): Promise<Record<string, unknown>> {
-  const roleName = args[0];
-  if (!roleName || roleName.startsWith("-")) {
-    throw new AxiError(
-      "get-role requires a role name: aws-axi iam get-role <name>",
-      "USAGE_ERROR",
-      ["Example: aws-axi iam get-role my-lambda-role"],
-    );
-  }
+  // Accept both positional form ("my-role") and flag form ("--role-name my-role").
+  // --role-name is added to ownedFlagNames so collectPassthroughFlags excludes it
+  // from passthrough (it is already forwarded explicitly in awsArgs below).
+  const roleName = resolveKeyArg({
+    args,
+    flagName: "--role-name",
+    label: "get-role role name",
+    examples: [
+      "Example: aws-axi iam get-role my-role",
+      "Example: aws-axi iam get-role --role-name my-role",
+    ],
+  });
 
-  // Forward unknown flags from args after the positional (superset contract).
-  const rawPassthrough = collectPassthroughFlags(args.slice(1), [], undefined, { service: "iam", operation: "get-role" });
+  // Forward unknown flags verbatim (superset contract). Pass full args — the
+  // positional is skipped as a bare token; --role-name is owned and excluded.
+  const rawPassthrough = collectPassthroughFlags(args, ["--role-name"], undefined, { service: "iam", operation: "get-role" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   const awsArgs = ["iam", "get-role", "--role-name", roleName, ...passthrough];
@@ -420,19 +435,23 @@ async function runGetPolicy(
   context: AwsContext | undefined,
   binary: string | undefined,
 ): Promise<Record<string, unknown>> {
-  const policyArn = args[0];
-  if (!policyArn || policyArn.startsWith("-")) {
-    throw new AxiError(
-      "get-policy requires a policy ARN: aws-axi iam get-policy <arn>",
-      "USAGE_ERROR",
-      [
-        "Example: aws-axi iam get-policy arn:aws:iam::aws:policy/AdministratorAccess",
-        "Run `aws-axi iam list-policies` to see available ARNs",
-      ],
-    );
-  }
+  // Accept both positional form ("arn:aws:iam::...") and flag form ("--policy-arn arn:...").
+  // --policy-arn is added to ownedFlagNames so collectPassthroughFlags excludes it
+  // from passthrough (it is already forwarded explicitly in awsArgs below).
+  const policyArn = resolveKeyArg({
+    args,
+    flagName: "--policy-arn",
+    label: "get-policy policy ARN",
+    examples: [
+      "Example: aws-axi iam get-policy arn:aws:iam::aws:policy/AdministratorAccess",
+      "Example: aws-axi iam get-policy --policy-arn arn:aws:iam::aws:policy/AdministratorAccess",
+      "Run `aws-axi iam list-policies` to see available ARNs",
+    ],
+  });
 
-  const rawPassthrough = collectPassthroughFlags(args.slice(1), [], undefined, { service: "iam", operation: "get-policy" });
+  // Forward unknown flags verbatim (superset contract). Pass full args — the
+  // positional is skipped as a bare token; --policy-arn is owned and excluded.
+  const rawPassthrough = collectPassthroughFlags(args, ["--policy-arn"], undefined, { service: "iam", operation: "get-policy" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   const awsArgs = ["iam", "get-policy", "--policy-arn", policyArn, ...passthrough];
@@ -451,17 +470,24 @@ async function runListAttachedRolePolicies(
   context: AwsContext | undefined,
   binary: string | undefined,
 ): Promise<Record<string, unknown>> {
-  const roleName = args[0];
-  if (!roleName || roleName.startsWith("-")) {
-    throw new AxiError(
-      "list-attached-role-policies requires a role name: aws-axi iam list-attached-role-policies <name>",
-      "USAGE_ERROR",
-      ["Example: aws-axi iam list-attached-role-policies my-task-role"],
-    );
-  }
+  // Accept both positional form ("my-role") and flag form ("--role-name my-role").
+  // --role-name is added to ownedFlagNames so collectPassthroughFlags excludes it
+  // from passthrough (it is already forwarded explicitly in awsArgs below).
+  const roleName = resolveKeyArg({
+    args,
+    flagName: "--role-name",
+    label: "list-attached-role-policies role name",
+    examples: [
+      "Example: aws-axi iam list-attached-role-policies my-task-role",
+      "Example: aws-axi iam list-attached-role-policies --role-name my-task-role",
+    ],
+  });
 
-  const { token } = extractNextToken(args.slice(1));
-  const rawPassthrough = collectPassthroughFlags(args.slice(1), ["--next-token"], undefined, { service: "iam", operation: "list-attached-role-policies" });
+  // Pass full args — extractNextToken only keys on --next-token so the positional
+  // or --role-name tokens are harmlessly ignored. collectPassthroughFlags skips
+  // bare positionals and both owned flag names.
+  const { token } = extractNextToken(args);
+  const rawPassthrough = collectPassthroughFlags(args, ["--next-token", "--role-name"], undefined, { service: "iam", operation: "list-attached-role-policies" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   // --query bypass (ADR-0002): skip the overlay's default cap when --query is
