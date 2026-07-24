@@ -475,6 +475,49 @@ export function extractPositionals(
 // ── resolveKeyArg ────────────────────────────────────────────────────────────
 
 /**
+ * Scan argv for the LAST occurrence of a named flag, returning its value.
+ *
+ * Semantics mirror `locateFlag` except that all occurrences are visited and
+ * the last one wins — matching real `aws` CLI behaviour (ADR-0002).
+ *
+ * Returns `undefined` when the flag is absent or is the final token with no
+ * following value in two-arg form.
+ *
+ * Still throws USAGE_ERROR for the `--flag --other-flag` ambiguity: the next
+ * token starting with `--` unambiguously means the caller forgot the value,
+ * regardless of whether this is the first or last occurrence.
+ */
+function locateLastFlag(
+  args: readonly string[],
+  flag: string,
+): { readonly value: string } | undefined {
+  const eqPrefix = `${flag}=`;
+  let last: { readonly value: string } | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i] ?? "";
+    if (arg === flag) {
+      if (i + 1 >= args.length) continue; // flag at end with no value
+      const next = args[i + 1] as string;
+      if (next.startsWith("--")) {
+        throw new AxiError(
+          `${flag} requires a value but "${next}" looks like a flag, not a value`,
+          "USAGE_ERROR",
+          [
+            `Use the equals form to avoid ambiguity: ${flag}=<value>`,
+            `Or provide the value before the next flag: ${flag} <value> ${next} …`,
+          ],
+        );
+      }
+      last = { value: next };
+      i++; // skip value token so the next iteration does not re-visit it
+    } else if (arg.startsWith(eqPrefix)) {
+      last = { value: arg.slice(eqPrefix.length) };
+    }
+  }
+  return last;
+}
+
+/**
  * Resolve a key argument that real `aws` accepts only as a named flag
  * (e.g. --role-name, --policy-arn) but aws-axi historically also accepted
  * as a bare positional.
@@ -484,12 +527,14 @@ export function extractPositionals(
  *   --<flag> <value>     flag form       — real aws's only accepted form
  *   --<flag>=<value>     equals form     — real aws's equals variant
  *
+ * Duplicate flags: real `aws` resolves duplicates by using the LAST occurrence
+ * (ADR-0002, lines 190-193). `resolveKeyArg` matches this: when the same owned
+ * flag appears more than once the last value wins, silently — identical to real
+ * `aws` behaviour.
+ *
  * Error cases (all → USAGE_ERROR):
  *   conflict   — both positional AND flag supplied in the same call; message
  *                names both conflicting values so the caller knows what to fix.
- *   duplicate  — same flag appears twice; real aws uses last-wins but aws-axi
- *                uses first-wins via locateFlag, so this now-reachable case
- *                would silently diverge. Reject instead so the caller is explicit.
  *   missing    — neither form provided.
  *
  * Uses extractPositionals() so flag values (e.g. "my-role" in "--role-name
@@ -512,24 +557,6 @@ export function resolveKeyArg({
   readonly label: string;
   readonly examples: readonly string[];
 }): string {
-  // Detect duplicate flags: real aws uses last-wins; aws-axi uses first-wins
-  // (via locateFlag). Newly reachable via the flag-form fix — reject explicitly
-  // so the caller is not surprised by silent divergence from real aws behaviour.
-  const eqPrefix = `${flagName}=`;
-  let flagCount = 0;
-  for (const arg of args) {
-    if (arg === flagName || arg.startsWith(eqPrefix)) {
-      flagCount++;
-    }
-  }
-  if (flagCount >= 2) {
-    throw new AxiError(
-      `${flagName} appears ${flagCount} times. Provide it exactly once.`,
-      "USAGE_ERROR",
-      [...examples],
-    );
-  }
-
   // extractPositionals() correctly skips flag values (e.g. "my-role" in
   // "--role-name my-role" is NOT returned as a positional — it is consumed
   // as the value of the preceding flag). See extractPositionals for the full
@@ -537,8 +564,8 @@ export function resolveKeyArg({
   const positionals = extractPositionals(args);
   const positional = positionals[0] as string | undefined;
 
-  // Flag form: --flag value  or  --flag=value
-  const flagLoc = locateFlag(args, flagName);
+  // Flag form: --flag value  or  --flag=value (last-wins on duplicates per ADR-0002)
+  const flagLoc = locateLastFlag(args, flagName);
   const flagValue = flagLoc?.value;
 
   // Conflict: both forms in the same call — real aws cannot hit this (it does

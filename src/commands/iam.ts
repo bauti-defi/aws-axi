@@ -156,11 +156,14 @@ Any flag accepted by \`aws iam <operation>\` (e.g. --path-prefix, --filter,
 never restrict the input contract, only enrich the output.
 
 operations[5] (enriched overlays):
-  list-roles                               list IAM roles (paginated, capped at 100)
-  get-role <name>                          get a role by name
-  list-policies [--scope Local|AWS|All]    list IAM policies (default scope: Local)
-  get-policy <policy-arn>                  get a policy by ARN
-  list-attached-role-policies <role-name>  list policies attached to a role
+  list-roles                                           list IAM roles (paginated, capped at 100)
+  get-role <name>                                      get a role by name
+  get-role --role-name <name>                          flag form (matches real aws)
+  list-policies [--scope Local|AWS|All]                list IAM policies (default scope: Local)
+  get-policy <arn>                                     get a policy by ARN
+  get-policy --policy-arn <arn>                        flag form (matches real aws)
+  list-attached-role-policies <role-name>              list policies attached to a role
+  list-attached-role-policies --role-name <role-name>  flag form (matches real aws)
   (any other iam operation falls through to the generic engine — run \`aws iam help\` to list all)
 
 flags (overlay-specific):
@@ -177,11 +180,14 @@ examples:
   aws-axi iam list-roles --path-prefix /engineering/   # forwarded to aws
   aws-axi iam list-roles --next-token <tok>
   aws-axi iam get-role my-role
-  aws-axi iam get-role my-role --query Role.Arn        # JMESPath bypass
+  aws-axi iam get-role --role-name my-role              # flag form (matches real aws)
+  aws-axi iam get-role my-role --query Role.Arn         # JMESPath bypass
   aws-axi iam list-policies
   aws-axi iam list-policies --scope AWS
   aws-axi iam get-policy arn:aws:iam::aws:policy/AdministratorAccess
+  aws-axi iam get-policy --policy-arn arn:aws:iam::aws:policy/AdministratorAccess
   aws-axi iam list-attached-role-policies my-role
+  aws-axi iam list-attached-role-policies --role-name my-role
 `;
 
 // ---------------------------------------------------------------------------

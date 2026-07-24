@@ -641,19 +641,32 @@ describe("iamRun — list-attached-role-policies — flag form (Part 1 fix)", ()
     try { rmSync(capturePath); } catch { /* best-effort */ }
   });
 
-  it("throws USAGE_ERROR when --role-name appears more than once", async () => {
-    const stub = createStub({ stdout: "", exitCode: 0 });
-    try {
-      await iamRun({
-        op: "list-attached-role-policies",
-        args: ["--role-name", "role-a", "--role-name", "role-b"],
-        binary: stub,
-      });
-      expect(true).toBe(false);
-    } catch (e) {
-      expect(e).toBeInstanceOf(AxiError);
-      expect((e as AxiError).code).toBe("USAGE_ERROR");
-    }
+  it("resolves to last occurrence when --role-name appears more than once (last-wins, ADR-0002)", async () => {
+    // Real aws uses last-wins: --role-name AAA --role-name BBB → RoleName: 'BBB'.
+    // aws-axi must match (ADR-0002 superset contract; ADR lines 190-193).
+    const capturePath = join(tmpdir(), `iam-larp-dup-${process.pid}.txt`);
+    const stub = makeArgCapturingStub(capturePath, LIST_ATTACHED_POLICIES_RESPONSE);
+
+    await iamRun({
+      op: "list-attached-role-policies",
+      args: ["--role-name", "role-a", "--role-name", "role-b"],
+      binary: stub,
+    });
+
+    // toEqual on the full token array is duplicate-blind-free: if both --role-name
+    // occurrences were forwarded the length would mismatch and go RED.
+    const tokens = readFileSync(capturePath, "utf-8").trim().split(/\s+/);
+    expect(tokens).toEqual([
+      "iam",
+      "list-attached-role-policies",
+      "--role-name",
+      "role-b", // last wins, not role-a
+      "--max-items",
+      "100",
+      "--output",
+      "json",
+    ]);
+    try { rmSync(capturePath); } catch { /* best-effort */ }
   });
 });
 
@@ -731,19 +744,28 @@ describe("iamRun — get-role — flag form (Part 1 fix)", () => {
     try { rmSync(capturePath); } catch { /* best-effort */ }
   });
 
-  it("throws USAGE_ERROR when --role-name appears more than once for get-role", async () => {
-    const stub = createStub({ stdout: "", exitCode: 0 });
-    try {
-      await iamRun({
-        op: "get-role",
-        args: ["--role-name", "role-a", "--role-name", "role-b"],
-        binary: stub,
-      });
-      expect(true).toBe(false);
-    } catch (e) {
-      expect(e).toBeInstanceOf(AxiError);
-      expect((e as AxiError).code).toBe("USAGE_ERROR");
-    }
+  it("resolves to last occurrence when --role-name appears more than once for get-role (last-wins, ADR-0002)", async () => {
+    // Real aws uses last-wins: --role-name AAA --role-name BBB → RoleName: 'BBB'.
+    // aws-axi must match (ADR-0002 superset contract; ADR lines 190-193).
+    const capturePath = join(tmpdir(), `iam-gr-dup-${process.pid}.txt`);
+    const stub = makeArgCapturingStub(capturePath, GET_ROLE_RESPONSE);
+
+    await iamRun({
+      op: "get-role",
+      args: ["--role-name", "role-a", "--role-name", "role-b"],
+      binary: stub,
+    });
+
+    const tokens = readFileSync(capturePath, "utf-8").trim().split(/\s+/);
+    expect(tokens).toEqual([
+      "iam",
+      "get-role",
+      "--role-name",
+      "role-b", // last wins, not role-a
+      "--output",
+      "json",
+    ]);
+    try { rmSync(capturePath); } catch { /* best-effort */ }
   });
 });
 
@@ -827,22 +849,30 @@ describe("iamRun — get-policy — flag form (Part 1 fix)", () => {
     try { rmSync(capturePath); } catch { /* best-effort */ }
   });
 
-  it("throws USAGE_ERROR when --policy-arn appears more than once", async () => {
-    const stub = createStub({ stdout: "", exitCode: 0 });
-    try {
-      await iamRun({
-        op: "get-policy",
-        args: [
-          "--policy-arn", "arn:aws:iam::aws:policy/AdministratorAccess",
-          "--policy-arn", "arn:aws:iam::aws:policy/ReadOnlyAccess",
-        ],
-        binary: stub,
-      });
-      expect(true).toBe(false);
-    } catch (e) {
-      expect(e).toBeInstanceOf(AxiError);
-      expect((e as AxiError).code).toBe("USAGE_ERROR");
-    }
+  it("resolves to last occurrence when --policy-arn appears more than once (last-wins, ADR-0002)", async () => {
+    // Real aws uses last-wins: --policy-arn A --policy-arn B → uses B.
+    // aws-axi must match (ADR-0002 superset contract; ADR lines 190-193).
+    const capturePath = join(tmpdir(), `iam-gp-dup-${process.pid}.txt`);
+    const stub = makeArgCapturingStub(capturePath, GET_POLICY_RESPONSE);
+    const ARN_A = "arn:aws:iam::aws:policy/AdministratorAccess";
+    const ARN_B = "arn:aws:iam::aws:policy/ReadOnlyAccess";
+
+    await iamRun({
+      op: "get-policy",
+      args: ["--policy-arn", ARN_A, "--policy-arn", ARN_B],
+      binary: stub,
+    });
+
+    const tokens = readFileSync(capturePath, "utf-8").trim().split(/\s+/);
+    expect(tokens).toEqual([
+      "iam",
+      "get-policy",
+      "--policy-arn",
+      ARN_B, // last wins, not ARN_A
+      "--output",
+      "json",
+    ]);
+    try { rmSync(capturePath); } catch { /* best-effort */ }
   });
 });
 
