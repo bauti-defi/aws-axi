@@ -93,9 +93,11 @@
  *   |                                                   |             | prefix of another", agreement matrix
  */
 
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, afterEach } from "bun:test";
 import { extractFlag, locateFlag, hasFlag, flagIsTrue, flagIsTrueStrict } from "../src/overlay-args.js";
 import { _extractTailArgs, _extractFilterArgs } from "../src/commands/logs.js";
+import { s3Command } from "../src/commands/s3.js";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
 
 // ── Reference implementation ────────────────────────────────────────────────
 //
@@ -826,5 +828,60 @@ describe("flagIsTrueStrict — two-arg form (PR #58 blocker fix)", () => {
 
   it("--flag=true (=-form) → true", () => {
     expect(flagIsTrueStrict(["--flag=true"], "--flag")).toBe(true);
+  });
+});
+
+// ── ADR-0002 carve-out: --exclude/--include with --prefixed values (#54) ──────
+//
+// Real `aws s3 cp --recursive --exclude --weird src dst` accepts `--weird` as the
+// exclude pattern (a file literally named "--weird" on disk).  The #54 guard must
+// NEVER fire for this input.
+//
+// Why it is safe: --exclude and --include are OWNED BY NO OVERLAY.  Every s3 cp
+// call dispatches through collectPassthroughFlags (ownedFlagNames=[], ownedBoolFlags=
+// ["--dryrun","--recursive"]).  collectPassthroughFlags has its OWN heuristic
+// (`!next.startsWith("--")` in the heuristic branch) and DOES NOT CALL locateFlag
+// — `grep locateFlag src/engine.ts` is empty, and the collectPassthroughFlags loop
+// is a separate scan.  The #54 guard lives only in locateFlag; it is unreachable from
+// the passthrough path.
+//
+// The day someone adds "--exclude" to ownedFlagNames or routes s3 cp through
+// locateFlag, either (a) collectPassthroughFlags strips it → pair not forwarded →
+// stub fails → RED, or (b) locateFlag fires on --exclude --weird → throws → RED.
+//
+// Mutation-test applied during development:
+//   + added "--exclude" to ownedBoolFlags in s3.ts cp dispatch
+//   → collectPassthroughFlags stripped --exclude → stub saw no pair → exit 1 → RED
+//   Reverted → GREEN.
+
+describe("ADR-0002 carve-out: --exclude/--include with --prefixed values never reach locateFlag (#54)", () => {
+  afterEach(() => {
+    releaseStubBins();
+  });
+
+  it("s3 cp --exclude --weird: pair forwarded verbatim, no throw", async () => {
+    // Pair-guard stub: exits 0 only when --exclude is immediately followed by --weird.
+    // If the pair is stripped or re-ordered: exits 1 → awsExec throws → test fails.
+    const bin = stubBin(
+      [
+        "#!/bin/sh",
+        "found=0 prev=",
+        'for arg in "$@"; do',
+        '  [ "$prev" = "--exclude" ] && [ "$arg" = "--weird" ] && found=1',
+        '  prev="$arg"',
+        "done",
+        '[ "$found" = "1" ] || { printf "MISSING --exclude --weird pair\\n" >&2; exit 1; }',
+      ].join("\n"),
+    );
+
+    // Must not throw — --exclude is not in any overlay ownedFlagNames, so it goes
+    // through collectPassthroughFlags (not locateFlag).  The pair is forwarded intact.
+    await expect(
+      s3Command(
+        ["cp", "--recursive", "--exclude", "--weird", "/tmp/src", "s3://bkt/dst"],
+        undefined,
+        bin,
+      ),
+    ).resolves.toBeDefined();
   });
 });

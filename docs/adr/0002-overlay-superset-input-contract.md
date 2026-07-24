@@ -191,3 +191,57 @@ tests) get the same `--output` dedup guarantee as the CLI adapter path.
   passthrough) are accepted; the `aws` CLI resolves them by using the last
   occurrence. This is intentional: server-side defaults set by the overlay can
   be overridden by an explicit passthrough value.
+
+## Two-arg form contract change (PR #54)
+
+**Previous contract:** In the two-arg form (`--flag <value>`), `locateFlag`
+consumed ANY next token as the value — including tokens that start with `--`.
+For example, `extractFlag(["--max-items", "--profile", "prod"], "--max-items")`
+returned `"--profile"`, which then failed downstream with a misleading
+`"--max-items must be a positive integer"` error.
+
+**New contract (PR #54):** When the two-arg form's next token starts with `--`,
+`locateFlag` throws `USAGE_ERROR` immediately, naming both the flag and the
+offending token. This is unambiguously an error: no legitimate value for any flag
+handled by `extractFlag` (limits, paths, names, tokens, regions) starts with
+`--`. If a value genuinely starts with `--`, use the equals form:
+`--max-items=<value>`.
+
+**ADR-0002 carve-out: `--exclude`/`--include` with `--`-prefixed patterns.**
+
+Real `aws s3 cp` accepts file patterns that start with `--` as `--exclude` or
+`--include` values:
+
+```
+$ aws s3 cp --recursive --exclude --weird /tmp/src s3://bkt/dst
+```
+
+This does NOT violate the new contract, for three reasons:
+
+1. `--exclude` and `--include` are **owned by no overlay**. Every `s3 cp`/`s3 rm`
+   call passes `ownedFlagNames=[]` to `collectPassthroughFlags`. These flags travel
+   through the passthrough path only.
+
+2. `collectPassthroughFlags` has its **own heuristic scan** that does NOT call
+   `locateFlag`. Its heuristic already handles `--`-prefixed next tokens correctly:
+   for an unknown flag, it checks `!next.startsWith("--")` before consuming the
+   next token. This means `--exclude --weird` is forwarded as a pair — the value
+   `--weird` is NOT consumed (by the `--` guard in the heuristic), and the NEXT
+   iteration pushes `--weird` as an unknown passthrough flag.
+
+   Wait — this means `--exclude` is forwarded, then `--weird` is forwarded as a
+   SEPARATE flag-like token. The child `aws s3 cp` command receives them as adjacent
+   tokens in its argv: `... --exclude --weird ...`. Real `aws` parses them as a pair
+   at its own level.
+
+3. `locateFlag` is **never called for `--exclude` or `--include`** on the s3 cp/rm
+   path. The `grep locateFlag src/engine.ts` is empty; `collectPassthroughFlags`
+   does not use `locateFlag` internally.
+
+**Invariant guard:** The test `test/extract-flag.test.ts :: "ADR-0002 carve-out:
+--exclude/--include with --prefixed values never reach locateFlag"` asserts that
+`s3Command(["cp","--recursive","--exclude","--weird",<src>,<dst>])` forwards the
+pair verbatim and does NOT throw. Mutation-tested: adding `"--exclude"` to
+`ownedBoolFlags` strips it → stub fails → test RED. Any future change that routes
+`--exclude` through `locateFlag` or adds it to an owned set will break this test —
+that is the intended signal.
