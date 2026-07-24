@@ -40,6 +40,7 @@
  *   token as a flag value.
  */
 
+import { AxiError } from "axi-sdk-js";
 import { stripOutputFlag } from "./engine.js";
 import {
   loadService,
@@ -163,9 +164,11 @@ function isModelBooleanFlag(
  *
  * Contract notes:
  *   - Does NOT mutate the input array.
- *   - Does NOT reject values that start with `-` (e.g. --limit=-1 is valid).
- *   - Does NOT check whether the next token is itself a flag in two-arg form;
- *     `--flag --other` returns `{ value: "--other", span: 2 }`.
+ *   - Does NOT reject values that start with a single `-` (e.g. --limit=-1 is valid).
+ *   - Throws USAGE_ERROR when the two-arg form's next token starts with `--`
+ *     (e.g. `--flag --other-flag`): such tokens are unambiguously other flags,
+ *     not values.  The error message names both the flag and the offending token.
+ *     Use the equals form (`--flag=--value`) if a value genuinely starts with `--`.
  *   - The `=` suffix in the prefix check (`${flag}=`) prevents false matches
  *     against flags that share a prefix (e.g. --limit vs --limit-type).
  *
@@ -182,7 +185,21 @@ export function locateFlag(
     const arg = args[i] ?? "";
     // Two-arg form: --flag value
     if (arg === flag && i + 1 < args.length) {
-      return { value: args[i + 1] as string, start: i, span: 2 };
+      const next = args[i + 1] as string;
+      if (next.startsWith("--")) {
+        // The next token is another flag, not a value.  Consuming it would
+        // silently mis-assign it and produce a confusing downstream error.
+        // Throw immediately so the user sees the real problem.
+        throw new AxiError(
+          `${flag} requires a value but "${next}" looks like a flag, not a value`,
+          "USAGE_ERROR",
+          [
+            `Use the equals form to avoid ambiguity: ${flag}=<value>`,
+            `Or provide the value before the next flag: ${flag} <value> ${next} …`,
+          ],
+        );
+      }
+      return { value: next, start: i, span: 2 };
     }
     // Equals form: --flag=value (or --flag= for empty value)
     if (arg.startsWith(eqPrefix)) {
