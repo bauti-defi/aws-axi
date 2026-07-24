@@ -1,13 +1,26 @@
 /**
- * Mutation-killable regression guard for useEnvGuard().
+ * Mutation-killable regression guard for useEnvGuard() and restoreExitCode().
  *
- * Proves that the afterEach body is load-bearing: removing it turns GUARD-2
- * and GUARD-3 RED. The guard catches anyone who deletes the hook body or
- * refactors it to a no-op.
+ * GUARD-1/2 prove the afterEach body is load-bearing for env cleanup.
+ * GUARD-3/4 test restoreExitCode() as a pure function — the only approach that
+ * kills the `?? 0` mutant in a full-suite run.
+ *
+ * WHY PURE-FUNCTION TEST FOR exitCode
+ * ────────────────────────────────────
+ * The ambient-state approach (set process.exitCode = 252 in test N, assert 0
+ * in test N+1) is order-dependent. In a full-suite run, earlier captureMain
+ * files leave process.exitCode === 0. So beforeEach in GUARD-3 captures
+ * exitCodeSnapshot = 0 rather than undefined. The mutant (`exitCodeSnapshot`
+ * instead of `exitCodeSnapshot ?? 0`) then restores 0 correctly — the
+ * mutation survives. Only in isolated file runs does beforeEach see undefined.
+ *
+ * A pure-function test has no ambient dependency: it passes undefined directly
+ * and asserts the output regardless of what any prior test did to
+ * process.exitCode. This is order-independent and cannot be neutralised by CI.
  *
  * SIMULATION vs. REAL TIMEOUT
  * ───────────────────────────
- * This guard uses direct env injection rather than a real Bun test timeout.
+ * GUARD-1/2 use direct env injection rather than a real Bun test timeout.
  * Reason: a timed-out it() cannot be checked in green — Bun 1.3.14 reports
  * (fail) regardless of it.failing() wrappers. The simulated abandonment form
  * — "inject state without restoring it, verify the next test is clean" —
@@ -20,14 +33,14 @@
  * accurately represents the hazard. (That real-timeout demo is not checked in.)
  */
 import { describe, it, expect } from "bun:test";
-import { useEnvGuard } from "./env-guard.js";
+import { useEnvGuard, restoreExitCode } from "./env-guard.js";
 
 const GUARD_KEY = "__AXI_ENV_GUARD_SENTINEL__";
 const GUARD_VAL = "leaked-via-simulated-timeout-abandonment";
 
 describe("useEnvGuard() — hooks are load-bearing", () => {
   // Register the guard under test. Removing the afterEach body in env-guard.ts
-  // causes GUARD-2 and GUARD-3 to fail.
+  // causes GUARD-2 to fail.
   useEnvGuard();
 
   it("GUARD-1: inject env var without any restore (simulates abandoned captureMain finally)", () => {
@@ -46,24 +59,25 @@ describe("useEnvGuard() — hooks are load-bearing", () => {
     // this assertion fails with "Expected: undefined, Received: GUARD_VAL".
     expect(process.env[GUARD_KEY]).toBeUndefined();
   });
+});
 
-  it("GUARD-3: leak a non-zero exitCode without any restore", () => {
-    // Simulate captureMain whose post-try exit-code line was abandoned.
-    // process.exitCode = 252 is the USAGE_ERROR value captureMain emits.
-    process.exitCode = 252;
+describe("restoreExitCode() — ?? 0 branch is load-bearing", () => {
+  // Pure-function tests: no ambient process.exitCode dependency, order-independent.
+  // Mutation to test: change `snapshot ?? 0` to `snapshot` in env-guard.ts →
+  // GUARD-3 fails in both isolated AND full-suite runs.
 
-    // Confirm injection (anchors GUARD-4: if this test never ran, GUARD-4 is vacuously green).
-    expect(process.exitCode).toBe(252);
+  it("GUARD-3: returns 0 when snapshot is undefined (the ?? 0 branch)", () => {
+    // This is the critical case: process.exitCode = undefined is a no-op in Bun,
+    // so the hook must use 0, not undefined, to clear a leaked non-zero code.
+    // Mutant (`snapshot` alone) would return undefined; this assertion catches it.
+    expect(restoreExitCode(undefined)).toBe(0);
   });
 
-  it("GUARD-4: process.exitCode is clean — afterEach restored it to 0 before this test began", () => {
-    // useEnvGuard()'s afterEach restored exitCode to `exitCodeSnapshot ?? 0`.
-    // Mutation to test: change `exitCodeSnapshot ?? 0` to `exitCodeSnapshot`
-    // in env-guard.ts → this assertion fails with "Expected: 0, Received: 252".
-    //
-    // NOTE: assigning `undefined` to process.exitCode is a no-op in Bun
-    // (measured: process.exitCode = 252; process.exitCode = undefined → 252).
-    // The `?? 0` is load-bearing; removing it breaks this guard.
-    expect(process.exitCode).toBe(0);
+  it("GUARD-4: returns the snapshot when it is a concrete number", () => {
+    // Non-zero snapshot must be preserved (e.g. a test that intentionally sets
+    // process.exitCode = 1 should see it restored to 1, not clobbered to 0).
+    expect(restoreExitCode(252)).toBe(252);
+    expect(restoreExitCode(0)).toBe(0);
+    expect(restoreExitCode(1)).toBe(1);
   });
 });
