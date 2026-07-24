@@ -229,6 +229,6 @@ describe("ADR-0003 corollary — command/resolve modules must not import parseAw
         `object for every non-zero exit so no consumer can bypass enrichment.\n` +
         `If this block was removed, restore it and re-run the structural enrichment tests.\n` +
         `See: docs/adr/0003-cli-delegation-for-reported-values.md`,
-    ).toContain("return { ...result, error }");
+    ).toContain("return { ...result, error };");
   });
 });
