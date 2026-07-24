@@ -98,6 +98,6 @@ help[3]: "Found profiles: dev, admin, ...","Pass a profile:  aws-axi <command> -
 
 Run `aws sso login --profile <name>` or `aws configure` to set up credentials first.
 
-### `AUTH_EXPIRED` — profile exists but SSO token stale
+### `AUTH_EXPIRED` — SSO token missing, stale, or invalid
 
-Run `aws sso login --profile <name>` to refresh the session.
+Run `aws sso login --profile <name>` to re-authenticate.

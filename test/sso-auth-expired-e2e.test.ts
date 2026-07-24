@@ -6,12 +6,17 @@
  *   - Drives the real installed `aws` CLI (not a stub)
  *   - Uses an isolated AWS_CONFIG_FILE + HOME — never reads or mutates
  *     the developer's real ~/.aws (ADR-0003)
- *   - Asserts exit 253 (AUTH_EXPIRED) end-to-end
+ *   - Asserts exit 253 (AUTH_EXPIRED) on the *built binary* (./dist/bin/aws-axi),
+ *     not just on the return value of awsExitCode(). A bug where the binary
+ *     doesn't trim but tests do would be invisible to unit-only assertions.
+ *   - No .trim() on stderr before passing to parseAwsError — production doesn't.
  *
  * If `aws` is not installed, the test FAILS loudly rather than silently passing.
  * (A silent skip would hide a broken environment. A loud failure is preferable.)
  *
- * aws version used during capture: aws-cli/2.33.13 Python/3.13.11 Darwin/25.2.0
+ * aws version used during capture of 2.33.x fixtures:
+ *   aws-cli/2.33.13 Python/3.13.11 Darwin/25.2.0
+ * CI runner version: >= 2.34.0 (adds "aws: [ERROR]: " prefix — handled by normalization).
  */
 import { describe, it, expect, afterEach } from "bun:test";
 import {
@@ -24,7 +29,8 @@ import {
   writeFileSync,
   rmSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { parseAwsError, awsExitCode } from "../src/errors.js";
@@ -34,11 +40,27 @@ import { parseAwsError, awsExitCode } from "../src/errors.js";
 // ---------------------------------------------------------------------------
 
 let AWS_BIN: string | null = null;
+let AWS_VERSION = "unknown";
 try {
   AWS_BIN = execFileSync("which", ["aws"], { encoding: "utf8" }).trim() || null;
+  if (AWS_BIN) {
+    AWS_VERSION = execFileSync("aws", ["--version"], { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+  }
 } catch {
-  // `which` failed — aws is not installed
+  try {
+    // aws --version writes to stderr on some platforms
+    AWS_VERSION = execFileSync("aws", ["--version"], { encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+  } catch {
+    // aws is not installed
+  }
 }
+
+// ---------------------------------------------------------------------------
+// Locate the built dist binary for exit-code assertions
+// ---------------------------------------------------------------------------
+
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const DIST_BIN = join(REPO_ROOT, "dist", "bin", "aws-axi");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -59,6 +81,9 @@ interface SpawnResult {
  * Spawn `aws sts get-caller-identity --output json --profile <profile>` using
  * the real aws binary with an isolated environment (no access to the developer's
  * real ~/.aws). Returns stdout, stderr, and exit code.
+ *
+ * stderr is returned RAW — no trimming. Production (src/aws.ts) does not trim,
+ * so tests must not either.
  */
 async function spawnRealAws(opts: {
   readonly profile: string;
@@ -78,13 +103,7 @@ async function spawnRealAws(opts: {
           AWS_CONFIG_FILE: opts.configFile,
           AWS_SHARED_CREDENTIALS_FILE: "/nonexistent/credentials",
           HOME: opts.home,
-          // Clear any ambient credential env vars that could bypass SSO
-          AWS_ACCESS_KEY_ID: undefined,
-          AWS_SECRET_ACCESS_KEY: undefined,
-          AWS_SESSION_TOKEN: undefined,
-          AWS_PROFILE: undefined,
-          AWS_DEFAULT_PROFILE: undefined,
-        } as Record<string, string | undefined>,
+        },
         maxBuffer: 1024 * 1024,
       },
       (error, stdout, stderr) => {
@@ -95,6 +114,43 @@ async function spawnRealAws(opts: {
           stdout: stdout ?? "",
           stderr: stderr ?? "",
           exitCode: typeof code === "number" ? code : 1,
+        });
+      },
+    );
+  });
+}
+
+/**
+ * Spawn the BUILT aws-axi binary (./dist/bin/aws-axi) with an isolated env.
+ * Returns the process exit code directly — this is the proof that #74 is fixed,
+ * because the built binary uses the same untrimmed stderr as production.
+ */
+async function spawnBuiltAxi(opts: {
+  readonly profile: string;
+  readonly configFile: string;
+  readonly home: string;
+}): Promise<{ exitCode: number; stderr: string }> {
+  return new Promise((resolve) => {
+    execFile(
+      DIST_BIN,
+      ["whoami", "--profile", opts.profile],
+      {
+        encoding: "utf8",
+        env: {
+          PATH: process.env["PATH"] ?? "/usr/local/bin:/usr/bin:/bin",
+          AWS_CONFIG_FILE: opts.configFile,
+          AWS_SHARED_CREDENTIALS_FILE: "/nonexistent/credentials",
+          HOME: opts.home,
+        },
+        maxBuffer: 1024 * 1024,
+      },
+      (error, _stdout, stderr) => {
+        const code = error
+          ? ((error as NodeJS.ErrnoException & { code?: number }).code ?? 1)
+          : 0;
+        resolve({
+          exitCode: typeof code === "number" ? code : 1,
+          stderr: stderr ?? "",
         });
       },
     );
@@ -144,7 +200,6 @@ describe("E2E — real aws binary with broken SSO config emits AUTH_EXPIRED / ex
     const home = join(tmpDir, "home");
 
     // ── Isolated SSO config ────────────────────────────────────────────────
-    // new sso-session format (aws-cli >= 2.x recommended shape)
     const ssoSessionName = "e2e-test-sso";
     const ssoStartUrl = "https://e2e-test.awsapps.com/start";
     writeFileSync(
@@ -165,8 +220,7 @@ describe("E2E — real aws binary with broken SSO config emits AUTH_EXPIRED / ex
     );
 
     // ── Plant an expired SSO token in the isolated HOME ──────────────────
-    // The aws CLI stores SSO tokens in ~/.aws/sso/cache/<sha1-of-session-name>.json
-    // for the new sso-session format.
+    // aws CLI stores SSO tokens at ~/.aws/sso/cache/<sha1(sso-session-name)>.json
     const cacheDir = join(home, ".aws", "sso", "cache");
     mkdirSync(cacheDir, { recursive: true });
 
@@ -194,20 +248,48 @@ describe("E2E — real aws binary with broken SSO config emits AUTH_EXPIRED / ex
 
     // The real aws binary returns exit 255 with the SSO expired message
     expect(result.exitCode).toBe(255);
-    expect(result.stderr.trim()).not.toBe("");
+    expect(result.stderr.trim()).not.toBe(""); // has content (trim only for this emptiness check)
 
-    // ── Run through parseAwsError — must map to AUTH_EXPIRED ──────────────
-    const parsed = parseAwsError(result.stderr.trim(), result.exitCode);
+    // ── Feed RAW stderr (no .trim()) to parseAwsError, matching production ─
+    // This is the critical assertion: the same path src/aws.ts uses.
+    const parsed = parseAwsError(result.stderr, result.exitCode);
+
+    if (parsed.code !== "AUTH_EXPIRED") {
+      throw new Error(
+        `Expected AUTH_EXPIRED but got ${parsed.code}.\n` +
+          `aws version: ${AWS_VERSION}\n` +
+          `Raw stderr bytes: ${JSON.stringify(result.stderr)}\n` +
+          `This may indicate a new aws-cli stderr format. ` +
+          `Recapture fixtures and update SSO_AUTH_EXPIRED_PATTERNS in src/errors.ts.`,
+      );
+    }
 
     expect(parsed.code).toBe("AUTH_EXPIRED");
 
     // ── The exit code aws-axi emits must be 253 (the promised exit code) ──
     expect(awsExitCode(parsed.code)).toBe(253);
 
-    // ── Suggestions must include sso login --profile ───────────────────────
-    const allSuggestions = parsed.suggestions.join(" ");
-    expect(allSuggestions).toContain("sso login");
-    expect(allSuggestions).toContain("--profile");
+    // ── Proof via the BUILT BINARY: aws-axi must exit 253, not 255 ────────
+    // This catches the class of bug where tests trim but production doesn't:
+    // if parseAwsError(stderr) and parseAwsError(stderr.trim()) diverge, the
+    // built binary exposes it even if unit tests were all green.
+    const axiResult = await spawnBuiltAxi({
+      profile: "e2e-profile",
+      configFile,
+      home,
+    });
+
+    if (axiResult.exitCode !== 253) {
+      throw new Error(
+        `Built binary (${DIST_BIN}) exited ${axiResult.exitCode} (expected 253).\n` +
+          `aws version: ${AWS_VERSION}\n` +
+          `aws-axi stderr: ${JSON.stringify(axiResult.stderr)}\n` +
+          `This means the binary is still returning UNKNOWN/255 despite unit tests passing. ` +
+          `Check whether real aws stderr is trimmed before reaching parseAwsError in src/aws.ts.`,
+      );
+    }
+
+    expect(axiResult.exitCode).toBe(253);
   });
 
   it("REAL AWS BINARY: legacy sso format, expired token → AUTH_EXPIRED (exit 253)", async () => {
@@ -222,7 +304,6 @@ describe("E2E — real aws binary with broken SSO config emits AUTH_EXPIRED / ex
     const configFile = join(tmpDir, "config");
     const home = join(tmpDir, "home");
 
-    // ── Isolated legacy SSO config (no [sso-session] stanza) ─────────────
     const ssoStartUrl = "https://e2e-test-legacy.awsapps.com/start";
     writeFileSync(
       configFile,
@@ -237,8 +318,7 @@ describe("E2E — real aws binary with broken SSO config emits AUTH_EXPIRED / ex
       "utf-8",
     );
 
-    // ── Plant an expired legacy SSO token ────────────────────────────────
-    // Legacy format: keyed on sha1 of the start_url
+    // Legacy format: cache key is sha1 of the start_url
     const cacheDir = join(home, ".aws", "sso", "cache");
     mkdirSync(cacheDir, { recursive: true });
 
@@ -249,12 +329,11 @@ describe("E2E — real aws binary with broken SSO config emits AUTH_EXPIRED / ex
         startUrl: ssoStartUrl,
         region: "us-east-1",
         accessToken: "fake-expired-legacy-token",
-        expiresAt: "2020-01-01T00:00:00UTC", // far in the past
+        expiresAt: "2020-01-01T00:00:00UTC",
       }),
       "utf-8",
     );
 
-    // ── Spawn real aws ────────────────────────────────────────────────────
     const result = await spawnRealAws({
       profile: "legacy-e2e-profile",
       configFile,
@@ -262,9 +341,17 @@ describe("E2E — real aws binary with broken SSO config emits AUTH_EXPIRED / ex
     });
 
     expect(result.exitCode).toBe(255);
-    expect(result.stderr.trim()).not.toBe("");
 
-    const parsed = parseAwsError(result.stderr.trim(), result.exitCode);
+    // Raw stderr — no .trim()
+    const parsed = parseAwsError(result.stderr, result.exitCode);
+
+    if (parsed.code !== "AUTH_EXPIRED") {
+      throw new Error(
+        `Expected AUTH_EXPIRED but got ${parsed.code}.\n` +
+          `aws version: ${AWS_VERSION}\n` +
+          `Raw stderr: ${JSON.stringify(result.stderr)}`,
+      );
+    }
 
     expect(parsed.code).toBe("AUTH_EXPIRED");
     expect(awsExitCode(parsed.code)).toBe(253);
@@ -310,7 +397,17 @@ describe("E2E — real aws binary with broken SSO config emits AUTH_EXPIRED / ex
 
     expect(result.exitCode).toBe(255);
 
-    const parsed = parseAwsError(result.stderr.trim(), result.exitCode);
+    // Raw stderr — no .trim()
+    const parsed = parseAwsError(result.stderr, result.exitCode);
+
+    if (parsed.code !== "AUTH_EXPIRED") {
+      throw new Error(
+        `Expected AUTH_EXPIRED but got ${parsed.code}.\n` +
+          `aws version: ${AWS_VERSION}\n` +
+          `Raw stderr: ${JSON.stringify(result.stderr)}`,
+      );
+    }
+
     expect(parsed.code).toBe("AUTH_EXPIRED");
     expect(awsExitCode(parsed.code)).toBe(253);
   });

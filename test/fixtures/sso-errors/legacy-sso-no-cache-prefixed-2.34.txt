@@ -1,0 +1,2 @@
+
+aws: [ERROR]: Error loading SSO Token: Token for https://damm-test.awsapps.com/start does not exist
