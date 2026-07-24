@@ -11,14 +11,18 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { main } from "../src/cli.js";
 import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
+import { useEnvGuard } from "./helpers/env-guard.js";
 
 afterEach(() => {
   releaseStubBins();
 });
+
+// Guard the full process.env (and process.exitCode) around each test.
+// See test/helpers/env-guard.ts for the rationale and the guard test.
+useEnvGuard();
 
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
 

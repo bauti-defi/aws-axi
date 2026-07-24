@@ -22,6 +22,7 @@ import type {
 } from "../src/commands/ssm.js";
 import { ssmRun, ssmCommand } from "../src/commands/ssm.js";
 import { main } from "../src/cli.js";
+import { useEnvGuard } from "./helpers/env-guard.js";
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -274,6 +275,10 @@ afterEach(() => {
     }
   }
 });
+
+// Guard the full process.env (and process.exitCode) around each test.
+// See test/helpers/env-guard.ts for the rationale and the guard test.
+useEnvGuard();
 
 // ─── SECURITY INVARIANT helper ────────────────────────────────────────────────
 
