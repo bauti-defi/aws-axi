@@ -1,0 +1,2 @@
+
+You must specify a region. You can also configure your region by running "aws configure".

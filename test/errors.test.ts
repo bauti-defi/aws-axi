@@ -359,6 +359,10 @@ describe("awsExitCode", () => {
     expect(awsExitCode("USAGE_ERROR")).toBe(252);
   });
 
+  it("returns 252 for NO_REGION", () => {
+    expect(awsExitCode("NO_REGION")).toBe(252);
+  });
+
   it("returns 253 for NO_CREDENTIALS", () => {
     expect(awsExitCode("NO_CREDENTIALS")).toBe(253);
   });
@@ -381,6 +385,125 @@ describe("awsExitCode", () => {
 
   it("returns 255 for UNKNOWN", () => {
     expect(awsExitCode("UNKNOWN")).toBe(255);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// NO_REGION — region-not-configured detection
+//
+// Fixtures are BYTE-EXACT captures from the real aws binary (see
+// test/fixtures/region-errors/README.md for capture methodology).
+// The leading \n is load-bearing: parseAwsError receives untrimmed stderr.
+// ---------------------------------------------------------------------------
+
+const REGION_FIXTURES_DIR = join(
+  dirname(fileURLToPath(import.meta.url)),
+  "fixtures",
+  "region-errors",
+);
+
+function regionFixture(name: string): string {
+  return readFileSync(join(REGION_FIXTURES_DIR, name), "utf-8");
+}
+
+describe("parseAwsError — NO_REGION (region-not-configured)", () => {
+  /**
+   * Captured: aws-cli/2.33.13, isolated env-i (no region anywhere).
+   * Verbatim: "\nYou must specify a region. You can also configure your region by running \"aws configure\".\n"
+   */
+  it("maps 'You must specify a region' to NO_REGION (plain 2.33.x fixture)", () => {
+    const stderr = regionFixture("no-region.txt");
+    const result = parseAwsError(stderr, 253);
+    expect(result.code).toBe("NO_REGION");
+    expect(result.botoCode).toBeUndefined();
+    expect(result.operation).toBeUndefined();
+    expect(awsExitCode(result.code)).toBe(252);
+  });
+
+  /**
+   * Captured: aws-cli/2.34.0 (and 2.36.2/2.36.7 — byte-identical to each other).
+   * NoRegionErrorHandler wraps the message in the enhanced format:
+   * "\naws: [ERROR]: An error occurred (NoRegion): You must specify a region. ...\n"
+   * cmp-verified against official amazon/aws-cli containers.
+   */
+  it("maps 'aws: [ERROR]: An error occurred (NoRegion): ...' to NO_REGION (>=2.34.0 fixture)", () => {
+    const stderr = regionFixture("no-region-prefixed-2.34.txt");
+    const result = parseAwsError(stderr, 253);
+    expect(result.code).toBe("NO_REGION");
+    expect(awsExitCode(result.code)).toBe(252);
+  });
+
+  it("NO_REGION suggestions include --region flag and AWS_DEFAULT_REGION", () => {
+    const result = parseAwsError(regionFixture("no-region.txt"), 253);
+    const allSuggestions = result.suggestions.join(" ");
+    expect(allSuggestions).toContain("--region");
+    expect(allSuggestions).toContain("AWS_DEFAULT_REGION");
+  });
+
+  it("NO_REGION suggestions include aws configure", () => {
+    const result = parseAwsError(regionFixture("no-region.txt"), 253);
+    const allSuggestions = result.suggestions.join(" ");
+    expect(allSuggestions).toContain("aws configure");
+  });
+
+  it("NO_REGION message makes clear the region is missing (not credentials)", () => {
+    const result = parseAwsError(regionFixture("no-region.txt"), 253);
+    expect(result.message.toLowerCase()).toContain("region");
+    // Must not suggest the fix is authentication-related
+    const allText = `${result.message} ${result.suggestions.join(" ")}`;
+    expect(allText.toLowerCase()).not.toContain("sso login");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Adversarial invariants: NO_REGION ↔ AUTH_EXPIRED separation
+//
+// These tests pin the critical non-overlap between the two new codes. If the
+// ordering or anchors in parseAwsError ever break, one of these would fail:
+//
+//   direction 1: region message must NEVER classify as AUTH_EXPIRED
+//   direction 2: SSO expired message must NEVER classify as NO_REGION
+//
+// Both directions are tested for both the plain (2.33.x) and prefixed (2.34.0)
+// fixture forms so normalization bugs surface here rather than in prod.
+// ---------------------------------------------------------------------------
+
+describe("parseAwsError — NO_REGION does NOT overlap with AUTH_EXPIRED", () => {
+  it("region message (plain) does not classify as AUTH_EXPIRED", () => {
+    const result = parseAwsError(regionFixture("no-region.txt"), 253);
+    expect(result.code).not.toBe("AUTH_EXPIRED");
+    expect(result.code).toBe("NO_REGION");
+  });
+
+  it("region message (>=2.34.0 enhanced form) does not classify as AUTH_EXPIRED", () => {
+    const result = parseAwsError(regionFixture("no-region-prefixed-2.34.txt"), 253);
+    expect(result.code).not.toBe("AUTH_EXPIRED");
+    expect(result.code).toBe("NO_REGION");
+  });
+
+  it("SSO expired message (no-cache) does not classify as NO_REGION", () => {
+    const result = parseAwsError(ssoFixture("new-sso-session-no-cache.txt"), 255);
+    expect(result.code).not.toBe("NO_REGION");
+    expect(result.code).toBe("AUTH_EXPIRED");
+  });
+
+  it("SSO expired message (legacy, prefixed) does not classify as NO_REGION", () => {
+    const result = parseAwsError(ssoFixture("legacy-sso-expired-prefixed-2.34.txt"), 255);
+    expect(result.code).not.toBe("NO_REGION");
+    expect(result.code).toBe("AUTH_EXPIRED");
+  });
+
+  it("botocore body echoing region text stays SERVICE_CLIENT_ERROR (anchors load-bearing)", () => {
+    // Without ^ anchors, a botocore error whose message body mentions region
+    // configuration would flip to NO_REGION. The normalization strips \n and
+    // prefix, then anchored patterns prevent internal matches.
+    const result = parseAwsError(
+      "An error occurred (InvalidParameterValue) when calling the RunInstances operation: " +
+        "You must specify a region for this parameter",
+      255,
+    );
+    expect(result.code).toBe("SERVICE_CLIENT_ERROR");
+    expect(result.code).not.toBe("NO_REGION");
   });
 });
 

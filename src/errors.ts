@@ -5,7 +5,7 @@ export { AxiError };
 /**
  * aws-axi error taxonomy — maps botocore stderr output to structured errors.
  * Exit code contract (mirrors spec §error-surfacing):
- *   252 = usage error
+ *   252 = usage error / no region configured
  *   253 = no-credentials / auth-expired
  *   254 = service-client-error (incl. SSM delivery failures: TimedOut, Undeliverable, etc.)
  *   255 = general / unknown
@@ -19,6 +19,7 @@ export { AxiError };
  */
 export type AwsErrorCode =
   | "USAGE_ERROR"
+  | "NO_REGION"
   | "NO_CREDENTIALS"
   | "NO_PROFILE_SELECTED"
   | "AUTH_EXPIRED"
@@ -50,13 +51,15 @@ const AUTH_EXPIRED_BOTO_CODES = new Set([
   "TokenExpiredException",
   "ExpiredToken",
   "AuthFailure",
-  // UnauthorizedSSOTokenError: botocore raises this for *any* UnauthorizedException
-  // from sso:GetRoleCredentials, including "this role is not assigned to you in IAM
-  // Identity Center" (reproducible with a non-expired token). Mapping to AUTH_EXPIRED
-  // is imprecise for the role-not-assigned case, but AWS's own error text says
-  // "To refresh this SSO session run aws sso login with the corresponding profile"
-  // — making it the same actionable advice regardless of root cause.
-  "UnauthorizedSSOTokenError",
+  // NOTE: "UnauthorizedSSOTokenError" was previously listed here but is dead code.
+  // It is a botocore Python exception *class* name, not a service API error code.
+  // BOTOCORE_RE matches only the "<Code>" field from
+  //   "An error occurred (<Code>) when calling the <Op> operation: ..."
+  // which comes from the service HTTP response — a Python class name never
+  // appears in that position. The role-not-assigned case (UnauthorizedException
+  // from sso:GetRoleCredentials) is handled by SSO_AUTH_EXPIRED_PATTERNS above,
+  // because the aws CLI emits one of the SSO provider-layer messages before the
+  // botocore format is reached.
 ]);
 
 /**
@@ -81,6 +84,39 @@ const SSO_AUTH_EXPIRED_PATTERNS: RegExp[] = [
   /^Error loading SSO Token:/i,
   /^Error when retrieving token from sso:/i,
   /^The SSO session associated with this profile has expired/i,
+];
+
+/**
+ * Region-not-configured patterns — captured from real aws binaries:
+ *   aws-cli/2.33.13: no dedicated handler → plain text
+ *   aws-cli/2.34.0+: NoRegionErrorHandler → enhanced format (default since 2.34.0)
+ *
+ * Two stderr shapes (both after normalization — leading \n + "aws: [ERROR]: " stripped):
+ *
+ *   2.33.x:   "You must specify a region. You can also configure your region..."
+ *   ≥ 2.34.0: "An error occurred (NoRegion): You must specify a region..."
+ *
+ * The ≥ 2.34.0 form does NOT match BOTOCORE_RE because it lacks "when calling
+ * the <Op> operation:" — it falls through to this check. The 2.33.x form never
+ * matched BOTOCORE_RE either. Both are caught by the single anchored pattern below.
+ *
+ * ^ is load-bearing. Removing it would cause region wording inside botocore
+ * error bodies (e.g. "You must specify a region for this resource" inside an
+ * InvalidParameterValue body) to flip from SERVICE_CLIENT_ERROR/254 to NO_REGION.
+ * The (?:An error occurred \(NoRegion\): )? optional prefix is specific enough
+ * that no other message body can false-positive through it.
+ *
+ * Fixture verification: byte-exact captures from official amazon/aws-cli
+ * containers (2.33.13 and 2.34.0/2.36.2/2.36.7 — the ≥2.34 variants are
+ * byte-identical to each other). See test/fixtures/region-errors/README.md.
+ *
+ * Adversarial invariants (tested in test/errors.test.ts):
+ *   - region message (both forms) must never classify as AUTH_EXPIRED
+ *   - SSO expired message must never classify as NO_REGION
+ *   - botocore body echoing region wording must stay SERVICE_CLIENT_ERROR
+ */
+const NO_REGION_PATTERNS: RegExp[] = [
+  /^(?:An error occurred \(NoRegion\): )?You must specify a region/i,
 ];
 
 /** Parse a raw stderr string + exit code into a structured error descriptor. */
@@ -186,6 +222,25 @@ export function parseAwsError(
     };
   }
 
+  // ── no region configured ──────────────────────────────────────────────
+  // Checked after BOTOCORE_RE (this message never appears in botocore format)
+  // and after SSO/NO_CREDS patterns (completely disjoint message space).
+  // Applied to `normalized` (same variable as SSO checks above) so both
+  // aws-cli 2.33.x and >= 2.34.0 prefix forms are matched.
+  if (NO_REGION_PATTERNS.some((re) => re.test(normalized))) {
+    return {
+      code: "NO_REGION",
+      botoCode: undefined,
+      operation: undefined,
+      message: "No AWS region configured — region is required for this operation",
+      suggestions: [
+        "Pass a region flag:    aws-axi <command> --region us-east-1",
+        "Or export it:          export AWS_DEFAULT_REGION=us-east-1",
+        "Or add to profile:     aws configure set region us-east-1 --profile <name>",
+      ],
+    };
+  }
+
   // ── usage/validation errors ────────────────────────────────────────────
   if (exitCode === 252 || /^usage:/i.test(stderr)) {
     return {
@@ -242,6 +297,8 @@ export function buildNoProfileSelectedError(
 export function awsExitCode(code: AwsErrorCode): number {
   switch (code) {
     case "USAGE_ERROR":
+      return 252;
+    case "NO_REGION":
       return 252;
     case "NO_CREDENTIALS":
       return 253;

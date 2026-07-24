@@ -138,6 +138,28 @@ re-invoke with \`--profile <name>\`:
 help[3]: "Found profiles: dev, admin, ...","Pass a profile:  aws-axi <command> --profile <name>","Or export it:    export AWS_PROFILE=<name>"
 \`\`\`
 
+### \`NO_REGION\` — no AWS region configured
+
+\`\`\`
+error: No AWS region configured — region is required for this operation
+code: NO_REGION
+\`\`\`
+
+Cause: no region was resolved from any source (profile, env vars, instance metadata).
+aws-axi exits 252 so agents know to configure region — **NOT** to re-authenticate.
+
+**Immediate actions (pick one):**
+
+| Method | Example |
+|---|---|
+| Per-command flag | \`npx -y aws-axi <command> --region us-east-1\` |
+| Shell export | \`export AWS_DEFAULT_REGION=us-east-1\` |
+| Configure profile | \`aws configure set region us-east-1 --profile <name>\` |
+
+**As an agent:** \`NO_REGION\` (exit 252) means the invocation is missing a required
+configuration element. Do NOT ask the operator to run \`aws sso login\` — that will
+not help. Add \`--region <region>\` to the command or export \`AWS_DEFAULT_REGION\`.
+
 ### \`NO_CREDENTIALS\` — no AWS config at all
 
 Run \`aws sso login --profile <name>\` or \`aws configure\` to set up credentials first.
