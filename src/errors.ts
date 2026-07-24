@@ -52,6 +52,30 @@ const AUTH_EXPIRED_BOTO_CODES = new Set([
   "AuthFailure",
 ]);
 
+/**
+ * SSO-provider error patterns captured from aws-cli/2.33.13 on macOS.
+ *
+ * These come from the aws CLI's SSO token provider layer — NOT from botocore's
+ * "An error occurred (...)" format — so they never reach AUTH_EXPIRED_BOTO_CODES.
+ * They are checked BEFORE NO_CREDS_PATTERNS and BOTOCORE_RE.
+ *
+ * Checked before NO_CREDS_PATTERNS as a defensive ordering: none of the captured
+ * messages match NO_CREDS_PATTERNS today, but SSO messages are semantically
+ * distinct from generic "no credentials" (they always mean "re-run sso login"),
+ * and explicit ordering prevents future message changes from shadowing them.
+ *
+ * Scenarios covered:
+ *   "Error loading SSO Token: Token for <session> does not exist"   (no cached token)
+ *   "Error loading SSO Token: Token for <url> is invalid"           (malformed token)
+ *   "Error when retrieving token from sso: Token has expired..."    (expired, new format)
+ *   "The SSO session associated with this profile has expired..."   (expired, legacy format)
+ */
+const SSO_AUTH_EXPIRED_PATTERNS: RegExp[] = [
+  /^Error loading SSO Token:/i,
+  /^Error when retrieving token from sso:/i,
+  /^The SSO session associated with this profile has expired/i,
+];
+
 /** Parse a raw stderr string + exit code into a structured error descriptor. */
 export function parseAwsError(
   stderr: string,
@@ -65,6 +89,21 @@ export function parseAwsError(
       operation: undefined,
       message: "aws CLI is not installed — see https://aws.amazon.com/cli/",
       suggestions: [],
+    };
+  }
+
+  // ── SSO token missing/expired/invalid ─────────────────────────────────────
+  // Checked before NO_CREDS_PATTERNS (see SSO_AUTH_EXPIRED_PATTERNS comment above).
+  if (SSO_AUTH_EXPIRED_PATTERNS.some((re) => re.test(stderr))) {
+    return {
+      code: "AUTH_EXPIRED",
+      botoCode: undefined,
+      operation: undefined,
+      message: "SSO token is missing or expired — re-authentication required",
+      suggestions: [
+        "Run `aws sso login --profile <name>` to re-authenticate",
+        "Replace <name> with the profile name you pass to aws-axi (--profile flag or AWS_PROFILE env)",
+      ],
     };
   }
 
@@ -101,7 +140,7 @@ export function parseAwsError(
       };
     }
 
-    // Expired / auth failures
+    // Expired / auth failures (non-SSO credential types: AssumeRole, static keys, etc.)
     if (AUTH_EXPIRED_BOTO_CODES.has(botoCode)) {
       return {
         code: "AUTH_EXPIRED",
@@ -109,8 +148,8 @@ export function parseAwsError(
         operation,
         message: `AWS credentials have expired (${botoCode})`,
         suggestions: [
-          "Run `aws sso login` to refresh credentials",
-          "Or renew your temporary credentials via `aws sts assume-role`",
+          "Run `aws sso login --profile <name>` to refresh SSO credentials",
+          "Or renew temporary credentials via `aws sts assume-role`",
         ],
       };
     }
