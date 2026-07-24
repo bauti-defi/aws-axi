@@ -21,7 +21,12 @@ import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import { awsJson } from "../aws.js";
 import { fallThroughToEngine } from "../engine.js";
-import { buildPassthrough, collectPassthroughFlags } from "../overlay-args.js";
+import {
+  buildPassthrough,
+  collectPassthroughFlags,
+  extractPositionals,
+  locateFlag,
+} from "../overlay-args.js";
 
 // ---------------------------------------------------------------------------
 // AWS raw response shapes (only fields we project or act on)
@@ -187,6 +192,89 @@ examples:
 const DEFAULT_MAX_ITEMS = "100";
 
 // ---------------------------------------------------------------------------
+// Shared helper: positional-or-flag arg resolution
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve a key argument that real `aws` accepts only as a named flag
+ * (e.g. --role-name, --policy-arn) but aws-axi historically also accepted
+ * as a bare positional.
+ *
+ * Under ADR-0002 (superset input contract), BOTH forms are accepted:
+ *   <value>              bare positional — aws-axi extension; real aws rejects this
+ *   --<flag> <value>     flag form       — real aws's only accepted form
+ *   --<flag>=<value>     equals form     — real aws's equals variant
+ *
+ * Conflict (both positional AND flag in the same call) → USAGE_ERROR that
+ * names both conflicting values so the caller knows what to fix.
+ *
+ * Uses extractPositionals() so flag values (e.g. "my-role" in "--role-name
+ * my-role") are never mis-identified as the positional argument.
+ *
+ * ── Where #63 plugs in ────────────────────────────────────────────────────────
+ * lambda get-function has the identical defect: it accepts --function-name
+ * positionally only (src/commands/lambda.ts:426–432). Once overlay-args.ts
+ * (PR #86) is no longer contended, move this helper there and close #63 with:
+ *
+ *   const fnName = resolveKeyArg({
+ *     args: options.args, flagName: "--function-name",
+ *     label: "function name/ARN",
+ *     examples: ["Usage: aws-axi lambda get-function <name>",
+ *                "Usage: aws-axi lambda get-function --function-name <name>"],
+ *   });
+ *
+ * @param args      Full args array for the operation (before any slicing).
+ * @param flagName  Flag name in --kebab-case (e.g. "--role-name").
+ * @param label     Human-readable description for error messages.
+ * @param examples  Hint strings appended to every USAGE_ERROR.
+ * @returns         Resolved value string.
+ */
+function resolveKeyArg({
+  args,
+  flagName,
+  label,
+  examples,
+}: {
+  readonly args: readonly string[];
+  readonly flagName: string;
+  readonly label: string;
+  readonly examples: readonly string[];
+}): string {
+  // extractPositionals() correctly skips flag values (e.g. "my-role" in
+  // "--role-name my-role" is NOT returned as a positional — it's consumed
+  // as the value of the preceding flag). See overlay-args.ts for the full
+  // algorithm.
+  const positionals = extractPositionals(args);
+  const positional = positionals[0] as string | undefined;
+
+  // Flag form: --flag value  or  --flag=value
+  const flagLoc = locateFlag(args, flagName);
+  const flagValue = flagLoc?.value;
+
+  // Conflict: both forms in the same call — real aws can't hit this (it
+  // doesn't accept positionals for these ops) so we define the policy:
+  // USAGE_ERROR naming both values, forcing the caller to pick one form.
+  if (positional !== undefined && flagValue !== undefined) {
+    throw new AxiError(
+      `Conflicting ${label}: positional '${positional}' and ${flagName} '${flagValue}'. Provide one form only.`,
+      "USAGE_ERROR",
+      [...examples],
+    );
+  }
+
+  const value = positional ?? flagValue;
+  if (value === undefined) {
+    throw new AxiError(
+      `${label} is required: provide it positionally or as ${flagName}`,
+      "USAGE_ERROR",
+      [...examples],
+    );
+  }
+
+  return value;
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -332,17 +420,22 @@ async function runGetRole(
   context: AwsContext | undefined,
   binary: string | undefined,
 ): Promise<Record<string, unknown>> {
-  const roleName = args[0];
-  if (!roleName || roleName.startsWith("-")) {
-    throw new AxiError(
-      "get-role requires a role name: aws-axi iam get-role <name>",
-      "USAGE_ERROR",
-      ["Example: aws-axi iam get-role my-lambda-role"],
-    );
-  }
+  // Accept both positional form ("my-role") and flag form ("--role-name my-role").
+  // --role-name is added to ownedFlagNames so collectPassthroughFlags excludes it
+  // from passthrough (it is already forwarded explicitly in awsArgs below).
+  const roleName = resolveKeyArg({
+    args,
+    flagName: "--role-name",
+    label: "get-role role name",
+    examples: [
+      "Example: aws-axi iam get-role my-role",
+      "Example: aws-axi iam get-role --role-name my-role",
+    ],
+  });
 
-  // Forward unknown flags from args after the positional (superset contract).
-  const rawPassthrough = collectPassthroughFlags(args.slice(1), [], undefined, { service: "iam", operation: "get-role" });
+  // Forward unknown flags verbatim (superset contract). Pass full args — the
+  // positional is skipped as a bare token; --role-name is owned and excluded.
+  const rawPassthrough = collectPassthroughFlags(args, ["--role-name"], undefined, { service: "iam", operation: "get-role" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   const awsArgs = ["iam", "get-role", "--role-name", roleName, ...passthrough];
@@ -420,19 +513,23 @@ async function runGetPolicy(
   context: AwsContext | undefined,
   binary: string | undefined,
 ): Promise<Record<string, unknown>> {
-  const policyArn = args[0];
-  if (!policyArn || policyArn.startsWith("-")) {
-    throw new AxiError(
-      "get-policy requires a policy ARN: aws-axi iam get-policy <arn>",
-      "USAGE_ERROR",
-      [
-        "Example: aws-axi iam get-policy arn:aws:iam::aws:policy/AdministratorAccess",
-        "Run `aws-axi iam list-policies` to see available ARNs",
-      ],
-    );
-  }
+  // Accept both positional form ("arn:aws:iam::...") and flag form ("--policy-arn arn:...").
+  // --policy-arn is added to ownedFlagNames so collectPassthroughFlags excludes it
+  // from passthrough (it is already forwarded explicitly in awsArgs below).
+  const policyArn = resolveKeyArg({
+    args,
+    flagName: "--policy-arn",
+    label: "get-policy policy ARN",
+    examples: [
+      "Example: aws-axi iam get-policy arn:aws:iam::aws:policy/AdministratorAccess",
+      "Example: aws-axi iam get-policy --policy-arn arn:aws:iam::aws:policy/AdministratorAccess",
+      "Run `aws-axi iam list-policies` to see available ARNs",
+    ],
+  });
 
-  const rawPassthrough = collectPassthroughFlags(args.slice(1), [], undefined, { service: "iam", operation: "get-policy" });
+  // Forward unknown flags verbatim (superset contract). Pass full args — the
+  // positional is skipped as a bare token; --policy-arn is owned and excluded.
+  const rawPassthrough = collectPassthroughFlags(args, ["--policy-arn"], undefined, { service: "iam", operation: "get-policy" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   const awsArgs = ["iam", "get-policy", "--policy-arn", policyArn, ...passthrough];
@@ -451,17 +548,24 @@ async function runListAttachedRolePolicies(
   context: AwsContext | undefined,
   binary: string | undefined,
 ): Promise<Record<string, unknown>> {
-  const roleName = args[0];
-  if (!roleName || roleName.startsWith("-")) {
-    throw new AxiError(
-      "list-attached-role-policies requires a role name: aws-axi iam list-attached-role-policies <name>",
-      "USAGE_ERROR",
-      ["Example: aws-axi iam list-attached-role-policies my-task-role"],
-    );
-  }
+  // Accept both positional form ("my-role") and flag form ("--role-name my-role").
+  // --role-name is added to ownedFlagNames so collectPassthroughFlags excludes it
+  // from passthrough (it is already forwarded explicitly in awsArgs below).
+  const roleName = resolveKeyArg({
+    args,
+    flagName: "--role-name",
+    label: "list-attached-role-policies role name",
+    examples: [
+      "Example: aws-axi iam list-attached-role-policies my-task-role",
+      "Example: aws-axi iam list-attached-role-policies --role-name my-task-role",
+    ],
+  });
 
-  const { token } = extractNextToken(args.slice(1));
-  const rawPassthrough = collectPassthroughFlags(args.slice(1), ["--next-token"], undefined, { service: "iam", operation: "list-attached-role-policies" });
+  // Pass full args — extractNextToken only keys on --next-token so the positional
+  // or --role-name tokens are harmlessly ignored. collectPassthroughFlags skips
+  // bare positionals and both owned flag names.
+  const { token } = extractNextToken(args);
+  const rawPassthrough = collectPassthroughFlags(args, ["--next-token", "--role-name"], undefined, { service: "iam", operation: "list-attached-role-policies" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   // --query bypass (ADR-0002): skip the overlay's default cap when --query is

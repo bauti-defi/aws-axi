@@ -3,7 +3,7 @@
  * No mocks — the full `awsJson` exec seam runs with a subprocess boundary.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { rmSync } from "node:fs";
+import { rmSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { iamRun } from "../src/commands/iam.js";
@@ -489,6 +489,285 @@ describe("iamRun — error propagation", () => {
       expect(true).toBe(false);
     } catch (e) {
       expect(e).toBeInstanceOf(AxiError);
+      expect(AUTH_CODES.has((e as AxiError).code)).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Part 1: Flag form acceptance (ADR-0002 superset contract)
+//
+// Real `aws iam get-role`, `get-policy`, and `list-attached-role-policies`
+// each require a named flag (--role-name, --policy-arn). aws-axi historically
+// only accepted a bare positional. Under ADR-0002, BOTH forms must work.
+//
+// Assertion strategy: capture child argv via a stub that writes $@ to a file
+// AND emits the required JSON on stdout. Assert on the captured argv (per
+// issue spec: "assert on captured child argv, not intermediate return values").
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a stub script that writes its argv to capturePath and emits stdout.
+ * Uses the pooled stubBin allocator (safe here — no binary-path-keyed caches).
+ */
+function makeArgCapturingStub(capturePath: string, stdout: string): string {
+  return stubBin(
+    [
+      "#!/bin/sh",
+      // Write all argv to the capture file so the test can inspect them.
+      `echo "$@" > ${shellQuote(capturePath)}`,
+      `printf '%s' ${shellQuote(stdout)}`,
+      "exit 0",
+    ].join("\n"),
+  );
+}
+
+describe("iamRun — list-attached-role-policies — flag form (Part 1 fix)", () => {
+  it("accepts --role-name flag form and forwards --role-name to child aws", async () => {
+    const capturePath = join(tmpdir(), `iam-larp-flag-${process.pid}.txt`);
+    const stub = makeArgCapturingStub(capturePath, LIST_ATTACHED_POLICIES_RESPONSE);
+
+    const result = await iamRun({
+      op: "list-attached-role-policies",
+      args: ["--role-name", "twin-markets-prod-role"],
+      binary: stub,
+    });
+
+    const captured = readFileSync(capturePath, "utf-8").trim();
+    // Child aws must receive --role-name (not the role name as a bare positional)
+    expect(captured).toContain("--role-name");
+    expect(captured).toContain("twin-markets-prod-role");
+    // Overlay projection must still work
+    expect(result["roleName"]).toBe("twin-markets-prod-role");
+    expect(result["count"]).toBe(2);
+    try { rmSync(capturePath); } catch { /* best-effort */ }
+  });
+
+  it("flag form and positional form produce identical child argv", async () => {
+    const capturePosPath = join(tmpdir(), `iam-larp-pos-${process.pid}.txt`);
+    const captureFlagPath = join(tmpdir(), `iam-larp-flagform-${process.pid}.txt`);
+
+    const posStub = makeArgCapturingStub(capturePosPath, LIST_ATTACHED_POLICIES_RESPONSE);
+    const flagStub = makeArgCapturingStub(captureFlagPath, LIST_ATTACHED_POLICIES_RESPONSE);
+
+    await iamRun({ op: "list-attached-role-policies", args: ["my-role"], binary: posStub });
+    await iamRun({ op: "list-attached-role-policies", args: ["--role-name", "my-role"], binary: flagStub });
+
+    const posCapture = readFileSync(capturePosPath, "utf-8").trim();
+    const flagCapture = readFileSync(captureFlagPath, "utf-8").trim();
+    // Both forms must produce the same child invocation
+    expect(posCapture).toBe(flagCapture);
+    try { rmSync(capturePosPath); rmSync(captureFlagPath); } catch { /* best-effort */ }
+  });
+
+  it("accepts --role-name=value equals form", async () => {
+    const capturePath = join(tmpdir(), `iam-larp-eq-${process.pid}.txt`);
+    const stub = makeArgCapturingStub(capturePath, LIST_ATTACHED_POLICIES_RESPONSE);
+
+    const result = await iamRun({
+      op: "list-attached-role-policies",
+      args: ["--role-name=twin-markets-prod-role"],
+      binary: stub,
+    });
+
+    expect(result["roleName"]).toBe("twin-markets-prod-role");
+    const captured = readFileSync(capturePath, "utf-8").trim();
+    expect(captured).toContain("--role-name");
+    expect(captured).toContain("twin-markets-prod-role");
+    try { rmSync(capturePath); } catch { /* best-effort */ }
+  });
+
+  it("throws USAGE_ERROR naming both values when positional and --role-name conflict", async () => {
+    const stub = createStub({ stdout: "", exitCode: 0 });
+    try {
+      await iamRun({
+        op: "list-attached-role-policies",
+        args: ["my-role", "--role-name", "other-role"],
+        binary: stub,
+      });
+      expect(true).toBe(false); // unreachable
+    } catch (e) {
+      expect(e).toBeInstanceOf(AxiError);
+      expect((e as AxiError).code).toBe("USAGE_ERROR");
+      // Message must name both conflicting values so the caller knows what to fix
+      expect((e as AxiError).message).toContain("my-role");
+      expect((e as AxiError).message).toContain("other-role");
+    }
+  });
+});
+
+describe("iamRun — get-role — flag form (Part 1 fix)", () => {
+  it("accepts --role-name flag form and forwards --role-name to child aws", async () => {
+    const capturePath = join(tmpdir(), `iam-gr-flag-${process.pid}.txt`);
+    const stub = makeArgCapturingStub(capturePath, GET_ROLE_RESPONSE);
+
+    const result = await iamRun({
+      op: "get-role",
+      args: ["--role-name", "my-role"],
+      binary: stub,
+    });
+
+    const captured = readFileSync(capturePath, "utf-8").trim();
+    expect(captured).toContain("--role-name");
+    expect(captured).toContain("my-role");
+    // Overlay projection still works
+    const role = result["role"] as Record<string, unknown>;
+    expect(role["name"]).toBe("my-role");
+    try { rmSync(capturePath); } catch { /* best-effort */ }
+  });
+
+  it("flag form and positional form produce identical child argv for get-role", async () => {
+    const capturePosPath = join(tmpdir(), `iam-gr-pos-${process.pid}.txt`);
+    const captureFlagPath = join(tmpdir(), `iam-gr-flagform-${process.pid}.txt`);
+
+    const posStub = makeArgCapturingStub(capturePosPath, GET_ROLE_RESPONSE);
+    const flagStub = makeArgCapturingStub(captureFlagPath, GET_ROLE_RESPONSE);
+
+    await iamRun({ op: "get-role", args: ["my-role"], binary: posStub });
+    await iamRun({ op: "get-role", args: ["--role-name", "my-role"], binary: flagStub });
+
+    expect(readFileSync(capturePosPath, "utf-8").trim()).toBe(
+      readFileSync(captureFlagPath, "utf-8").trim(),
+    );
+    try { rmSync(capturePosPath); rmSync(captureFlagPath); } catch { /* best-effort */ }
+  });
+
+  it("throws USAGE_ERROR naming both values when positional and --role-name conflict for get-role", async () => {
+    const stub = createStub({ stdout: "", exitCode: 0 });
+    try {
+      await iamRun({
+        op: "get-role",
+        args: ["my-role", "--role-name", "other-role"],
+        binary: stub,
+      });
+      expect(true).toBe(false);
+    } catch (e) {
+      expect(e).toBeInstanceOf(AxiError);
+      expect((e as AxiError).code).toBe("USAGE_ERROR");
+      expect((e as AxiError).message).toContain("my-role");
+      expect((e as AxiError).message).toContain("other-role");
+    }
+  });
+});
+
+describe("iamRun — get-policy — flag form (Part 1 fix)", () => {
+  it("accepts --policy-arn flag form and forwards --policy-arn to child aws", async () => {
+    const capturePath = join(tmpdir(), `iam-gp-flag-${process.pid}.txt`);
+    const TEST_ARN = "arn:aws:iam::aws:policy/AdministratorAccess";
+    const stub = makeArgCapturingStub(capturePath, GET_POLICY_RESPONSE);
+
+    const result = await iamRun({
+      op: "get-policy",
+      args: ["--policy-arn", TEST_ARN],
+      binary: stub,
+    });
+
+    const captured = readFileSync(capturePath, "utf-8").trim();
+    expect(captured).toContain("--policy-arn");
+    expect(captured).toContain(TEST_ARN);
+    const policy = result["policy"] as Record<string, unknown>;
+    expect(policy["name"]).toBe("AdministratorAccess");
+    try { rmSync(capturePath); } catch { /* best-effort */ }
+  });
+
+  it("flag form and positional form produce identical child argv for get-policy", async () => {
+    const TEST_ARN = "arn:aws:iam::aws:policy/AdministratorAccess";
+    const capturePosPath = join(tmpdir(), `iam-gp-pos-${process.pid}.txt`);
+    const captureFlagPath = join(tmpdir(), `iam-gp-flagform-${process.pid}.txt`);
+
+    const posStub = makeArgCapturingStub(capturePosPath, GET_POLICY_RESPONSE);
+    const flagStub = makeArgCapturingStub(captureFlagPath, GET_POLICY_RESPONSE);
+
+    await iamRun({ op: "get-policy", args: [TEST_ARN], binary: posStub });
+    await iamRun({ op: "get-policy", args: ["--policy-arn", TEST_ARN], binary: flagStub });
+
+    expect(readFileSync(capturePosPath, "utf-8").trim()).toBe(
+      readFileSync(captureFlagPath, "utf-8").trim(),
+    );
+    try { rmSync(capturePosPath); rmSync(captureFlagPath); } catch { /* best-effort */ }
+  });
+
+  it("throws USAGE_ERROR naming both values when positional and --policy-arn conflict", async () => {
+    const stub = createStub({ stdout: "", exitCode: 0 });
+    try {
+      await iamRun({
+        op: "get-policy",
+        args: [
+          "arn:aws:iam::aws:policy/ReadOnlyAccess",
+          "--policy-arn",
+          "arn:aws:iam::aws:policy/AdministratorAccess",
+        ],
+        binary: stub,
+      });
+      expect(true).toBe(false);
+    } catch (e) {
+      expect(e).toBeInstanceOf(AxiError);
+      expect((e as AxiError).code).toBe("USAGE_ERROR");
+      expect((e as AxiError).message).toContain("ReadOnlyAccess");
+      expect((e as AxiError).message).toContain("AdministratorAccess");
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Part 2: get-policy error classification (NO_CREDENTIALS false-positive)
+//
+// Reported against a valid --profile admin SSO session: get-policy returned
+// NO_CREDENTIALS while other operations (logs describe-log-groups) succeeded.
+//
+// Investigation: after PR #79 (structural enrichment), awsJson routes through
+// awsRaw which is the single enrichment site. The enrichment path for get-policy
+// is now: iamRun → awsJson → awsRaw → parseAwsError → enrichNoCredsError.
+//
+// These tests prove that get-policy (overlay path) classifies errors correctly:
+//   - A botocore AccessDenied error → SERVICE_CLIENT_ERROR (not NO_CREDENTIALS)
+//   - A real "Unable to locate credentials" error → NO_CREDENTIALS (correct)
+//
+// Result: Part 2 does NOT reproduce on current main (23bfffe). The #79
+// structural fix (single-site enrichment via awsRaw) eliminated the divergent
+// code paths that could have caused misclassification. Only Part 1 ships.
+// ---------------------------------------------------------------------------
+
+describe("iamRun — get-policy — error classification (Part 2 evidence)", () => {
+  it("classifies AccessDenied botocore error as SERVICE_CLIENT_ERROR (not NO_CREDENTIALS)", async () => {
+    const stub = createStub({
+      stdout: "",
+      stderr:
+        "An error occurred (AccessDenied) when calling the GetPolicy operation: User is not authorized",
+      exitCode: 254,
+    });
+    try {
+      await iamRun({
+        op: "get-policy",
+        args: ["arn:aws:iam::aws:policy/AdministratorAccess"],
+        binary: stub,
+      });
+      expect(true).toBe(false); // unreachable
+    } catch (e) {
+      expect(e).toBeInstanceOf(AxiError);
+      // Must be SERVICE_CLIENT_ERROR — not NO_CREDENTIALS (the false-positive #53 reported)
+      expect((e as AxiError).code).toBe("SERVICE_CLIENT_ERROR");
+    }
+  });
+
+  it("classifies genuine 'Unable to locate credentials' as NO_CREDENTIALS (correct)", async () => {
+    const stub = createStub({
+      stdout: "",
+      stderr: "Unable to locate credentials",
+      exitCode: 255,
+    });
+    try {
+      await iamRun({
+        op: "get-policy",
+        args: ["arn:aws:iam::aws:policy/AdministratorAccess"],
+        binary: stub,
+      });
+      expect(true).toBe(false);
+    } catch (e) {
+      expect(e).toBeInstanceOf(AxiError);
+      // Genuine no-creds error must be classified as NO_CREDENTIALS (or upgraded to
+      // NO_PROFILE_SELECTED if named profiles exist — both are correct).
+      const AUTH_CODES = new Set(["NO_CREDENTIALS", "NO_PROFILE_SELECTED"]);
       expect(AUTH_CODES.has((e as AxiError).code)).toBe(true);
     }
   });
