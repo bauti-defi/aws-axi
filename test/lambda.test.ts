@@ -17,7 +17,7 @@
  *   kms describe-key / logs describe-log-groups / iam get-role  → enrichment
  *   stubs returned by the same binary via $1 (service) + $2 (operation)
  */
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, beforeEach } from "bun:test";
 import { writeFileSync, chmodSync, rmSync, mkdtempSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -936,6 +936,37 @@ async function captureMain(
 // Revert-proof: remove the `if (hasQuery)` bypass in runInvoke → this fails.
 
 describe("lambda invoke --query bypass — captureMain", () => {
+  // ── Env isolation hooks ────────────────────────────────────────────────────
+  //
+  // captureMain saves/restores the env in an inline try/finally. When Bun
+  // abandons a timed-out test's promise, that finally may not run before the
+  // next test begins, leaking PATH into subsequent tests.
+  //
+  // These hooks are the authoritative cleanup: the framework guarantees they
+  // run even after a timeout, so captureMain's finally becomes belt-and-
+  // suspenders rather than the last line of defence.
+  const GUARDED_ENV_KEYS = ["PATH"] as const;
+
+  let savedEnvSnapshot: Partial<Record<string, string | undefined>> = {};
+
+  beforeEach(() => {
+    savedEnvSnapshot = {};
+    for (const key of GUARDED_ENV_KEYS) {
+      savedEnvSnapshot[key] = process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of GUARDED_ENV_KEYS) {
+      const saved = savedEnvSnapshot[key];
+      if (saved === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = saved;
+      }
+    }
+  });
+
   /**
    * Stub that simulates `aws lambda invoke` AWS CLI behaviour:
    *   - Always writes a payload JSON to the outfile (arg before --output).

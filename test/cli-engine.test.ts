@@ -8,7 +8,7 @@
  * Uses real stub `aws` binaries via the seam — no function mocks.
  * Uses the fake-svc fixture model via AWS_DATA_PATH injection.
  */
-import { describe, it, expect, afterEach } from "bun:test";
+import { describe, it, expect, afterEach, beforeEach } from "bun:test";
 import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -18,6 +18,40 @@ import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
 
 afterEach(() => {
   releaseStubBins();
+});
+
+// ── Env isolation hooks ───────────────────────────────────────────────────────
+//
+// captureMain saves/restores the env in an inline try/finally. When Bun
+// abandons a timed-out test's promise, that finally may not run before the
+// next test begins, leaking PATH or AWS_DATA_PATH into subsequent tests.
+//
+// These hooks are the authoritative cleanup: the framework guarantees they
+// run even after a timeout, so captureMain's finally becomes belt-and-
+// suspenders rather than the last line of defence.
+//
+// Keys enumerated here are the full set that any captureMain call in this
+// file may inject.
+const GUARDED_ENV_KEYS = ["AWS_DATA_PATH", "PATH"] as const;
+
+let savedEnvSnapshot: Partial<Record<string, string | undefined>> = {};
+
+beforeEach(() => {
+  savedEnvSnapshot = {};
+  for (const key of GUARDED_ENV_KEYS) {
+    savedEnvSnapshot[key] = process.env[key];
+  }
+});
+
+afterEach(() => {
+  for (const key of GUARDED_ENV_KEYS) {
+    const saved = savedEnvSnapshot[key];
+    if (saved === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = saved;
+    }
+  }
 });
 
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
