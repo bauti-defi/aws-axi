@@ -50,6 +50,22 @@ export interface EngineRunOptions {
 const DEFAULT_MAX_ITEMS = 50;
 
 /**
+ * Maps AWS CLI service names to their botocore model directory names when the
+ * two differ. Most services are identical (e.g. "sqs" → "sqs/", "ec2" → "ec2/");
+ * this table covers the exceptions.
+ *
+ * Known divergence: `aws s3api` exposes the raw S3 REST API (HeadObject,
+ * PutObject, etc.) but botocore's model lives under the `s3/` directory — there
+ * is no `s3api/` dir.  All s3api operations are present in the s3 model, so
+ * aliasing the model lookup is the complete fix. The alias applies ONLY to model
+ * lookup; the child-process argv still uses the original CLI name ("s3api")
+ * because that is the correct `aws` subcommand.
+ */
+const SERVICE_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  s3api: "s3",
+});
+
+/**
  * Convert a botocore PascalCase parameter name to its CLI --flag form.
  * "Bucket"    → "--bucket"
  * "QueueUrl"  → "--queue-url"
@@ -167,10 +183,15 @@ export async function engineRun(
   const { service, operation, context, binary, dataDir } = options;
   const maxItemsCap = options.maxItems ?? DEFAULT_MAX_ITEMS;
 
+  // Resolve botocore model name: some CLI service names differ from the
+  // botocore directory name. Use the alias for model lookup only; the wire
+  // call (awsArgs) always uses the original CLI service name.
+  const modelService = SERVICE_ALIASES[service] ?? service;
+
   // ── 1. Load service model ──────────────────────────────────────────────────
   let model: ServiceModel;
   try {
-    model = loadService(service, { dataDir });
+    model = loadService(modelService, { dataDir });
   } catch (err) {
     throw new AxiError(
       `Unknown service '${service}': ${err instanceof Error ? err.message : String(err)}`,

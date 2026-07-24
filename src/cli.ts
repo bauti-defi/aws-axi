@@ -71,6 +71,7 @@ examples:
   aws-axi lambda invoke --function-name my-function
   aws-axi sqs list-queues
   aws-axi rds describe-db-instances
+  aws-axi s3api head-object --bucket my-bucket --key my-key
 `;
 
 const COMMAND_HELP: Record<string, string> = {

@@ -1,0 +1,78 @@
+{
+  "version": "2.0",
+  "metadata": {
+    "apiVersion": "2006-03-01",
+    "serviceId": "S3"
+  },
+  "operations": {
+    "HeadObject": {
+      "name": "HeadObject",
+      "http": {
+        "method": "HEAD",
+        "requestUri": "/{Bucket}/{Key+}"
+      },
+      "input": {
+        "shape": "HeadObjectRequest"
+      },
+      "output": {
+        "shape": "HeadObjectOutput"
+      },
+      "errors": [
+        {
+          "shape": "NoSuchKey"
+        }
+      ]
+    },
+    "ListBuckets": {
+      "name": "ListBuckets",
+      "http": {
+        "method": "GET",
+        "requestUri": "/"
+      },
+      "output": {
+        "shape": "ListBucketsOutput"
+      }
+    }
+  },
+  "shapes": {
+    "HeadObjectRequest": {
+      "type": "structure",
+      "required": ["Bucket", "Key"],
+      "members": {
+        "Bucket": { "shape": "BucketName" },
+        "Key": { "shape": "ObjectKey" }
+      }
+    },
+    "HeadObjectOutput": {
+      "type": "structure",
+      "members": {
+        "ContentLength": { "shape": "ContentLength" },
+        "ContentType": { "shape": "ContentType" },
+        "ETag": { "shape": "ETag" }
+      }
+    },
+    "ListBucketsOutput": {
+      "type": "structure",
+      "members": {
+        "Buckets": { "shape": "BucketList" }
+      }
+    },
+    "NoSuchKey": {
+      "type": "structure",
+      "members": {},
+      "error": { "code": "NoSuchKey" }
+    },
+    "BucketName": { "type": "string" },
+    "ObjectKey": { "type": "string" },
+    "ContentLength": { "type": "long" },
+    "ContentType": { "type": "string" },
+    "ETag": { "type": "string" },
+    "BucketList": { "type": "list", "member": { "shape": "Bucket" } },
+    "Bucket": {
+      "type": "structure",
+      "members": {
+        "Name": { "shape": "BucketName" }
+      }
+    }
+  }
+}
