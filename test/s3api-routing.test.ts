@@ -29,7 +29,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AxiError } from "axi-sdk-js";
 import { engineRun, SERVICE_ALIASES } from "../src/engine.js";
-import { loadService, getOperation } from "../src/model.js";
+import { loadService, getOperation, findBotocoreDataDir } from "../src/model.js";
 import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
 
 afterEach(() => {
@@ -310,46 +310,67 @@ describe("deploy service routing — fixture", () => {
   });
 });
 
+// ── Prototype-safety regression ───────────────────────────────────────────────
+//
+// Guards `Object.hasOwn(SERVICE_ALIASES, service)` at src/engine.ts. Without
+// this guard, a plain object literal lookup returns inherited prototype members
+// (toString, constructor, etc.) as non-undefined values that propagate as
+// modelService names. Two defenses exist in the implementation (null-prototype
+// + Object.hasOwn), but neither is pinned by a test — so a future refactor
+// back to a plain object literal + bare lookup would silently reintroduce the
+// bug. This test makes the guard load-bearing.
+
+describe("SERVICE_ALIASES — prototype-safety (Y5)", () => {
+  it("prototype-chain keys do not resolve as botocore model names", async () => {
+    const protoKeys = ["toString", "constructor", "valueOf", "__proto__", "hasOwnProperty"];
+    for (const key of protoKeys) {
+      await expect(
+        engineRun({
+          service: key,
+          operation: "foo",
+          args: [],
+          dataDir: FIXTURES_DIR,
+          binary: "/bin/false",
+        }),
+      ).rejects.toMatchObject({ code: "USAGE_ERROR" });
+    }
+  });
+});
+
 // ── Live-botocore tests — each alias against the real installed botocore tree ─
 //
 // These tests omit `dataDir` so they hit the real botocore data directory
-// discovered from the installed `aws` CLI. They skip gracefully when the CLI
-// is absent. Their purpose: lock the alias → real dir mapping against the
-// actual on-disk tree so a botocore-side rename surfaces as RED CI, not a
-// silent production breakage.
+// discovered from the installed `aws` CLI.
+//
+// Design:
+//   - `findBotocoreDataDir()` is called ONCE outside the tests. The ONLY reason
+//     to skip is that the `aws` CLI is absent. Any other failure (renamed dir,
+//     missing model) must propagate → RED, not be swallowed.
+//   - We iterate `Object.entries(SERVICE_ALIASES)` so the live test set
+//     auto-tracks the alias table — adding an alias never needs a parallel
+//     test line.
+//   - `it.skip` produces a loud "UNVERIFIED" marker in CI logs rather than a
+//     silent pass that is indistinguishable from a verified result.
+
+// Probe once for the CLI outside all tests. "CLI absent" is the sole tolerated
+// skip reason; every other error (renamed/missing model dir) must throw RED.
+let liveDataDir: string | undefined;
+try {
+  liveDataDir = findBotocoreDataDir();
+} catch {
+  liveDataDir = undefined;
+}
 
 describe("SERVICE_ALIASES — live botocore resolution", () => {
-  it("s3api alias: loadService('s3') resolves HeadObject with required Bucket + Key", () => {
-    let s3Model;
-    try {
-      s3Model = loadService(SERVICE_ALIASES["s3api"] as string);
-    } catch {
-      // aws CLI absent — skip
-      return;
+  if (liveDataDir === undefined) {
+    it.skip("SKIPPED: aws CLI not installed — live alias mapping is UNVERIFIED", () => {});
+  } else {
+    for (const [cliName, modelDir] of Object.entries(SERVICE_ALIASES)) {
+      it(`${cliName} → ${modelDir}/ resolves in the live botocore tree`, () => {
+        // No try/catch — model-missing errors must go RED.
+        const model = loadService(modelDir, { dataDir: liveDataDir });
+        expect(model.operations.size).toBeGreaterThan(0);
+      });
     }
-    const op = getOperation(s3Model, "HeadObject");
-    expect(op.required).toEqual(expect.arrayContaining(["Bucket", "Key"]));
-  });
-
-  it("configservice alias: loadService('config') resolves DescribeConfigurationRecorders", () => {
-    let configModel;
-    try {
-      configModel = loadService(SERVICE_ALIASES["configservice"] as string);
-    } catch {
-      return;
-    }
-    const op = getOperation(configModel, "DescribeConfigurationRecorders");
-    expect(op.name).toBe("DescribeConfigurationRecorders");
-  });
-
-  it("deploy alias: loadService('codedeploy') resolves ListApplications", () => {
-    let deployModel;
-    try {
-      deployModel = loadService(SERVICE_ALIASES["deploy"] as string);
-    } catch {
-      return;
-    }
-    const op = getOperation(deployModel, "ListApplications");
-    expect(op.name).toBe("ListApplications");
-  });
+  }
 });
