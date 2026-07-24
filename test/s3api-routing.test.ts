@@ -29,7 +29,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { AxiError } from "axi-sdk-js";
 import { engineRun, SERVICE_ALIASES } from "../src/engine.js";
-import { loadService, getOperation, findBotocoreDataDir } from "../src/model.js";
+import { loadService, findBotocoreDataDir } from "../src/model.js";
 import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
 
 afterEach(() => {
@@ -312,27 +312,29 @@ describe("deploy service routing — fixture", () => {
 
 // ── Prototype-safety regression ───────────────────────────────────────────────
 //
-// Guards `Object.hasOwn(SERVICE_ALIASES, service)` at src/engine.ts. Without
-// this guard, a plain object literal lookup returns inherited prototype members
-// (toString, constructor, etc.) as non-undefined values that propagate as
-// modelService names. Two defenses exist in the implementation (null-prototype
-// + Object.hasOwn), but neither is pinned by a test — so a future refactor
-// back to a plain object literal + bare lookup would silently reintroduce the
-// bug. This test makes the guard load-bearing.
+// Pins the shape of SERVICE_ALIASES (null prototype, frozen) so that a future
+// refactor back to a plain object literal is immediately visible.
+//
+// Implementation has two defences:
+//   1. Object.create(null) — severs the prototype chain entirely
+//   2. Object.hasOwn guard at src/engine.ts:211 — explicit before lookup
+//
+// Mutant note: dropping Object.hasOwn alone (M1) is an equivalent mutant —
+// Object.create(null) already makes the hasOwn guard redundant. Pinning the
+// TABLE SHAPE (null prototype + frozen) is the correct ask: it kills M2 (plain
+// literal, keep hasOwn) and M3 (plain literal + bare lookup), which are the
+// mutations that actually reintroduce the prototype-injection bug.
 
 describe("SERVICE_ALIASES — prototype-safety (Y5)", () => {
-  it("prototype-chain keys do not resolve as botocore model names", async () => {
+  it("SERVICE_ALIASES has a null prototype and is frozen", () => {
+    expect(Object.getPrototypeOf(SERVICE_ALIASES)).toBeNull();
+    expect(Object.isFrozen(SERVICE_ALIASES)).toBe(true);
+  });
+
+  it("inherited Object.prototype keys are undefined in the table", () => {
     const protoKeys = ["toString", "constructor", "valueOf", "__proto__", "hasOwnProperty"];
     for (const key of protoKeys) {
-      await expect(
-        engineRun({
-          service: key,
-          operation: "foo",
-          args: [],
-          dataDir: FIXTURES_DIR,
-          binary: "/bin/false",
-        }),
-      ).rejects.toMatchObject({ code: "USAGE_ERROR" });
+      expect((SERVICE_ALIASES as unknown as Record<string, unknown>)[key]).toBeUndefined();
     }
   });
 });
