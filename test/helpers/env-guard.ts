@@ -47,6 +47,21 @@
 import { beforeEach, afterEach } from "bun:test";
 
 /**
+ * Compute the value to restore process.exitCode to after a test.
+ *
+ * Exported for direct unit testing — the ambient-state approach (GUARD-3/4)
+ * cannot detect the missing `?? 0` when the full suite runs, because earlier
+ * captureMain files leave process.exitCode === 0 rather than undefined.
+ * Testing this pure function directly is order-independent and cannot be
+ * neutralised by any preceding test's side effects.
+ *
+ * @param snapshot - the exitCode captured in beforeEach
+ * @returns the value to assign to process.exitCode
+ */
+export const restoreExitCode = (snapshot: number | undefined): number =>
+  snapshot ?? 0;
+
+/**
  * Register beforeEach/afterEach hooks that snapshot and restore the full
  * process.env (and process.exitCode) around each test.
  *
@@ -80,9 +95,8 @@ export function useEnvGuard(): void {
     // Restore exit code (captureMain also resets this, but its finally may not
     // run on timeout — belt-and-suspenders here too).
     // NOTE: assigning `undefined` is a no-op in Bun — it does NOT clear a
-    // previously-set non-zero code. Use 0 (the clean baseline) when the
-    // snapshot was undefined. captureMain documents the same trap with:
-    // "Reset to 0 (NOT undefined — that is a no-op in Bun)".
-    process.exitCode = exitCodeSnapshot ?? 0;
+    // previously-set non-zero code. restoreExitCode() encapsulates the `?? 0`
+    // logic and is tested directly (pure-function test, order-independent).
+    process.exitCode = restoreExitCode(exitCodeSnapshot);
   });
 }
