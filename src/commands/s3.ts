@@ -32,17 +32,47 @@ import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrue, has
 export const S3_PAGE_SIZE = 20;
 
 /**
- * Boolean flags for the s3 overlay's write paths (cp, rm).
+ * Boolean flags that the cp/rm overlay owns AND re-injects as bare flags when
+ * the user enables them.  `collectPassthroughFlags` strips every owned bool flag;
+ * `reInjectOwnedBoolFlags` appends back the bare form for each one that
+ * `flagIsTrue` returns true for.
  *
- * These flags take no separate value token in the default (bare) case but
- * accept a recognised boolean literal in two-arg form (e.g. `--dryrun false`).
- * Passed to `extractPositionals` so that boolean literals are not mistaken for
- * S3 URI / path positionals when the flag appears before the positionals.
+ * --dryrun is NOT listed here: it is threaded through the `dryRun` option on
+ * `s3CpRun`/`s3RmRun` rather than re-injected into passthrough at this layer.
+ *
+ * This set is the **single source of truth** for all re-injectable owned bool
+ * flags.  Adding a flag here automatically enrolls it in both
+ * `extractPositionals` (via `S3_BOOL_FLAGS` below) and `collectPassthroughFlags`
+ * at both the cp and rm dispatch sites, eliminating the three-way sync risk
+ * that caused #65 / #66 / #84.
+ */
+const S3_CP_RM_REINJECT_FLAGS: ReadonlySet<string> = new Set([
+  "--recursive",
+  "--quiet",
+  "--only-show-errors",
+  "--no-progress",
+  "--follow-symlinks",
+]);
+
+/**
+ * All overlay-owned boolean flags for the cp/rm dispatch paths.
+ *
+ * Passed to `extractPositionals` so that recognised boolean literals like
+ * `false` / `0` / `no` are consumed as the flag's value rather than being
+ * mistaken for S3 URI / path positionals.
+ *
+ * Also passed to `collectPassthroughFlags` as `ownedBoolFlags` so these flags
+ * are stripped from passthrough without the heuristic eating the following token
+ * (which would forward a literal `false` to the child `aws`, causing
+ * "Unknown options: false" — the bug fixed in #84).
  *
  * ADR-0002: real `aws s3 cp --dryrun false` hard-errors, but aws-axi accepts
- * it as a superset extension and honours `false` as the flag's value.
+ * the two-arg form as a superset extension and honours `false` as the flag's value.
  */
-const S3_BOOL_FLAGS = new Set(["--dryrun", "--recursive"]);
+const S3_BOOL_FLAGS: ReadonlySet<string> = new Set([
+  "--dryrun",
+  ...S3_CP_RM_REINJECT_FLAGS,
+]);
 
 // ---------------------------------------------------------------------------
 // Internal helpers
@@ -96,6 +126,36 @@ function stripPositionals(args: readonly string[], ...positionals: (string | und
     if (idx !== -1) remaining.splice(idx, 1);
   }
   return remaining;
+}
+
+/**
+ * Re-inject overlay-owned bool flags that the user enabled into passthrough.
+ *
+ * `collectPassthroughFlags` strips every flag in `ownedBoolFlags` entirely.
+ * This helper appends back the bare flag (no value token) for each one in
+ * `reinjectableFlags` where `flagIsTrue(args, flag)` is true.
+ *
+ * Flags with a false / absent value are not appended — the literal "false" never
+ * reaches the child `aws`, and the flag is simply absent (the user said
+ * "do not enable this").
+ *
+ * This is the single injection point for all re-injectable bool flags on the
+ * cp/rm paths.  Adding a flag to `S3_CP_RM_REINJECT_FLAGS` is sufficient;
+ * there is no per-flag injection boilerplate at the dispatch sites.
+ */
+function reInjectOwnedBoolFlags(
+  passthrough: readonly string[],
+  args: readonly string[],
+  reinjectableFlags: ReadonlySet<string>,
+): readonly string[] {
+  let result: string[] | undefined;
+  for (const flag of reinjectableFlags) {
+    if (flagIsTrue(args, flag)) {
+      result ??= [...passthrough];
+      result.push(flag);
+    }
+  }
+  return result ?? passthrough;
 }
 
 /**
@@ -869,25 +929,22 @@ export async function s3Command(
       // (i.e. perform the real copy).  hasFlag would treat --dryrun=false as true,
       // silently performing a dry-run and reporting success with no copy on the wire.
       const dryRun = flagIsTrue(rest, "--dryrun");
-      // --recursive is a boolean flag for s3 cp (directory tree copy).  Read it
-      // before collectPassthroughFlags so we can re-inject it as a bare flag when
-      // truthy.  Without this, --recursive false would be forwarded verbatim and
-      // real aws would reject it with "Unknown options: false" (#66).
-      const recursive = flagIsTrue(rest, "--recursive");
       // Strip identified positionals first. Once bare positionals are absent,
       // the heuristic safely identifies all remaining bare tokens as flag values.
-      // --dryrun and --recursive are boolean overlay flags (no value follows);
-      // pass both in ownedBoolFlags so collectPassthroughFlags does not consume
-      // the token after --recursive as its value.
+      // S3_BOOL_FLAGS is passed as ownedBoolFlags so collectPassthroughFlags does
+      // not consume the token after a bool flag as its value — preventing the
+      // literal "false" from being forwarded to the child aws (#66, #84).
       const argsForPassthrough = stripPositionals(rest, source, destination);
-      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, [], ["--dryrun", "--recursive"]);
-      // Re-inject --recursive as a bare flag when the user enabled it.
-      // collectPassthroughFlags stripped it from rawPassthrough; we add it back
-      // here so the child aws sees the flag it understands (no "true"/"false" value).
-      const passthroughWithRecursive = recursive ? [...rawPassthrough, "--recursive"] : rawPassthrough;
+      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, [], S3_BOOL_FLAGS);
+      // Re-inject each re-injectable bool flag as a bare form when the user enabled
+      // it.  collectPassthroughFlags stripped them; reInjectOwnedBoolFlags adds back
+      // the bare flag for every flag in S3_CP_RM_REINJECT_FLAGS where flagIsTrue.
+      // This covers --recursive, --quiet, --only-show-errors, --no-progress, and
+      // --follow-symlinks in one DRY pass.
+      const passthroughWithBoolFlags = reInjectOwnedBoolFlags(rawPassthrough, rest, S3_CP_RM_REINJECT_FLAGS);
       // s3 cp uses awsExec (text output) — --query is forwarded verbatim but
       // there is no overlay projection to bypass, so hasQuery is intentionally unused.
-      const { passthrough, hasQuery } = buildPassthrough(passthroughWithRecursive);
+      const { passthrough, hasQuery } = buildPassthrough(passthroughWithBoolFlags);
       void hasQuery;
       const result = await s3CpRun({ source, destination, dryRun, passthrough, context, binary });
       return result as unknown as Record<string, unknown>;
@@ -910,24 +967,21 @@ export async function s3Command(
       // (i.e. perform the real delete).  hasFlag would treat --dryrun=false as true,
       // silently skipping the delete and reporting success (fails safe but still wrong).
       const dryRun = flagIsTrue(rest, "--dryrun");
-      // --recursive is a boolean flag for s3 rm (prefix tree deletion).  Read it
-      // before collectPassthroughFlags so we can re-inject it as a bare flag when
-      // truthy.  Without this, --recursive false would be forwarded verbatim and
-      // real aws would reject it with "Unknown options: false" (#66).
-      const recursive = flagIsTrue(rest, "--recursive");
       // Strip the target URI positional to prevent heuristic from eating it.
-      // --dryrun and --recursive are boolean overlay flags (no value follows);
-      // pass both in ownedBoolFlags so collectPassthroughFlags does not consume
-      // the token after --recursive as its value.
+      // S3_BOOL_FLAGS is passed as ownedBoolFlags so collectPassthroughFlags does
+      // not consume the token after a bool flag as its value — preventing the
+      // literal "false" from being forwarded to the child aws (#66, #84).
       const argsForPassthrough = stripPositionals(rest, target);
-      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, [], ["--dryrun", "--recursive"]);
-      // Re-inject --recursive as a bare flag when the user enabled it.
-      // collectPassthroughFlags stripped it from rawPassthrough; we add it back
-      // here so the child aws sees the flag it understands (no "true"/"false" value).
-      const passthroughWithRecursive = recursive ? [...rawPassthrough, "--recursive"] : rawPassthrough;
+      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, [], S3_BOOL_FLAGS);
+      // Re-inject each re-injectable bool flag as a bare form when the user enabled
+      // it.  collectPassthroughFlags stripped them; reInjectOwnedBoolFlags adds back
+      // the bare flag for every flag in S3_CP_RM_REINJECT_FLAGS where flagIsTrue.
+      // This covers --recursive, --quiet, --only-show-errors, --no-progress, and
+      // --follow-symlinks in one DRY pass.
+      const passthroughWithBoolFlags = reInjectOwnedBoolFlags(rawPassthrough, rest, S3_CP_RM_REINJECT_FLAGS);
       // s3 rm uses awsExec (text output) — --query is forwarded verbatim but
       // there is no overlay projection to bypass, so hasQuery is intentionally unused.
-      const { passthrough, hasQuery } = buildPassthrough(passthroughWithRecursive);
+      const { passthrough, hasQuery } = buildPassthrough(passthroughWithBoolFlags);
       void hasQuery;
       const result = await s3RmRun({ target, dryRun, passthrough, context, binary });
       return result as unknown as Record<string, unknown>;

@@ -150,8 +150,14 @@ generic engine. Two deliberate named exceptions exist for `s3 ls` (see below).
 > Default: `s3 ls s3://b/` adds `--delimiter /` (matching real `aws s3 ls` behavior) and surfaces
 > `CommonPrefixes` as `prefixes[]`. Folder-only buckets are never reported as empty.
 >
-> `s3 cp` and `s3 rm` use the high-level `aws s3` commands, so `--recursive`, `--exclude`,
-> `--include`, `--sse`, and `--storage-class` are valid passthrough for those.
+> `s3 cp` and `s3 rm` use the high-level `aws s3` commands, so `--recursive`, `--quiet`,
+> `--only-show-errors`, `--no-progress`, `--follow-symlinks`, `--exclude`, `--include`,
+> `--sse`, and `--storage-class` are valid passthrough for those.
+>
+> **Value-aware boolean flags (cp/rm):** `--dryrun`, `--recursive`, `--quiet`,
+> `--only-show-errors`, `--no-progress`, and `--follow-symlinks` accept an optional
+> boolean value token (`--flag false` suppresses the flag; `--flag` / `--flag true`
+> enables it). The literal value is never forwarded to the child `aws` process.
 
 | Service          | Command            | Enriched overlay operations                                                                  | Everything else                    |
 | ---------------- | ------------------ | -------------------------------------------------------------------------------------------- | ---------------------------------- |

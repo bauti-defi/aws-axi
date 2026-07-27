@@ -100,8 +100,26 @@ to the underlying `aws s3api` (for `ls`, `head-object`, `create-bucket`) or
 `aws s3` (for `cp`, `rm`) invocation.
 
 **S3 flag contract.** `s3 cp` and `s3 rm` use `aws s3` high-level commands, so
-`aws s3`-level flags (`--recursive`, `--sse`, `--storage-class`, `--exclude`,
+`aws s3`-level flags (`--recursive`, `--quiet`, `--only-show-errors`,
+`--no-progress`, `--follow-symlinks`, `--sse`, `--storage-class`, `--exclude`,
 `--include`) are valid passthrough for those sub-commands.
+
+**Value-aware bool flags on cp/rm.** Several `aws s3` boolean flags are owned by
+the overlay to implement the ADR-0002 superset extension: real `aws s3` does not
+accept a value token for these flags, but aws-axi accepts the two-arg form
+(`--flag false` / `--flag true`) and interprets it without forwarding the literal
+value to the child process (which would cause "Unknown options: false").
+
+| Flag | Disposition on cp and rm |
+|---|---|
+| `--dryrun` | Value-aware: `--dryrun` / `--dryrun true` → previews without mutating; `--dryrun false` → performs the real operation. Threaded through the `dryRun` option on `s3CpRun` / `s3RmRun`; not forwarded via passthrough. |
+| `--recursive` | Value-aware: bare or `true` → bare `--recursive` forwarded to child; `false` → omitted. |
+| `--quiet` | Value-aware: bare or `true` → bare `--quiet` forwarded to child; `false` → omitted. |
+| `--only-show-errors` | Value-aware: bare or `true` → bare `--only-show-errors` forwarded to child; `false` → omitted. |
+| `--no-progress` | Value-aware: bare or `true` → bare `--no-progress` forwarded to child; `false` → omitted. |
+| `--follow-symlinks` | Value-aware: bare or `true` → bare `--follow-symlinks` forwarded to child; `false` → omitted. |
+
+All other `aws s3 cp` / `aws s3 rm` flags are forwarded verbatim via passthrough.
 
 `s3 ls` and `s3 head-object` rewrite to `s3api` operations. The superset invariant
 holds for every flag that the underlying `s3api` operation accepts. Two categories
