@@ -38,7 +38,7 @@ import { resolveSubnet } from "../resolve/subnet.js";
 import { resolveLogGroup } from "../resolve/log-group.js";
 import { resolveKey } from "../resolve/key.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough, extractFlag, extractPositionals } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, extractFlag, resolveKeyArg } from "../overlay-args.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -193,10 +193,12 @@ Any flag accepted by the underlying \`aws lambda\` operation (e.g.
 restrict the input contract, only enrich the output.
 
 subcommands (enriched overlays):
-  list-functions              List Lambda functions (default when omitted)
-  get-function <name>         Describe a function including code location
-  get-function-configuration <name>  Configuration only (no code URL)
-  invoke --function-name <n>  Invoke a function synchronously
+  list-functions                           List Lambda functions (default when omitted)
+  get-function <name>                      Describe a function including code location
+  get-function --function-name <name>      flag form (matches real aws)
+  get-function-configuration <name>        Configuration only (no code URL)
+  get-function-configuration --function-name <name>  flag form (matches real aws)
+  invoke --function-name <n>               Invoke a function synchronously
   (any other lambda subcommand falls through to the generic engine — run \`aws lambda help\` to list all)
 
 flags (overlay-specific):
@@ -226,8 +228,10 @@ examples:
   aws-axi lambda list-functions --max-items 10
   aws-axi lambda list-functions --next-token AQE...
   aws-axi lambda get-function my-function
-  aws-axi lambda get-function my-function --qualifier v1  # forwarded to aws
+  aws-axi lambda get-function --function-name my-function  # flag form (matches real aws)
+  aws-axi lambda get-function my-function --qualifier v1   # forwarded to aws
   aws-axi lambda get-function-configuration my-function
+  aws-axi lambda get-function-configuration --function-name my-function
   aws-axi lambda invoke --function-name my-function --payload '{"key":"val"}'
   aws-axi lambda invoke --function-name my-function --log-type Tail
 `;
@@ -423,20 +427,27 @@ async function runListFunctions(
 async function runGetFunction(
   options: LambdaRunOptions,
 ): Promise<{ function: LambdaFunctionSummary } | Record<string, unknown>> {
-  const positionals = extractPositionals(options.args);
-  if (positionals.length === 0) {
-    throw new AxiError(
-      "get-function requires a function name or ARN",
-      "USAGE_ERROR",
-      ["Usage: aws-axi lambda get-function <function-name>"],
-    );
-  }
+  // Accept both the positional form ("my-function") and the flag form
+  // ("--function-name my-function"). The flag form is what real `aws` uses;
+  // the positional is an aws-axi extension that is kept for back-compat.
+  // --function-name is added to ownedFlagNames so collectPassthroughFlags
+  // excludes it from passthrough (it is forwarded explicitly in awsArgs below).
+  // See also: overlay-args.ts resolveKeyArg JSDoc re: #63.
+  const fnName = resolveKeyArg({
+    args: options.args,
+    flagName: "--function-name",
+    label: "get-function function name",
+    examples: [
+      "Example: aws-axi lambda get-function my-function",
+      "Example: aws-axi lambda get-function --function-name my-function",
+    ],
+  });
 
-  const fnName = positionals[0] as string;
   const runOpts = toRunOpts(options);
 
   // Forward unknown flags verbatim (superset contract — e.g. --qualifier).
-  const rawPassthrough = collectPassthroughFlags(options.args, [], undefined, { service: "lambda", operation: "get-function" });
+  // Positional is skipped as a bare token; --function-name is owned and excluded.
+  const rawPassthrough = collectPassthroughFlags(options.args, ["--function-name"], undefined, { service: "lambda", operation: "get-function" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   if (hasQuery) {
@@ -458,20 +469,27 @@ async function runGetFunction(
 async function runGetFunctionConfiguration(
   options: LambdaRunOptions,
 ): Promise<{ function: LambdaFunctionSummary } | Record<string, unknown>> {
-  const positionals = extractPositionals(options.args);
-  if (positionals.length === 0) {
-    throw new AxiError(
-      "get-function-configuration requires a function name or ARN",
-      "USAGE_ERROR",
-      ["Usage: aws-axi lambda get-function-configuration <function-name>"],
-    );
-  }
+  // Accept both the positional form ("my-function") and the flag form
+  // ("--function-name my-function"). The flag form is what real `aws` uses;
+  // the positional is an aws-axi extension that is kept for back-compat.
+  // --function-name is added to ownedFlagNames so collectPassthroughFlags
+  // excludes it from passthrough (it is forwarded explicitly in awsArgs below).
+  // See also: overlay-args.ts resolveKeyArg JSDoc re: #63.
+  const fnName = resolveKeyArg({
+    args: options.args,
+    flagName: "--function-name",
+    label: "get-function-configuration function name",
+    examples: [
+      "Example: aws-axi lambda get-function-configuration my-function",
+      "Example: aws-axi lambda get-function-configuration --function-name my-function",
+    ],
+  });
 
-  const fnName = positionals[0] as string;
   const runOpts = toRunOpts(options);
 
   // Forward unknown flags verbatim (superset contract — e.g. --qualifier).
-  const rawPassthrough = collectPassthroughFlags(options.args, [], undefined, { service: "lambda", operation: "get-function-configuration" });
+  // Positional is skipped as a bare token; --function-name is owned and excluded.
+  const rawPassthrough = collectPassthroughFlags(options.args, ["--function-name"], undefined, { service: "lambda", operation: "get-function-configuration" });
   const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
 
   if (hasQuery) {
