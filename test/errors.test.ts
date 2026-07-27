@@ -493,10 +493,13 @@ describe("parseAwsError — NO_REGION does NOT overlap with AUTH_EXPIRED", () =>
     expect(result.code).toBe("AUTH_EXPIRED");
   });
 
-  it("botocore body echoing region text stays SERVICE_CLIENT_ERROR (anchors load-bearing)", () => {
-    // Without ^ anchors, a botocore error whose message body mentions region
-    // configuration would flip to NO_REGION. The normalization strips \n and
-    // prefix, then anchored patterns prevent internal matches.
+  it("botocore-shaped stderr never reaches the NO_REGION check (branch precedence)", () => {
+    // This input matches BOTOCORE_RE and returns SERVICE_CLIENT_ERROR before the
+    // NO_REGION check is ever reached — the guard here is branch ordering, not the
+    // ^ anchor. This test fires only under the *conjunction* of (^ removed AND the
+    // NO_REGION block hoisted above BOTOCORE_RE); either mutation alone leaves it
+    // green. It is kept because that conjunction is still worth guarding, but it
+    // does NOT serve as an anchor guard on its own.
     const result = parseAwsError(
       "An error occurred (InvalidParameterValue) when calling the RunInstances operation: " +
         "You must specify a region for this parameter",
@@ -504,6 +507,23 @@ describe("parseAwsError — NO_REGION does NOT overlap with AUTH_EXPIRED", () =>
     );
     expect(result.code).toBe("SERVICE_CLIENT_ERROR");
     expect(result.code).not.toBe("NO_REGION");
+  });
+
+  it("^ anchor in NO_REGION_PATTERNS is load-bearing: mid-string region wording stays UNKNOWN", () => {
+    // Synthetic/adversarial — NOT a byte-exact fixture capture; do NOT add to test/fixtures/.
+    // The "Credentials were refreshed..." prefix is a real aws-cli error preamble; the
+    // trailing region clause is fabricated to place "You must specify a region" mid-string
+    // rather than at the start of the normalized form. Without the ^ anchor this input
+    // flips from UNKNOWN/255 to NO_REGION/252 — the regression this test guards against.
+    // (Verified: removing ^ from NO_REGION_PATTERNS turns this test RED while the
+    //  botocore-precedence test above stays green.)
+    const result = parseAwsError(
+      "\naws: [ERROR]: Credentials were refreshed, but the refreshed credentials are still expired. You must specify a region to continue.",
+      255,
+    );
+    expect(result.code).toBe("UNKNOWN");
+    expect(result.code).not.toBe("NO_REGION");
+    expect(awsExitCode(result.code)).toBe(255);
   });
 });
 

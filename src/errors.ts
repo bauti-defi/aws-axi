@@ -100,9 +100,13 @@ const SSO_AUTH_EXPIRED_PATTERNS: RegExp[] = [
  * the <Op> operation:" — it falls through to this check. The 2.33.x form never
  * matched BOTOCORE_RE either. Both are caught by the single anchored pattern below.
  *
- * ^ is load-bearing. Removing it would cause region wording inside botocore
- * error bodies (e.g. "You must specify a region for this resource" inside an
- * InvalidParameterValue body) to flip from SERVICE_CLIENT_ERROR/254 to NO_REGION.
+ * ^ is load-bearing for *non-botocore* stderr. Botocore-shaped errors (those
+ * containing "when calling the <Op> operation:") are caught unconditionally by
+ * BOTOCORE_RE above and return before reaching this check — they are protected
+ * by branch ordering, not by the anchor. For non-botocore messages that merely
+ * mention region wording mid-string (e.g. a stale-credentials message followed
+ * by "You must specify a region", an endpoint error, a usage dump) the anchor
+ * prevents an incorrect UNKNOWN/255 → NO_REGION/252 flip.
  * The (?:An error occurred \(NoRegion\): )? optional prefix is specific enough
  * that no other message body can false-positive through it.
  *
@@ -113,7 +117,7 @@ const SSO_AUTH_EXPIRED_PATTERNS: RegExp[] = [
  * Adversarial invariants (tested in test/errors.test.ts):
  *   - region message (both forms) must never classify as AUTH_EXPIRED
  *   - SSO expired message must never classify as NO_REGION
- *   - botocore body echoing region wording must stay SERVICE_CLIENT_ERROR
+ *   - botocore body echoing region wording must stay SERVICE_CLIENT_ERROR (branch precedence, not anchor)
  */
 const NO_REGION_PATTERNS: RegExp[] = [
   /^(?:An error occurred \(NoRegion\): )?You must specify a region/i,
