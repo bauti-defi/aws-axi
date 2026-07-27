@@ -242,7 +242,15 @@ export function parseAwsError(
   }
 
   // ── usage/validation errors ────────────────────────────────────────────
-  if (exitCode === 252 || /^usage:/i.test(stderr)) {
+  // exit 252 is the sole classifier: the aws CLI argument-parser exits 252 on
+  // every validation failure. No stderr anchor is reliable — every aws stderr
+  // begins with a bare \n, so a raw /^usage:/i test can never match the start
+  // of the string. The "usage: aws..." preamble only appears on *some* 252
+  // exits (e.g. bad --instance-type); other 252 exits emit "Unknown options:"
+  // or "[ERROR]: argument …" with no usage line at all. Empirically verified
+  // across 10+ error shapes on aws-cli 2.33.13 — all produced exit 252; none
+  // produced "usage:" text with any other exit code.
+  if (exitCode === 252) {
     return {
       code: "USAGE_ERROR",
       botoCode: undefined,
