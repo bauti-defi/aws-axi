@@ -137,7 +137,7 @@ generic engine. Two deliberate named exceptions exist for `s3 ls` (see below).
 >
 > | Flag | No URI (list-buckets) | With URI (list-objects-v2) |
 > |---|---|---|
-> | `--recursive` | USAGE_ERROR (bare or `=true`); `=false` honored silently (no-op — bucket listing is never recursive) | **Translated**: drops `--delimiter /`, returning all nested keys |
+> | `--recursive` | USAGE_ERROR (any form, including `=false` — bucket listing has no recursion concept; real `aws` rejects `--recursive=false` outright) | **Translated**: drops `--delimiter /`, returning all nested keys |
 > | `--human-readable` | USAGE_ERROR | USAGE_ERROR *(named exception: display-only; silent absorb would mislead)* |
 > | `--summarize` | USAGE_ERROR | USAGE_ERROR *(named exception: same reason)* |
 > | `--page-size` | forwarded | forwarded |

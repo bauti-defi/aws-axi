@@ -200,37 +200,40 @@ describe("wire: s3 cp/rm — unrecognized =-form bool values → USAGE_ERROR (#5
 });
 
 // ---------------------------------------------------------------------------
-// Part 1 — --recursive=false coherence fix
+// --recursive loud-error behavior (operator decision: Part 1 NOT taken)
 // ---------------------------------------------------------------------------
 //
-// BEFORE fix: `hasFlag(rest, "--recursive")` detects the PRESENCE of --recursive
-// regardless of its value, so `--recursive=false` on the no-URI and head-object
-// paths threw USAGE_ERROR even though the user explicitly said "don't recurse".
+// The `--recursive` guard on bare `s3 ls` (no URI) and `s3 head-object` uses
+// `hasFlag` (presence-only), NOT `flagIsTrue`. ANY appearance of `--recursive`
+// — including `--recursive=false` — throws USAGE_ERROR on those paths.
 //
-// AFTER fix: `flagIsTrue(rest, "--recursive")` is value-aware:
-//   --recursive=false → false → guard condition is false → no throw
-//   --recursive       → true  → guard condition is true  → USAGE_ERROR (correct)
-//   --recursive=true  → true  → guard condition is true  → USAGE_ERROR (correct)
+// Rationale (operator directive):
+//   Loud-error principle: if the flag appears at all on a path where recursion
+//   has no meaning, the caller has a misconception that should surface immediately,
+//   not be silently absorbed. Real `aws` rejects `--recursive=false` outright.
+//   The #57 Part 2 hard-error on unrecognized =-form values also fires for
+//   `--recursive=off` before the path guard even runs.
 //
-// Coherence: all three paths now agree: `--recursive=false` is always a no-op
-// (the default anyway); `--recursive` / `--recursive=true` errors only when
-// recursion is inapplicable (no-URI ls, head-object).
+// The `s3 ls s3://bucket/ --recursive=false` case (prefix path) still works:
+// that path uses `flagIsTrue`, so `=false` → recursive=false → delimiter kept.
 
-describe("Part 1: --recursive=false coherence across s3 ls paths (#57)", () => {
-  it("s3 ls --recursive=false (no URI): honors false → no USAGE_ERROR, bucket list proceeds", async () => {
-    // Before fix: hasFlag detected presence → USAGE_ERROR
-    // After fix: flagIsTrue returns false → guard is false → no throw → proceeds
-    const binary = listBucketsStub();
+describe("--recursive loud-error on s3 ls (no URI) and head-object", () => {
+  // ── s3 ls (no URI) ──────────────────────────────────────────────────────────
 
-    const result = await s3Command(["ls", "--recursive=false"], undefined, binary);
-    // Resolved with a valid result (not thrown)
-    expect(result).toBeDefined();
-    // The bucket list path is taken (no objects, no prefixes, no target key)
-    expect(result).toHaveProperty("buckets");
+  it("s3 ls --recursive=false (no URI): USAGE_ERROR — any --recursive form is an error here", async () => {
+    // Operator decision: `--recursive=false` on the no-URI path still loud-errors.
+    // hasFlag detects presence regardless of value; real aws rejects this form outright.
+    let thrown: unknown;
+    try {
+      await s3Command(["ls", "--recursive=false"], undefined);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeDefined();
+    expect((thrown as { code?: string }).code).toBe("USAGE_ERROR");
   });
 
-  it("s3 ls --recursive (no URI): bare flag still throws USAGE_ERROR (correct behavior unchanged)", async () => {
-    // --recursive with no value → flagIsTrue returns true → USAGE_ERROR (still correct)
+  it("s3 ls --recursive (no URI): USAGE_ERROR (unchanged — bare flag still errors)", async () => {
     let thrown: unknown;
     try {
       await s3Command(["ls", "--recursive"], undefined);
@@ -241,8 +244,7 @@ describe("Part 1: --recursive=false coherence across s3 ls paths (#57)", () => {
     expect((thrown as { code?: string }).code).toBe("USAGE_ERROR");
   });
 
-  it("s3 ls --recursive=true (no URI): explicit true still throws USAGE_ERROR (correct)", async () => {
-    // The user wants recursion, which requires a URI → USAGE_ERROR
+  it("s3 ls --recursive=true (no URI): USAGE_ERROR (unchanged — explicit true errors)", async () => {
     let thrown: unknown;
     try {
       await s3Command(["ls", "--recursive=true"], undefined);
@@ -253,22 +255,37 @@ describe("Part 1: --recursive=false coherence across s3 ls paths (#57)", () => {
     expect((thrown as { code?: string }).code).toBe("USAGE_ERROR");
   });
 
-  it("s3 head-object --recursive=false: honors false → no USAGE_ERROR, object fetch proceeds", async () => {
-    // Before fix: hasFlag detected presence → USAGE_ERROR
-    // After fix: flagIsTrue returns false → no throw → proceeds to head-object
-    const binary = headObjectStub();
-
-    const result = await s3Command(
-      ["head-object", "--bucket", "my-bucket", "--key", "path/to/file.txt", "--recursive=false"],
-      undefined,
-      binary,
-    );
-    expect(result).toBeDefined();
-    expect(result).toHaveProperty("contentType");
+  it("s3 ls --recursive=no (no URI): USAGE_ERROR — hasFlag fires before Part 2 throw", async () => {
+    // =no is a recognised false literal (would pass flagIsTrue's check) but
+    // the no-URI path uses hasFlag, so presence alone → USAGE_ERROR.
+    let thrown: unknown;
+    try {
+      await s3Command(["ls", "--recursive=no"], undefined);
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeDefined();
+    expect((thrown as { code?: string }).code).toBe("USAGE_ERROR");
   });
 
-  it("s3 head-object --recursive (bare): still throws USAGE_ERROR (correct behavior unchanged)", async () => {
-    // Recursion on a single-object fetch is still invalid
+  // ── s3 head-object ──────────────────────────────────────────────────────────
+
+  it("s3 head-object --recursive=false: USAGE_ERROR — any --recursive form is an error here", async () => {
+    // Same loud-error principle: head-object has no recursion concept.
+    let thrown: unknown;
+    try {
+      await s3Command(
+        ["head-object", "--bucket", "my-bucket", "--key", "path/to/file.txt", "--recursive=false"],
+        undefined,
+      );
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeDefined();
+    expect((thrown as { code?: string }).code).toBe("USAGE_ERROR");
+  });
+
+  it("s3 head-object --recursive (bare): USAGE_ERROR (unchanged)", async () => {
     let thrown: unknown;
     try {
       await s3Command(
@@ -280,5 +297,16 @@ describe("Part 1: --recursive=false coherence across s3 ls paths (#57)", () => {
     }
     expect(thrown).toBeDefined();
     expect((thrown as { code?: string }).code).toBe("USAGE_ERROR");
+  });
+
+  // ── Positive guard: prefix path (ls s3://...) still uses flagIsTrue ────────
+
+  it("s3 ls s3://bucket/ --recursive=false: SUCCEEDS on prefix path (flagIsTrue returns false there)", async () => {
+    // The PREFIX path (ls s3://...) uses flagIsTrue, so --recursive=false is honored.
+    // This test documents the deliberate asymmetry between the no-URI and prefix paths.
+    const binary = listBucketsStub(); // minimal stub; list-objects-v2 returns empty
+    // This should NOT throw — the prefix path honors =false
+    const result = await s3Command(["ls", "s3://bucket/", "--recursive=false"], undefined, binary);
+    expect(result).toBeDefined();
   });
 });
