@@ -9,9 +9,7 @@
  * explicit assertion that checks JSON.stringify(result).
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
 import type {
   SecretsRunResult,
   SecretsGetValueResult,
@@ -139,7 +137,8 @@ const NOT_FOUND_STDERR =
 
 // ─── Stub factory ─────────────────────────────────────────────────────────────
 
-const tempDirs: string[] = [];
+// secrets.ts imports only resolveKey (uncached) — no binary-path-keyed cache is
+// reached from any code path in this file. All stubs are safe to pool.
 
 function shellQuote(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`;
@@ -154,10 +153,6 @@ interface StubEntry {
 type SecretsStubSpec = Record<string, StubEntry>;
 
 function createStub(spec: SecretsStubSpec): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-secrets-"));
-  tempDirs.push(dir);
-  const scriptPath = join(dir, "aws");
-
   const lines: string[] = ["#!/bin/sh", 'case "$1-$2" in'];
 
   for (const [key, entry] of Object.entries(spec)) {
@@ -176,19 +171,11 @@ function createStub(spec: SecretsStubSpec): string {
   lines.push("    exit 254;;");
   lines.push("esac");
 
-  writeFileSync(scriptPath, lines.join("\n"));
-  chmodSync(scriptPath, 0o755);
-  return scriptPath;
+  return stubBin(lines.join("\n"));
 }
 
 afterEach(() => {
-  for (const dir of tempDirs.splice(0)) {
-    try {
-      rmSync(dir, { recursive: true });
-    } catch {
-      /* best-effort */
-    }
-  }
+  releaseStubBins();
 });
 
 // ─── SECURITY INVARIANT helper ────────────────────────────────────────────────

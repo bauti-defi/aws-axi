@@ -2,17 +2,19 @@
  * SSM Parameter Store overlay tests.
  *
  * All tests run against REAL subprocess stubs — no mock clients at the
- * exec-seam boundary. Each test creates its own temp dir with a unique
- * `aws` stub script so the module-level alias-map cache never collides.
+ * exec-seam boundary. src/commands/ssm.ts imports only resolveKey (uncached)
+ * — there is no binary-path-keyed module-level cache reachable from any ssm
+ * code path. All stubs that do not carry side-car state files (counter files)
+ * are safe to pool.
  *
  * SECURITY INVARIANT: the actual parameter value MUST NOT appear in the
  * result of any default (non-reveal) call. Every redaction path has an
  * explicit assertion that checks JSON.stringify(result).
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
+import { writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { stubBin, releaseStubBins, uniqueStubDir } from "./helpers/stub-bin.js";
 import type {
   SsmRunResult,
   SsmGetParameterResult,
@@ -213,8 +215,6 @@ const NOT_FOUND_STDERR =
 
 // ─── Stub factory ─────────────────────────────────────────────────────────────
 
-const tempDirs: string[] = [];
-
 function shellQuote(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`;
 }
@@ -236,13 +236,10 @@ type SsmStubSpec = Record<string, StubEntry>;
 
 /**
  * Create a real shell stub dispatching on "$1-$2" (service + subcommand).
- * Unique binary path per invocation → unique cache key in resolve-key.
+ * ssm.ts has no binary-path-keyed module-level cache, so all stubs produced
+ * by this factory are safe to recycle from the pool.
  */
 function createStub(spec: SsmStubSpec): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-ssm-"));
-  tempDirs.push(dir);
-  const scriptPath = join(dir, "aws");
-
   const lines: string[] = ["#!/bin/sh", 'case "$1-$2" in'];
 
   for (const [key, entry] of Object.entries(spec)) {
@@ -261,19 +258,11 @@ function createStub(spec: SsmStubSpec): string {
   lines.push("    exit 254;;");
   lines.push("esac");
 
-  writeFileSync(scriptPath, lines.join("\n"));
-  chmodSync(scriptPath, 0o755);
-  return scriptPath;
+  return stubBin(lines.join("\n"));
 }
 
 afterEach(() => {
-  for (const dir of tempDirs.splice(0)) {
-    try {
-      rmSync(dir, { recursive: true });
-    } catch {
-      /* best-effort */
-    }
-  }
+  releaseStubBins();
 });
 
 // Guard the full process.env (and process.exitCode) around each test.
@@ -1404,10 +1393,6 @@ describe("ssm run — multiline output unescaping (captureMain)", () => {
 describe("ssm run — passthrough forwarding (captureMain)", () => {
   it("unknown flag forwarded to send-command, enriched result still returned", async () => {
     // Stub succeeds ONLY when --comment is present in its argv (forwarded).
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-ssm-pt-"));
-    tempDirs.push(dir);
-    const binary = join(dir, "aws");
-
     const commentFlag = "--comment";
     const commentValue = "my-test-comment";
 
@@ -1432,8 +1417,7 @@ describe("ssm run — passthrough forwarding (captureMain)", () => {
       "esac",
     ].join("\n");
 
-    writeFileSync(binary, script);
-    chmodSync(binary, 0o755);
+    const binary = stubBin(script);
 
     const { output, exitCode } = await captureMain(
       [
@@ -1442,7 +1426,7 @@ describe("ssm run — passthrough forwarding (captureMain)", () => {
         "--commands", TEST_COMMAND,
         commentFlag, commentValue,
       ],
-      { PATH: `${dir}:${process.env["PATH"] ?? ""}` },
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
     );
 
     // Stub succeeded (--comment was forwarded) and result is clean
@@ -1520,8 +1504,9 @@ describe("ssm get-command-invocation — unescaping (captureMain)", () => {
 describe("ssm get-command-invocation --wait — polling (captureMain)", () => {
   it("polls through InProgress to terminal Success", async () => {
     // Stateful stub: first call → InProgress, second call → Success.
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-ssm-wait-"));
-    tempDirs.push(dir);
+    // Uses uniqueStubDir so the counter file is in a fresh directory each
+    // time — no stale count leaks from a previous test via a pooled slot.
+    const dir = uniqueStubDir();
     const binary = join(dir, "aws");
     const counterFile = join(dir, "counter");
 
@@ -1587,8 +1572,7 @@ describe("ssm get-command-invocation --wait — polling (captureMain)", () => {
 
 describe("ssm get-command-invocation --wait=false — no polling (fix #56)", () => {
   it("--wait=false makes a single call and returns InProgress — was polling before fix", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-ssm-waitfalse-"));
-    tempDirs.push(dir);
+    const dir = uniqueStubDir();
     const binary = join(dir, "aws");
     const counterFile = join(dir, "counter");
 
@@ -1638,8 +1622,7 @@ describe("ssm get-command-invocation --wait=false — no polling (fix #56)", () 
   });
 
   it("--wait=0 also does NOT poll", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-ssm-wait0-"));
-    tempDirs.push(dir);
+    const dir = uniqueStubDir();
     const binary = join(dir, "aws");
     const counterFile = join(dir, "counter");
 
@@ -1684,8 +1667,7 @@ describe("ssm get-command-invocation --wait=false — no polling (fix #56)", () 
   });
 
   it("bare --wait still polls to Success (unaffected by fix)", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-ssm-waitbare-"));
-    tempDirs.push(dir);
+    const dir = uniqueStubDir();
     const binary = join(dir, "aws");
     const counterFile = join(dir, "counter");
 
@@ -1784,8 +1766,7 @@ const INV_NOT_EXISTS_STDERR =
 
 describe("ssm run — InvocationDoesNotExist retry (captureMain)", () => {
   it("retries through InvocationDoesNotExist until the invocation registers", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-ssm-inv-"));
-    tempDirs.push(dir);
+    const dir = uniqueStubDir();
     const binary = join(dir, "aws");
     const counterFile = join(dir, "gci-counter");
 
@@ -1870,10 +1851,6 @@ describe("ssm run — --commands quoting (captureMain)", () => {
   it("commands with double quotes are JSON-encoded, not string-interpolated", async () => {
     const QUOTED_COMMAND = 'grep "error" /var/log/app.log';
 
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-ssm-qc-"));
-    tempDirs.push(dir);
-    const binary = join(dir, "aws");
-
     // Stub validates --parameters starts with '{' (JSON object).
     // String-interpolation form starts with 'commands=[' (not a JSON object).
     const script = [
@@ -1901,12 +1878,12 @@ describe("ssm run — --commands quoting (captureMain)", () => {
       "    exit 254;;",
       "esac",
     ].join("\n");
-    writeFileSync(binary, script);
-    chmodSync(binary, 0o755);
+
+    const binary = stubBin(script);
 
     const { output, exitCode } = await captureMain(
       ["ssm", "run", "--instance-ids", TEST_INSTANCE_ID, "--commands", QUOTED_COMMAND],
-      { PATH: `${dir}:${process.env["PATH"] ?? ""}` },
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
     );
 
     // Stub accepted the JSON-encoded params → must succeed

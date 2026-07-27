@@ -3,9 +3,21 @@
  * get-function-configuration, invoke.
  *
  * All tests run against REAL subprocess stubs — no mock clients at the
- * exec-seam boundary. Each stub is written to a unique tmpdir so the
- * module-level caches inside resolve-* primitives never cross-contaminate
- * test cases (cache keys include the binary path).
+ * exec-seam boundary.
+ *
+ * POOL vs. UNIQUE binary paths
+ * ----------------------------
+ * src/commands/lambda.ts calls resolveSg (src/resolve/sg.ts) and resolveSubnet
+ * (src/resolve/subnet.ts) from resolveVpcConfig, gated on fn.VpcConfig.  Both
+ * resolvers memoize per binary path for the lifetime of the process.
+ *
+ * Tests that supply a response containing FUNCTION_RECORD (which has VpcConfig
+ * with a shared SG_ID / SUBNET_ID) MUST use a unique stub path so a cached SG
+ * or subnet name from one test can never be served to a different test. Those
+ * tests call createLambdaStub(spec, true).
+ *
+ * Tests that exercise invoke, empty-state list-functions, or unknown-subcommand
+ * never reach resolveVpcConfig and are safe to pool (createLambdaStub(spec)).
  *
  * Stub dispatch model (case on $2 = the Lambda sub-operation):
  *   list-functions  → curated multi-function JSON, optional NextToken
@@ -18,9 +30,9 @@
  *   stubs returned by the same binary via $1 (service) + $2 (operation)
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync, readFileSync } from "node:fs";
+import { writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { stubBin, releaseStubBins, uniqueStubBin, uniqueStubDir } from "./helpers/stub-bin.js";
 import { AxiError } from "axi-sdk-js";
 import { useEnvGuard } from "./helpers/env-guard.js";
 import type { LambdaRunResult, LambdaListResult, LambdaFunctionSummary, LambdaInvokeResult } from "../src/commands/lambda.js";
@@ -198,8 +210,6 @@ const INVOKE_PAYLOAD_ERROR = JSON.stringify({
 
 // ─── Stub factory ─────────────────────────────────────────────────────────────
 
-const tempDirs: string[] = [];
-
 function shellQuote(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`;
 }
@@ -228,10 +238,7 @@ interface LambdaStubSpec {
   readonly listFunctionsStderr?: string;
 }
 
-function createLambdaStub(spec: LambdaStubSpec): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-lambda-"));
-  tempDirs.push(dir);
-  const scriptPath = join(dir, "aws");
+function createLambdaStub(spec: LambdaStubSpec, unique = false): string {
 
   const lines: string[] = ["#!/bin/sh", 'case "$1" in'];
 
@@ -376,19 +383,11 @@ function createLambdaStub(spec: LambdaStubSpec): string {
     "esac",
   );
 
-  writeFileSync(scriptPath, lines.join("\n"));
-  chmodSync(scriptPath, 0o755);
-  return scriptPath;
+  return unique ? uniqueStubBin(lines.join("\n")) : stubBin(lines.join("\n"));
 }
 
 afterEach(() => {
-  for (const dir of tempDirs.splice(0)) {
-    try {
-      rmSync(dir, { recursive: true });
-    } catch {
-      /* best-effort */
-    }
-  }
+  releaseStubBins();
 });
 
 // ─── Type-narrowing asserts ───────────────────────────────────────────────────
@@ -412,7 +411,7 @@ function assertInvocation(r: LambdaRunResult): asserts r is { readonly invocatio
 
 describe("lambdaRun list-functions — happy path", () => {
   it("returns curated function list for two functions", async () => {
-    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO });
+    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO }, true);
 
     const result = await lambdaRun({
       subcommand: "list-functions",
@@ -436,7 +435,7 @@ describe("lambdaRun list-functions — happy path", () => {
   });
 
   it("count string shows N total when not truncated", async () => {
-    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO });
+    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO }, true);
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
     assertFunctions(result);
 
@@ -450,7 +449,7 @@ describe("lambdaRun list-functions — happy path", () => {
 
 describe("lambdaRun list-functions — pagination", () => {
   it("reports truncation honestly on synthesized NextToken — does NOT gate on NextMarker", async () => {
-    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TRUNCATED });
+    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TRUNCATED }, true);
     const result = await lambdaRun({
       subcommand: "list-functions",
       args: ["--max-items", "1"],
@@ -464,12 +463,10 @@ describe("lambdaRun list-functions — pagination", () => {
   });
 
   it("passes --max-items to aws cli", async () => {
-    // Stub echoes its args so we verify --max-items appears in the call
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-lambda-args-"));
-    tempDirs.push(dir);
-    const scriptPath = join(dir, "aws");
-    writeFileSync(
-      scriptPath,
+    // Stub echoes its args so we verify --max-items appears in the call.
+    // list-functions fails JSON parse before enrichment → resolveSg/resolveSubnet
+    // never called → safe to pool.
+    const scriptPath = stubBin(
       [
         "#!/bin/sh",
         'case "$1" in',
@@ -479,7 +476,6 @@ describe("lambdaRun list-functions — pagination", () => {
         "exit 0",
       ].join("\n"),
     );
-    chmodSync(scriptPath, 0o755);
 
     // Will fail JSON parse; we verify --max-items was forwarded
     try {
@@ -495,7 +491,7 @@ describe("lambdaRun list-functions — pagination", () => {
 
   it("accepts --next-token to resume pagination", async () => {
     // Stub returns the truncated list regardless; we just verify no error + token respected
-    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO });
+    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO }, true);
     const result = await lambdaRun({
       subcommand: "list-functions",
       args: ["--next-token", "AQICAHiGqSomePaginationToken=="],
@@ -526,7 +522,7 @@ describe("lambdaRun list-functions — enrichment", () => {
   it("resolves role ARN to name without a network call (parsed from ARN)", async () => {
     const stub = createLambdaStub({
       listFunctions: LIST_FUNCTIONS_TWO,
-    });
+    }, true);
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
     assertFunctions(result);
 
@@ -540,7 +536,7 @@ describe("lambdaRun list-functions — enrichment", () => {
       listFunctions: LIST_FUNCTIONS_TWO,
       describeSecurityGroups: SG_RESPONSE,
       describeSubnets: SUBNET_RESPONSE,
-    });
+    }, true);
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
     assertFunctions(result);
 
@@ -555,7 +551,7 @@ describe("lambdaRun list-functions — enrichment", () => {
       listFunctions: LIST_FUNCTIONS_TWO,
       kmsDescribeKey: KMS_DESCRIBE_KEY,
       kmsListAliases: KMS_LIST_ALIASES,
-    });
+    }, true);
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
     assertFunctions(result);
 
@@ -567,7 +563,7 @@ describe("lambdaRun list-functions — enrichment", () => {
     const stub = createLambdaStub({
       listFunctions: LIST_FUNCTIONS_TWO,
       logsDescribeLogGroups: LOG_GROUP_RESPONSE,
-    });
+    }, true);
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
     assertFunctions(result);
 
@@ -577,11 +573,12 @@ describe("lambdaRun list-functions — enrichment", () => {
   });
 
   it("gracefully degrades enrichment on individual AWS errors (returns raw id / undefined)", async () => {
-    // SG and subnet stubs absent → resolveSg/resolveSubnet return null → degrade
+    // SG and subnet stubs absent → resolveSg/resolveSubnet still called (stub
+    // falls back to empty responses) → binary-keyed cache is reached → UNIQUE.
     const stub = createLambdaStub({
       listFunctions: LIST_FUNCTIONS_TWO,
-      // No SG/subnet enrichment stubs → fall back to error / null
-    });
+      // No SG/subnet enrichment stubs → stub returns empty fallback response
+    }, true);
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
     assertFunctions(result);
 
@@ -604,7 +601,7 @@ describe("lambdaRun get-function — happy path", () => {
       kmsDescribeKey: KMS_DESCRIBE_KEY,
       kmsListAliases: KMS_LIST_ALIASES,
       logsDescribeLogGroups: LOG_GROUP_RESPONSE,
-    });
+    }, true);
 
     const result = await lambdaRun({
       subcommand: "get-function",
@@ -626,7 +623,7 @@ describe("lambdaRun get-function — happy path", () => {
   });
 
   it("requires a function name", async () => {
-    const stub = createLambdaStub({ getFunction: GET_FUNCTION_RESPONSE });
+    const stub = createLambdaStub({ getFunction: GET_FUNCTION_RESPONSE }, true);
     await expect(
       lambdaRun({ subcommand: "get-function", args: [], binary: stub }),
     ).rejects.toMatchObject({ code: "USAGE_ERROR" });
@@ -641,7 +638,7 @@ describe("lambdaRun get-function-configuration — happy path", () => {
       getFunctionConfiguration: GET_FUNCTION_CONFIGURATION_RESPONSE,
       describeSecurityGroups: SG_RESPONSE,
       describeSubnets: SUBNET_RESPONSE,
-    });
+    }, true);
 
     const result = await lambdaRun({
       subcommand: "get-function-configuration",
@@ -658,7 +655,7 @@ describe("lambdaRun get-function-configuration — happy path", () => {
   });
 
   it("requires a function name", async () => {
-    const stub = createLambdaStub({ getFunctionConfiguration: GET_FUNCTION_CONFIGURATION_RESPONSE });
+    const stub = createLambdaStub({ getFunctionConfiguration: GET_FUNCTION_CONFIGURATION_RESPONSE }, true);
     await expect(
       lambdaRun({ subcommand: "get-function-configuration", args: [], binary: stub }),
     ).rejects.toMatchObject({ code: "USAGE_ERROR" });
@@ -758,7 +755,7 @@ describe("lambdaRun — unknown subcommand", () => {
 
 describe("lambdaCommand — CLI arg dispatch", () => {
   it("defaults to list-functions when no subcommand given", async () => {
-    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO });
+    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO }, true);
     const result = await lambdaCommand([], undefined, stub);
     expect("lambda" in result).toBe(true);
     const inner = result["lambda"] as Record<string, unknown>;
@@ -766,7 +763,7 @@ describe("lambdaCommand — CLI arg dispatch", () => {
   });
 
   it("wraps result under a lambda key", async () => {
-    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO });
+    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO }, true);
     const result = await lambdaCommand(["list-functions"], undefined, stub);
     expect(Object.keys(result)).toContain("lambda");
   });
@@ -779,7 +776,7 @@ describe("lambdaCommand — CLI arg dispatch", () => {
   });
 
   it("dispatches get-function with positional function name", async () => {
-    const stub = createLambdaStub({ getFunction: GET_FUNCTION_RESPONSE });
+    const stub = createLambdaStub({ getFunction: GET_FUNCTION_RESPONSE }, true);
     const result = await lambdaCommand(["get-function", FN_NAME], undefined, stub);
     const inner = result["lambda"] as Record<string, unknown>;
     expect("function" in inner).toBe(true);
@@ -818,8 +815,10 @@ describe("lambdaCommand — CLI arg dispatch", () => {
  * to `argsFile` then returns a valid invoke response so the caller succeeds.
  */
 function createCapturingInvokeStub(): { binary: string; argsFile: string } {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-lambda-capture-"));
-  tempDirs.push(dir);
+  // Uses uniqueStubDir so the argsFile path is fresh each time — the captured
+  // args file is written to the stub's directory, which must be unique to avoid
+  // a stale file from a previous test being read by the current one.
+  const dir = uniqueStubDir();
   const argsFile = join(dir, "captured-args");
   const binary = join(dir, "aws");
 
@@ -850,6 +849,7 @@ function createCapturingInvokeStub(): { binary: string; argsFile: string } {
   chmodSync(binary, 0o755);
   return { binary, argsFile };
 }
+
 
 describe("lambdaRun invoke — --cli-binary-format raw-in-base64-out (CLI v2)", () => {
   it("includes --cli-binary-format raw-in-base64-out when --payload is supplied", async () => {
@@ -948,10 +948,7 @@ describe("lambda invoke --query bypass — captureMain", () => {
    *   - When --query is absent: prints the full metadata JSON.
    */
   function createInvokeQueryStub(): string {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-lambda-query-"));
-    tempDirs.push(dir);
-    const scriptPath = join(dir, "aws");
-
+    // lambda invoke does not call resolveSg/resolveSubnet — safe to pool.
     const script = [
       "#!/bin/sh",
       'case "$1" in',
@@ -985,9 +982,7 @@ describe("lambda invoke --query bypass — captureMain", () => {
       "esac",
     ].join("\n");
 
-    writeFileSync(scriptPath, script);
-    chmodSync(scriptPath, 0o755);
-    return scriptPath;
+    return stubBin(script);
   }
 
   it("invoke --query StatusCode: projection bypassed, not null", async () => {
@@ -1022,11 +1017,8 @@ describe("lambda invoke --query bypass — captureMain", () => {
   // "JSON Parse error", not our curated message).
 
   it("invoke --query with non-JSON stdout: curated AxiError, not raw SyntaxError", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-lambda-badjson-"));
-    tempDirs.push(dir);
-    const scriptPath = join(dir, "aws");
-
     // Stub: exits 0 but prints non-JSON when --query is present.
+    // lambda invoke does not call resolveSg/resolveSubnet — safe to pool.
     const script = [
       "#!/bin/sh",
       'case "$1" in',
@@ -1060,12 +1052,11 @@ describe("lambda invoke --query bypass — captureMain", () => {
       "esac",
     ].join("\n");
 
-    writeFileSync(scriptPath, script);
-    chmodSync(scriptPath, 0o755);
+    const binary = stubBin(script);
 
     const { output, exitCode } = await captureMain(
       ["lambda", "invoke", "--function-name", FN_NAME, "--query", "StatusCode"],
-      { PATH: `${dir}:${process.env["PATH"] ?? ""}` },
+      { PATH: `${binary.replace(/\/aws$/, "")}:${process.env["PATH"] ?? ""}` },
     );
 
     // Must exit non-zero (UNKNOWN error = exit 255)
@@ -1117,7 +1108,7 @@ describe("lambdaRun get-function — global bool flag does not eat function name
       kmsDescribeKey: KMS_DESCRIBE_KEY,
       kmsListAliases: KMS_LIST_ALIASES,
       logsDescribeLogGroups: LOG_GROUP_RESPONSE,
-    });
+    }, true);
 
     // On broken head f66878c, --no-cli-pager eats FN_NAME (my-function)
     // → extractPositionals returns [] → USAGE_ERROR.

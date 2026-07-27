@@ -111,6 +111,23 @@ export function uniqueStubBin(script: string): string {
   return writeExecutable(join(dir, "aws"), script);
 }
 
+/**
+ * Allocate a fresh directory under POOL_ROOT for stateful stubs that need
+ * additional files alongside the `aws` binary (e.g., a counter file for
+ * polling tests or an args-capture file for invoke tests). The caller writes
+ * the `aws` binary and any auxiliary files into the returned directory.
+ *
+ * Everything under POOL_ROOT is removed when the process exits, so there is
+ * no need for the caller to track this directory for cleanup.
+ *
+ * Use only when the binary path must be unique AND the stub needs side-car
+ * files whose paths are baked into the script at write time. For stubs that
+ * only need a unique binary path, prefer `uniqueStubBin`.
+ */
+export function uniqueStubDir(): string {
+  return mkdtempSync(join(POOL_ROOT, "stateful-"));
+}
+
 process.on("exit", () => {
   try {
     rmSync(POOL_ROOT, { recursive: true, force: true });

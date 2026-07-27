@@ -20,9 +20,7 @@
  * buildPassthrough is also tested as a pure unit.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { stubBin, releaseStubBins, uniqueStubBin } from "./helpers/stub-bin.js";
 import { buildPassthrough } from "../src/overlay-args.js";
 import { ec2Run } from "../src/commands/ec2.js";
 import { iamRun } from "../src/commands/iam.js";
@@ -34,7 +32,11 @@ import { useEnvGuard } from "./helpers/env-guard.js";
 
 // ── Stub factory ────────────────────────────────────────────────────────────────
 
-const tempDirs: string[] = [];
+// All commands exercised here (ec2 describe-instances with SecurityGroups:[],
+// iam, logs, ssm, kms describe-key) either have no binary-path-keyed cache or
+// are called with fixtures that never trigger the VpcConfig enrichment path.
+// One exception: the kms list-keys test (line ~636) reaches loadAliasMap and
+// MUST use uniqueStubBin — enforced by passing unique=true to createArgGuardStub.
 
 function shellQuote(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`;
@@ -46,9 +48,6 @@ function createStub(spec: {
   stderr?: string;
   exitCode?: number;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-pt-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
   const lines = [
     "#!/bin/sh",
     spec.stdout !== undefined ? `printf '%s' ${shellQuote(spec.stdout)}` : "",
@@ -57,9 +56,7 @@ function createStub(spec: {
   ]
     .filter(Boolean)
     .join("\n");
-  writeFileSync(p, lines);
-  chmodSync(p, 0o755);
-  return p;
+  return stubBin(lines);
 }
 
 /**
@@ -77,16 +74,15 @@ function createStub(spec: {
  *     → stub exits 1 → exitCode non-zero → expect(exitCode).toBeUndefined() FAILS.
  *   GREEN (correct): --max-items 5 forwarded verbatim → found=1 → exits 0 → PASSES.
  */
-function createArgGuardStub(spec: {
-  requiredArg: string;
-  requiredNextArg?: string; // when set, the token immediately after requiredArg must equal this
-  validStdout: string;
-  fallbackStdout?: string; // when requiredArg is absent but we should NOT fail (e.g. secondary calls)
-}): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-argguard-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
-
+function createArgGuardStub(
+  spec: {
+    requiredArg: string;
+    requiredNextArg?: string; // when set, the token immediately after requiredArg must equal this
+    validStdout: string;
+    fallbackStdout?: string; // when requiredArg is absent but we should NOT fail (e.g. secondary calls)
+  },
+  unique = false,
+): string {
   const missingMsg = spec.requiredNextArg
     ? `MISSING_PAIR: ${spec.requiredArg} ${spec.requiredNextArg} was not forwarded`
     : `MISSING_FLAG: ${spec.requiredArg} was not forwarded`;
@@ -119,9 +115,7 @@ function createArgGuardStub(spec: {
       : `  printf '%s' ${shellQuote(missingMsg)} >&2 && exit 1`,
     "fi",
   ].join("\n");
-  writeFileSync(p, script);
-  chmodSync(p, 0o755);
-  return p;
+  return unique ? uniqueStubBin(script) : stubBin(script);
 }
 
 /**
@@ -137,9 +131,6 @@ function createArgBanStub(spec: {
   bannedArg: string;
   validStdout: string;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-argban-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
   const script = [
     "#!/bin/sh",
     "found=0",
@@ -152,9 +143,7 @@ function createArgBanStub(spec: {
     "fi",
     `printf '%s' ${shellQuote(spec.validStdout)}`,
   ].join("\n");
-  writeFileSync(p, script);
-  chmodSync(p, 0o755);
-  return p;
+  return stubBin(script);
 }
 
 /**
@@ -163,9 +152,6 @@ function createArgBanStub(spec: {
  * stripped from passthrough before forwarding to avoid duplication.
  */
 function createDedupGuardStub(spec: { validStdout: string }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-dedup-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
   const script = [
     "#!/bin/sh",
     "count=0",
@@ -178,19 +164,11 @@ function createDedupGuardStub(spec: { validStdout: string }): string {
     "fi",
     `printf '%s' ${shellQuote(spec.validStdout)}`,
   ].join("\n");
-  writeFileSync(p, script);
-  chmodSync(p, 0o755);
-  return p;
+  return stubBin(script);
 }
 
 afterEach(() => {
-  for (const dir of tempDirs.splice(0)) {
-    try {
-      rmSync(dir, { recursive: true });
-    } catch {
-      /* best-effort */
-    }
-  }
+  releaseStubBins();
 });
 
 // Guard the full process.env (and process.exitCode) around each test.
@@ -634,7 +612,9 @@ describe("kms overlay passthrough — positional + passthrough", () => {
   });
 
   it("list-keys with unknown flag (--key-usage) forwarded to child aws", async () => {
-    // --key-usage is a real aws kms list-keys flag the overlay doesn't know.
+    // kmsRun list-keys calls loadAliasMap (src/resolve/key.ts), which memoizes
+    // per binary path. This case MUST use a unique stub path so the cache entry
+    // for this binary never contaminates other tests sharing a pool slot.
     const binary = createArgGuardStub({
       requiredArg: "--key-usage",
       // list-aliases secondary call also needs Aliases response
@@ -642,7 +622,7 @@ describe("kms overlay passthrough — positional + passthrough", () => {
         Keys: [{ KeyId: "key-1", KeyArn: "arn:aws:kms:us-east-1:123:key/key-1" }],
       }),
       fallbackStdout: JSON.stringify({ Aliases: [] }),
-    });
+    }, true);
 
     const result = await kmsRun({
       subcommand: "list-keys",
@@ -668,9 +648,6 @@ function createForwardAndDedupeGuardStub(spec: {
   argMustAppearOnce: string;
   validStdout?: string;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-fwddedup-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
   const script = [
     "#!/bin/sh",
     "found=0",
@@ -692,9 +669,7 @@ function createForwardAndDedupeGuardStub(spec: {
   ]
     .filter(Boolean)
     .join("\n");
-  writeFileSync(p, script);
-  chmodSync(p, 0o755);
-  return p;
+  return stubBin(script);
 }
 
 // ── Full CLI integration via captureMain ──────────────────────────────────────
@@ -1095,9 +1070,6 @@ function createRejectArgStub(spec: {
   rejectedArg: string;
   validStdout: string;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-reject-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
   const script = [
     "#!/bin/sh",
     "for arg in \"$@\"; do",
@@ -1109,9 +1081,7 @@ function createRejectArgStub(spec: {
     `printf '%s' ${shellQuote(spec.validStdout)}`,
     "exit 0",
   ].join("\n");
-  writeFileSync(p, script);
-  chmodSync(p, 0o755);
-  return p;
+  return stubBin(script);
 }
 
 /**
@@ -1128,9 +1098,6 @@ function createTranslationGuardStub(spec: {
   requiredArg: string;
   validStdout: string;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-translate-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
   const script = [
     "#!/bin/sh",
     "has_rejected=0",
@@ -1150,9 +1117,7 @@ function createTranslationGuardStub(spec: {
     `printf '%s' ${shellQuote(spec.validStdout)}`,
     "exit 0",
   ].join("\n");
-  writeFileSync(p, script);
-  chmodSync(p, 0o755);
-  return p;
+  return stubBin(script);
 }
 
 /** Minimal list-objects-v2 response with one object (no CommonPrefixes). */

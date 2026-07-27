@@ -2,14 +2,17 @@
  * KMS overlay + resolve-key tests.
  *
  * All tests run against REAL subprocess stubs — no mock clients at the
- * exec-seam boundary. Each test creates its own temp dir with a unique
- * `aws` stub script, so the module-level alias-map cache (keyed by binary
- * path) never collides between test cases.
+ * exec-seam boundary.
+ *
+ * loadAliasMap (src/resolve/key.ts) memoises per binary path for the
+ * lifetime of the process. Tests that call kmsRun list-keys (which invokes
+ * loadAliasMap) MUST use a unique stub path — uniqueStubBin — so the cache
+ * entry for one test never contaminates another. Tests that only exercise
+ * resolveKey, list-aliases, describe-key, or get-key-policy are safe to pool
+ * because none of those code paths touch the module-level alias-map cache.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { stubBin, releaseStubBins, uniqueStubBin } from "./helpers/stub-bin.js";
 import { AxiError } from "axi-sdk-js";
 import type { KmsListKeysResult, KmsListAliasesResult, KmsKeyDetail, KmsKeyPolicy } from "../src/commands/kms.js";
 import { kmsRun, kmsCommand } from "../src/commands/kms.js";
@@ -108,8 +111,6 @@ const NOT_FOUND_STDERR =
 
 // ─── Stub factory ─────────────────────────────────────────────────────────────
 
-const tempDirs: string[] = [];
-
 function shellQuote(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`;
 }
@@ -130,13 +131,12 @@ interface KmsStubSpec {
 
 /**
  * Create a real shell stub that dispatches on $2 (the kms subcommand).
- * Unique binary path per invocation → unique alias-map cache key.
+ *
+ * Pass `unique = true` for tests that invoke kmsRun list-keys (which calls
+ * loadAliasMap, a process-lifetime binary-path-keyed cache). All other
+ * subcommands are cache-free and default to the recycled pool.
  */
-function createKmsStub(spec: KmsStubSpec): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-kms-"));
-  tempDirs.push(dir);
-  const scriptPath = join(dir, "aws");
-
+function createKmsStub(spec: KmsStubSpec, unique = false): string {
   const defaultExit = spec.exitCode ?? 0;
   const lines: string[] = ["#!/bin/sh", 'case "$2" in'];
 
@@ -214,33 +214,25 @@ function createKmsStub(spec: KmsStubSpec): string {
     "esac",
   );
 
-  writeFileSync(scriptPath, lines.join("\n"));
-  chmodSync(scriptPath, 0o755);
-  return scriptPath;
+  return unique ? uniqueStubBin(lines.join("\n")) : stubBin(lines.join("\n"));
 }
 
 afterEach(() => {
-  for (const dir of tempDirs.splice(0)) {
-    try {
-      rmSync(dir, { recursive: true });
-    } catch {
-      /* best-effort */
-    }
-  }
+  releaseStubBins();
 });
 
 // ─── loadAliasMap ──────────────────────────────────────────────────────────────
 
 describe("loadAliasMap", () => {
   it("returns a map of keyId → aliasName", async () => {
-    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO });
+    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO }, true);
     const map = await loadAliasMap({ binary: stub });
 
     expect(map.get(KEY_ID_1)).toBe(KEY_ALIAS_1);
   });
 
   it("ignores AWS-managed aliases with no TargetKeyId", async () => {
-    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO });
+    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO }, true);
     const map = await loadAliasMap({ binary: stub });
 
     // alias/aws/s3 has TargetKeyId: undefined — not in the map
@@ -248,7 +240,7 @@ describe("loadAliasMap", () => {
   });
 
   it("returns empty map for empty alias list", async () => {
-    const stub = createKmsStub({ listAliases: LIST_ALIASES_EMPTY });
+    const stub = createKmsStub({ listAliases: LIST_ALIASES_EMPTY }, true);
     const map = await loadAliasMap({ binary: stub });
 
     expect(map.size).toBe(0);
@@ -258,7 +250,7 @@ describe("loadAliasMap", () => {
     // The stub only knows list-aliases — a second call with a DIFFERENT stub
     // would fail. But since the first call populates the cache under the first
     // binary path, reusing the same path returns the cached result.
-    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO });
+    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO }, true);
     const map1 = await loadAliasMap({ binary: stub });
     const map2 = await loadAliasMap({ binary: stub });
 
@@ -326,7 +318,7 @@ describe("kmsRun list-keys — happy path", () => {
     const stub = createKmsStub({
       listKeys: LIST_KEYS_TWO,
       listAliases: LIST_ALIASES_TWO,
-    });
+    }, true);
 
     const result = await kmsRun({
       subcommand: "list-keys",
@@ -353,7 +345,7 @@ describe("kmsRun list-keys — happy path", () => {
     const stub = createKmsStub({
       listKeys: LIST_KEYS_TWO,
       listAliases: LIST_ALIASES_EMPTY,
-    });
+    }, true);
 
     const result = await kmsRun({ subcommand: "list-keys", args: [], binary: stub });
     if (!("listKeys" in result)) throw new Error("wrong discriminant");
@@ -369,7 +361,7 @@ describe("kmsRun list-keys — empty state", () => {
     const stub = createKmsStub({
       listKeys: LIST_KEYS_EMPTY,
       listAliases: LIST_ALIASES_EMPTY,
-    });
+    }, true);
 
     const result = await kmsRun({ subcommand: "list-keys", args: [], binary: stub });
     if (!("listKeys" in result)) throw new Error("wrong discriminant");
@@ -385,7 +377,7 @@ describe("kmsRun list-keys — pagination", () => {
     const stub = createKmsStub({
       listKeys: LIST_KEYS_ONE_TRUNCATED,
       listAliases: LIST_ALIASES_EMPTY,
-    });
+    }, true);
 
     const result = await kmsRun({
       subcommand: "list-keys",
@@ -400,12 +392,9 @@ describe("kmsRun list-keys — pagination", () => {
   });
 
   it("passes --max-items to aws cli (defaults to 50)", async () => {
-    // Stub echoes its args so we can inspect them
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-kms-args-"));
-    tempDirs.push(dir);
-    const scriptPath = join(dir, "aws");
-    writeFileSync(
-      scriptPath,
+    // Stub echoes its args so we can inspect them. Uses uniqueStubBin because
+    // kmsRun list-keys calls loadAliasMap — binary-path-keyed memoisation.
+    const scriptPath = uniqueStubBin(
       [
         "#!/bin/sh",
         "case \"$2\" in",
@@ -416,7 +405,6 @@ describe("kmsRun list-keys — pagination", () => {
         "exit 0",
       ].join("\n"),
     );
-    chmodSync(scriptPath, 0o755);
 
     // This will throw on JSON parse (we printed args not JSON) — but we can
     // intercept the AxiError to confirm --max-items was included.
@@ -652,7 +640,7 @@ describe("kmsCommand — arg dispatch", () => {
     const stub = createKmsStub({
       listKeys: LIST_KEYS_TWO,
       listAliases: LIST_ALIASES_TWO,
-    });
+    }, true);
 
     // kmsCommand doesn't accept binary — test via kmsRun result shape
     const run = await kmsRun({ subcommand: "list-keys", args: [], binary: stub });
@@ -672,11 +660,8 @@ describe("kmsCommand — arg dispatch", () => {
 describe("kmsRun list-keys — --flag=value form", () => {
   it("--max-items=N is forwarded correctly (not silently defaulted)", async () => {
     // Stub echoes its args; we verify --max-items 10 appears in the child call.
-    const dir = mkdtempSync(join(tmpdir(), "aws-axi-kms-eq-"));
-    tempDirs.push(dir);
-    const scriptPath = join(dir, "aws");
-    writeFileSync(
-      scriptPath,
+    // Uses uniqueStubBin: kmsRun list-keys calls loadAliasMap (binary-keyed).
+    const scriptPath = uniqueStubBin(
       [
         "#!/bin/sh",
         'case "$2" in',
@@ -687,7 +672,6 @@ describe("kmsRun list-keys — --flag=value form", () => {
         "exit 0",
       ].join("\n"),
     );
-    chmodSync(scriptPath, 0o755);
 
     // list-keys stdout is the arg string (not JSON) → AxiError UNKNOWN
     // But the error message contains the forwarded args, proving --max-items 10
@@ -708,7 +692,7 @@ describe("kmsRun list-keys — --flag=value form", () => {
     const stub = createKmsStub({
       listKeys: LIST_KEYS_TWO,
       listAliases: LIST_ALIASES_EMPTY,
-    });
+    }, true);
     // Should not throw — the token is ignored by our stub, but extraction works
     const result = await kmsRun({
       subcommand: "list-keys",
@@ -746,7 +730,7 @@ describe("kmsRun list-keys — alias-map AccessDenied degrades gracefully", () =
       listAliasesStderr:
         "An error occurred (AccessDeniedException) when calling the ListAliases operation: User is not authorized",
       listAliasesExitCode: 254,
-    });
+    }, true);
 
     // Must NOT throw
     const result = await kmsRun({
