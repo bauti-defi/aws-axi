@@ -16,8 +16,8 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { execFile } from "node:child_process";
 import { statSync } from "node:fs";
-import { basename } from "node:path";
-import { stubBin, releaseStubBins, uniqueStubBin } from "./helpers/stub-bin.js";
+import { basename, dirname } from "node:path";
+import { stubBin, releaseStubBins, uniqueStubBin, stubDir } from "./helpers/stub-bin.js";
 
 afterEach(() => {
   releaseStubBins();
@@ -75,6 +75,28 @@ describe("stubBin — pooled allocation", () => {
     const b = stubBin(script("SECOND"));
     await expect(run(a)).resolves.toEqual({ stdout: "FIRST", code: 0 });
     await expect(run(b)).resolves.toEqual({ stdout: "SECOND", code: 0 });
+  });
+});
+
+describe("stubDir — basename-agnostic parent directory extraction", () => {
+  it("returns the directory for the canonical `aws` basename", () => {
+    const binary = "/some/path/to/aws";
+    expect(stubDir(binary)).toBe(dirname(binary));
+    expect(stubDir(binary)).toBe("/some/path/to");
+  });
+
+  it("returns the directory even when the basename is not `aws`", () => {
+    // The old implementation (`binary.replace(/\/aws$/, "")`) returns the input
+    // unchanged for any basename other than `aws`, contradicting the docblock.
+    const binary = "/some/path/to/my-aws-tool";
+    expect(stubDir(binary)).toBe(dirname(binary));
+    expect(stubDir(binary)).toBe("/some/path/to");
+  });
+
+  it("is the exact inverse of join(dir, basename)", () => {
+    const dir = "/tmp/aws-axi-stubs-12345/unique-abc";
+    const binary = dir + "/aws";
+    expect(stubDir(binary)).toBe(dir);
   });
 });
 

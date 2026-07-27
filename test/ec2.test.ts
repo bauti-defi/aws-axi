@@ -5,32 +5,40 @@
  *
  * No mocks — the full `awsJson` exec seam runs with a subprocess boundary.
  * Stubs emit pinned EC2 JSON; we assert on curated output shapes.
+ *
+ * Pool vs. unique split:
+ *   POOL  — networking reads (describe-vpcs / describe-subnets / describe-security-groups)
+ *           and describe-instances with an empty Reservations array. These code paths
+ *           never reach resolveSg or resolveSubnet, so the binary path never touches a
+ *           binary-path-keyed module-level cache. Safe to recycle from the pool.
+ *
+ *   UNIQUE — all describe-instances tests backed by INSTANCE_FULL, INSTANCE_MINIMAL, or
+ *            INSTANCES_PAGE_ONE. Every one of those fixtures contains a SubnetId, which
+ *            causes ec2.ts to call resolveSubnet (keyed on `${binary}::${id}`). Any pool
+ *            slot shared between two such tests would collide on the subnet cache, returning
+ *            stale enriched data. uniqueStubBin() ensures each test owns a fresh inode and
+ *            therefore a distinct cache key.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { writeFileSync, chmodSync, rmSync, mkdtempSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { ec2Run } from "../src/commands/ec2.js";
 import { AxiError } from "axi-sdk-js";
+import { stubBin, releaseStubBins, uniqueStubBin } from "./helpers/stub-bin.js";
 
 // ---------------------------------------------------------------------------
 // Stub factory
 // ---------------------------------------------------------------------------
 
-const tempDirs: string[] = [];
-
 function shellQuote(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`;
 }
 
+// All networking-read stubs are safe to recycle: describe-vpcs, describe-subnets,
+// describe-security-groups never reach a binary-path-keyed module-level cache.
 function createStub(spec: {
   stdout?: string;
   stderr?: string;
   exitCode?: number;
 }): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-ec2-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
   const lines = [
     "#!/bin/sh",
     spec.stdout !== undefined
@@ -43,19 +51,11 @@ function createStub(spec: {
   ]
     .filter(Boolean)
     .join("\n");
-  writeFileSync(p, lines);
-  chmodSync(p, 0o755);
-  return p;
+  return stubBin(lines);
 }
 
 afterEach(() => {
-  for (const dir of tempDirs.splice(0)) {
-    try {
-      rmSync(dir, { recursive: true });
-    } catch {
-      /* best-effort */
-    }
-  }
+  releaseStubBins();
 });
 
 // ---------------------------------------------------------------------------
@@ -411,13 +411,17 @@ function shellQuoteMulti(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`;
 }
 
-function createDispatchStub(responses: {
-  readonly [operation: string]: { readonly stdout: string; readonly exitCode?: number };
-}): string {
-  const dir = mkdtempSync(join(tmpdir(), "aws-axi-ec2-inst-"));
-  tempDirs.push(dir);
-  const p = join(dir, "aws");
-
+// The default produces a UNIQUE inode (safe for all tests). Pass { pooled: true }
+// only for INSTANCES_EMPTY tests (no instances → no enrichment → no binary-path-keyed
+// resolver caches are touched). Any test providing instances with SubnetId or
+// SecurityGroups reaches resolveSubnet/resolveSg, which memoize per binary path —
+// those MUST use the safe default (unique inode).
+function createDispatchStub(
+  responses: {
+    readonly [operation: string]: { readonly stdout: string; readonly exitCode?: number };
+  },
+  { pooled = false }: { pooled?: boolean } = {},
+): string {
   const cases = Object.entries(responses)
     .map(([op, { stdout, exitCode }]) => {
       return [
@@ -440,9 +444,7 @@ function createDispatchStub(responses: {
     "esac",
   ].join("\n");
 
-  writeFileSync(p, script);
-  chmodSync(p, 0o755);
-  return p;
+  return pooled ? stubBin(script) : uniqueStubBin(script);
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +599,7 @@ const SUBNET_ENRICH = JSON.stringify({
 
 describe("ec2Run describe-instances — enriched happy path", () => {
   it("returns curated instance list with resolved SG name, subnet name, and role name", async () => {
+    // UNIQUE: INSTANCE_FULL has SubnetId + SecurityGroups → resolveSubnet + resolveSg (binary-path-keyed caches)
     const stub = createDispatchStub({
       "describe-instances": { stdout: INSTANCE_FULL },
       "describe-security-groups": { stdout: SG_ENRICH },
@@ -645,6 +648,7 @@ describe("ec2Run describe-instances — enriched happy path", () => {
   });
 
   it("falls back to instance-id as name when no Name tag", async () => {
+    // UNIQUE: INSTANCE_MINIMAL has SubnetId → resolveSubnet (binary-path-keyed cache)
     const stub = createDispatchStub({
       "describe-instances": { stdout: INSTANCE_MINIMAL },
       "describe-subnets": { stdout: SUBNET_ENRICH },
@@ -660,6 +664,7 @@ describe("ec2Run describe-instances — enriched happy path", () => {
   });
 
   it("sets publicIp null when instance has no public address", async () => {
+    // UNIQUE: INSTANCE_MINIMAL has SubnetId → resolveSubnet (binary-path-keyed cache)
     const stub = createDispatchStub({
       "describe-instances": { stdout: INSTANCE_MINIMAL },
       "describe-subnets": { stdout: SUBNET_ENRICH },
@@ -675,6 +680,7 @@ describe("ec2Run describe-instances — enriched happy path", () => {
   });
 
   it("sets role null when instance has no IamInstanceProfile", async () => {
+    // UNIQUE: INSTANCE_MINIMAL has SubnetId → resolveSubnet (binary-path-keyed cache)
     const stub = createDispatchStub({
       "describe-instances": { stdout: INSTANCE_MINIMAL },
       "describe-subnets": { stdout: SUBNET_ENRICH },
@@ -690,6 +696,7 @@ describe("ec2Run describe-instances — enriched happy path", () => {
   });
 
   it("returns empty securityGroups array when instance has none", async () => {
+    // UNIQUE: INSTANCE_MINIMAL has SubnetId → resolveSubnet (binary-path-keyed cache)
     const stub = createDispatchStub({
       "describe-instances": { stdout: INSTANCE_MINIMAL },
       "describe-subnets": { stdout: SUBNET_ENRICH },
@@ -711,6 +718,7 @@ describe("ec2Run describe-instances — enriched happy path", () => {
 
 describe("ec2Run describe-instances — pagination cap", () => {
   it("reports truncation and nextToken ONLY when synthesized NextToken is present", async () => {
+    // UNIQUE: INSTANCES_PAGE_ONE contains instances with SubnetId + SecurityGroups → resolveSg + resolveSubnet
     const stub = createDispatchStub({
       "describe-instances": { stdout: INSTANCES_PAGE_ONE },
       "describe-security-groups": { stdout: SG_ENRICH },
@@ -734,6 +742,7 @@ describe("ec2Run describe-instances — pagination cap", () => {
   });
 
   it("does NOT report truncation when NextToken is absent (complete page)", async () => {
+    // UNIQUE: INSTANCE_FULL has SubnetId + SecurityGroups → resolveSg + resolveSubnet
     const stub = createDispatchStub({
       "describe-instances": { stdout: INSTANCE_FULL },
       "describe-security-groups": { stdout: SG_ENRICH },
@@ -758,7 +767,7 @@ describe("ec2Run describe-instances — empty state", () => {
   it("returns empty instances list with count 0 and help suggestion", async () => {
     const stub = createDispatchStub({
       "describe-instances": { stdout: INSTANCES_EMPTY },
-    });
+    }, { pooled: true });
 
     const result = await ec2Run({
       operation: "describe-instances",
