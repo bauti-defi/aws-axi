@@ -32,7 +32,7 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { writeFileSync, chmodSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { stubBin, releaseStubBins, uniqueStubBin, uniqueStubDir } from "./helpers/stub-bin.js";
+import { stubBin, releaseStubBins, uniqueStubBin, uniqueStubDir, stubDir } from "./helpers/stub-bin.js";
 import { AxiError } from "axi-sdk-js";
 import { useEnvGuard } from "./helpers/env-guard.js";
 import type { LambdaRunResult, LambdaListResult, LambdaFunctionSummary, LambdaInvokeResult } from "../src/commands/lambda.js";
@@ -987,11 +987,10 @@ describe("lambda invoke --query bypass — captureMain", () => {
 
   it("invoke --query StatusCode: projection bypassed, not null", async () => {
     const binary = createInvokeQueryStub();
-    const stubDir = binary.replace(/\/aws$/, "");
 
     const { output, exitCode } = await captureMain(
       ["lambda", "invoke", "--function-name", FN_NAME, "--query", "StatusCode"],
-      { PATH: `${stubDir}:${process.env["PATH"] ?? ""}` },
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
     );
 
     expect(exitCode).toBeUndefined();
@@ -1056,7 +1055,7 @@ describe("lambda invoke --query bypass — captureMain", () => {
 
     const { output, exitCode } = await captureMain(
       ["lambda", "invoke", "--function-name", FN_NAME, "--query", "StatusCode"],
-      { PATH: `${binary.replace(/\/aws$/, "")}:${process.env["PATH"] ?? ""}` },
+      { PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
     );
 
     // Must exit non-zero (UNKNOWN error = exit 255)

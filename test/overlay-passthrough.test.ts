@@ -20,7 +20,7 @@
  * buildPassthrough is also tested as a pure unit.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { stubBin, releaseStubBins, uniqueStubBin } from "./helpers/stub-bin.js";
+import { stubBin, releaseStubBins, uniqueStubBin, stubDir } from "./helpers/stub-bin.js";
 import { buildPassthrough } from "../src/overlay-args.js";
 import { ec2Run } from "../src/commands/ec2.js";
 import { iamRun } from "../src/commands/iam.js";
@@ -215,11 +215,6 @@ async function captureMain(
   process.exitCode = prevExitCode;
 
   return { output: chunks.join(""), exitCode };
-}
-
-/** Extract the directory containing the stub `aws` binary (for PATH injection). */
-function stubDir(binary: string): string {
-  return binary.replace(/\/aws$/, "");
 }
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────

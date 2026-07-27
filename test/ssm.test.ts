@@ -14,7 +14,7 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { writeFileSync, chmodSync } from "node:fs";
 import { join } from "node:path";
-import { stubBin, releaseStubBins, uniqueStubDir } from "./helpers/stub-bin.js";
+import { stubBin, releaseStubBins, uniqueStubDir, stubDir } from "./helpers/stub-bin.js";
 import type {
   SsmRunResult,
   SsmGetParameterResult,
@@ -1084,11 +1084,6 @@ async function captureMain(
   process.exitCode = prevExitCode;
 
   return { output: chunks.join(""), exitCode };
-}
-
-/** Return the directory containing the stub `aws` binary (for PATH injection). */
-function stubDir(binary: string): string {
-  return binary.replace(/\/aws$/, "");
 }
 
 // ─── ssm run fixtures ─────────────────────────────────────────────────────────

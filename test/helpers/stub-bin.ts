@@ -128,6 +128,19 @@ export function uniqueStubDir(): string {
   return mkdtempSync(join(POOL_ROOT, "stateful-"));
 }
 
+/**
+ * Return the directory containing a stub `aws` binary (for PATH injection).
+ *
+ * The `aws` basename is load-bearing — anything that inspects `argv[0]` must
+ * see `aws`. This helper is the canonical inverse of the `join(dir, "aws")`
+ * convention used by every allocator in this module.  Centralised here so a
+ * single change to the basename propagates automatically instead of requiring
+ * four scattered call-sites to be found and updated.
+ */
+export function stubDir(binary: string): string {
+  return binary.replace(/\/aws$/, "");
+}
+
 process.on("exit", () => {
   try {
     rmSync(POOL_ROOT, { recursive: true, force: true });
