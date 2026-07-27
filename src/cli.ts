@@ -76,20 +76,33 @@ examples:
   aws-axi deploy list-applications
 `;
 
-const COMMAND_HELP: Record<string, string> = {
-  whoami: WHOAMI_HELP,
-  ec2: EC2_HELP,
-  kms: KMS_HELP,
-  s3: S3_HELP,
-  iam: IAM_HELP,
-  logs: LOGS_HELP,
-  setup: SETUP_HELP,
-  ssm: SSM_HELP,
-  secretsmanager: SECRETS_HELP,
-  secrets: SECRETS_HELP,
-  wait: WAIT_HELP,
-  lambda: LAMBDA_HELP,
-};
+/**
+ * Per-command help strings for hand-polished overlays.
+ *
+ * NOTE: uses Object.create(null) to sever the prototype chain — prevents
+ * inherited Object.prototype members (toString, constructor, etc.) from being
+ * returned as truthy help strings by the getCommandHelp callback.
+ * Without this, `COMMAND_HELP["toString"]` returns Function.prototype.toString
+ * (a function), which the SDK passes to stdout.write(), triggering a TypeError
+ * and an uncaught-error exit 1 instead of a structured USAGE_ERROR.
+ * Exported for shape-pin tests (see test/cli-proto-dispatch.test.ts:Y3).
+ */
+export const COMMAND_HELP: Readonly<Record<string, string>> = Object.freeze(
+  Object.assign(Object.create(null) as Record<string, string>, {
+    whoami: WHOAMI_HELP,
+    ec2: EC2_HELP,
+    kms: KMS_HELP,
+    s3: S3_HELP,
+    iam: IAM_HELP,
+    logs: LOGS_HELP,
+    setup: SETUP_HELP,
+    ssm: SSM_HELP,
+    secretsmanager: SECRETS_HELP,
+    secrets: SECRETS_HELP,
+    wait: WAIT_HELP,
+    lambda: LAMBDA_HELP,
+  }),
+);
 
 /** Render a structured error as TOON for formatError callbacks. */
 function renderErrorToon(
@@ -165,21 +178,34 @@ function makeEngineHandler(service: string): AxiCliCommand<AwsContext> {
 /**
  * Hand-polished overlay commands — these always take precedence over the
  * generic engine. Services NOT in this map fall through to makeEngineHandler.
+ *
+ * NOTE: uses Object.create(null) to sever the prototype chain — prevents
+ * inherited Object.prototype members (toString, constructor, etc.) from being
+ * returned by the Proxy's Reflect.get trap as though they were registered
+ * command handlers.  Without this, `OVERLAY_COMMANDS["toString"]` resolves to
+ * Function.prototype.toString, which is truthy, so the Proxy returns it as a
+ * handler and the SDK calls it — producing exit 0 for a command that does not
+ * exist.  Object.hasOwn below is defence-in-depth: it makes the "is this an
+ * overlay?" intent explicit and would catch a regression to a plain literal.
+ * Exported for shape-pin tests (see test/cli-proto-dispatch.test.ts:Y2).
  */
-const OVERLAY_COMMANDS: Record<string, AxiCliCommand<AwsContext>> = {
-  whoami: withContextStrip(whoamiCommand),
-  ec2: withContextStrip(ec2Command),
-  kms: withContextStrip(kmsCommand),
-  s3: withContextStrip(s3Command),
-  iam: withContextStrip(iamCommand),
-  logs: withContextStrip(logsCommand),
-  setup: withContextStrip(setupCommand),
-  ssm: withContextStrip(ssmCommand),
-  secretsmanager: withContextStrip(secretsCommand),
-  secrets: withContextStrip(secretsCommand),
-  wait: withContextStrip(waitCommand),
-  lambda: withContextStrip((args, context) => lambdaCommand(args, context)),
-};
+export const OVERLAY_COMMANDS: Readonly<Record<string, AxiCliCommand<AwsContext>>> =
+  Object.freeze(
+    Object.assign(Object.create(null) as Record<string, AxiCliCommand<AwsContext>>, {
+      whoami: withContextStrip(whoamiCommand),
+      ec2: withContextStrip(ec2Command),
+      kms: withContextStrip(kmsCommand),
+      s3: withContextStrip(s3Command),
+      iam: withContextStrip(iamCommand),
+      logs: withContextStrip(logsCommand),
+      setup: withContextStrip(setupCommand),
+      ssm: withContextStrip(ssmCommand),
+      secretsmanager: withContextStrip(secretsCommand),
+      secrets: withContextStrip(secretsCommand),
+      wait: withContextStrip(waitCommand),
+      lambda: withContextStrip((args, context) => lambdaCommand(args, context)),
+    }),
+  );
 
 /**
  * Keys that must NEVER be intercepted by the engine Proxy.
@@ -190,8 +216,36 @@ const OVERLAY_COMMANDS: Record<string, AxiCliCommand<AwsContext>> = {
  * - "then" / "catch" / "finally": if the Proxy returned handlers for these, the commands
  *   object would be a thenable, causing `Promise.resolve(commands)` to spin recursively
  *   and breaking any async code that touches the commands map.
+ *
+ * Exported for shape-pin tests (see test/cli-proto-dispatch.test.ts:Y6).
  */
-const PROXY_DENYLIST = new Set<string>(["update", "then", "catch", "finally"]);
+export const PROXY_DENYLIST: ReadonlySet<string> = new Set<string>([
+  "update",
+  "then",
+  "catch",
+  "finally",
+]);
+
+/**
+ * Load-time invariant: OVERLAY_COMMANDS and PROXY_DENYLIST must be disjoint.
+ *
+ * Rationale: OVERLAY_COMMANDS is frozen (Object.freeze). The ES Proxy [[Get]]
+ * invariant requires that a trap returning `undefined` for a non-configurable,
+ * non-writable own property throws a TypeError. The Proxy trap checks
+ * PROXY_DENYLIST BEFORE Object.hasOwn, so a denylisted key present in the
+ * frozen OVERLAY_COMMANDS would cause every `commands[key]` lookup to throw —
+ * killing the entire CLI silently. This assertion converts that latent,
+ * hard-to-diagnose mid-dispatch crash into an immediate, named import-time error.
+ */
+for (const key of Object.keys(OVERLAY_COMMANDS)) {
+  if (PROXY_DENYLIST.has(key)) {
+    throw new Error(
+      `aws-axi invariant violation: overlay key "${key}" collides with PROXY_DENYLIST. ` +
+        `Overlays must not shadow reserved keys (${[...PROXY_DENYLIST].join(", ")}). ` +
+        `Remove "${key}" from OVERLAY_COMMANDS or from PROXY_DENYLIST.`,
+    );
+  }
+}
 
 /**
  * Build the command dispatch map: a Proxy over the overlay record that returns
@@ -205,7 +259,7 @@ const PROXY_DENYLIST = new Set<string>(["update", "then", "catch", "finally"]);
  * service, while letting overlays shadow the engine on their specific services.
  */
 function buildCommandsProxy(): Record<string, AxiCliCommand<AwsContext>> {
-  return new Proxy(OVERLAY_COMMANDS, {
+  return new Proxy(OVERLAY_COMMANDS as Record<string, AxiCliCommand<AwsContext>>, {
     get(
       target: Record<string, AxiCliCommand<AwsContext>>,
       prop: string | symbol,
@@ -223,15 +277,16 @@ function buildCommandsProxy(): Record<string, AxiCliCommand<AwsContext>> {
         return undefined;
       }
 
-      // Overlay takes precedence.
-      const overlay = Reflect.get(target, prop, receiver) as
-        | AxiCliCommand<AwsContext>
-        | undefined;
-      if (overlay !== undefined) {
-        return overlay;
+      // Overlay takes precedence. Object.hasOwn is the explicit guard — it only
+      // returns true for own-enumerable properties and is immune to prototype
+      // lookups even if the underlying object were ever a plain literal.
+      // Combined with OVERLAY_COMMANDS's null prototype, this is defence-in-depth:
+      // either guard alone suffices; both together kill every known mutant.
+      if (Object.hasOwn(target, prop)) {
+        return target[prop];
       }
 
-      // Unknown service → generic engine handler with context-strip wrapper.
+      // Unknown service (not an overlay, not denied) → generic engine handler.
       return withContextStrip(makeEngineHandler(prop));
     },
   }) as Record<string, AxiCliCommand<AwsContext>>;
