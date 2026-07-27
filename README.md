@@ -137,7 +137,7 @@ generic engine. Two deliberate named exceptions exist for `s3 ls` (see below).
 >
 > | Flag | No URI (list-buckets) | With URI (list-objects-v2) |
 > |---|---|---|
-> | `--recursive` | USAGE_ERROR | **Translated**: drops `--delimiter /`, returning all nested keys |
+> | `--recursive` | USAGE_ERROR (bare or `=true`); `=false` honored silently (no-op — bucket listing is never recursive) | **Translated**: drops `--delimiter /`, returning all nested keys |
 > | `--human-readable` | USAGE_ERROR | USAGE_ERROR *(named exception: display-only; silent absorb would mislead)* |
 > | `--summarize` | USAGE_ERROR | USAGE_ERROR *(named exception: same reason)* |
 > | `--page-size` | forwarded | forwarded |
@@ -156,8 +156,21 @@ generic engine. Two deliberate named exceptions exist for `s3 ls` (see below).
 >
 > **Value-aware boolean flags (cp/rm):** `--dryrun`, `--recursive`, `--quiet`,
 > `--only-show-errors`, `--no-progress`, and `--follow-symlinks` accept an optional
-> boolean value token (`--flag false` suppresses the flag; `--flag` / `--flag true`
-> enables it). The literal value is never forwarded to the child `aws` process.
+> boolean value token. The literal value is never forwarded to the child `aws` process.
+>
+> | Form | Effect |
+> |---|---|
+> | `--flag` (bare) | enabled |
+> | `--flag true` / `--flag=true` / `--flag=1` / `--flag=yes` (case-insensitive) | enabled |
+> | `--flag false` / `--flag=false` / `--flag=0` / `--flag=no` (case-insensitive) | disabled — aws-axi superset extension; real `aws` hard-errors on `--flag=false` |
+> | `--flag=<anything else>` (e.g. `--dryrun=off`) | **USAGE_ERROR** — unrecognised value hard-errors to prevent silent no-ops |
+>
+> The `=false`/`=0`/`=no` extension exists because LLM agents commonly emit these forms
+> from boolean-typed schemas. Without it, `--dryrun=false` was inverted to dry-run-on
+> (exit 0, no bytes transferred). The hard-error on unrecognised values (e.g. `--dryrun=off`)
+> prevents a different silent no-op: the user intended to disable dry-run but got a dry run.
+>
+> The same vocabulary applies to `--recursive` on `s3 ls s3://bucket/`.
 
 | Service          | Command            | Enriched overlay operations                                                                  | Everything else                    |
 | ---------------- | ------------------ | -------------------------------------------------------------------------------------------- | ---------------------------------- |

@@ -763,7 +763,7 @@ operations[5] (enriched overlays):
 flags (overlay-specific):
   --profile <name>        AWS profile (inherited from global --profile)
   --region <region>       AWS region  (inherited from global --region)
-  --dryrun                Preview without mutating (cp/rm)
+  --dryrun                Preview without mutating (cp/rm); see boolean semantics below
   --starting-token <tok>  Resume a paginated ls call (both paths: list-buckets and list-objects-v2).
                           ls is capped at 20 items per page; when more are available, truncated: true
                           and nextToken are emitted. Pass nextToken as --starting-token to continue.
@@ -771,6 +771,17 @@ flags (overlay-specific):
                           results), but nextToken is projected away so pagination state is not surfaced.
                           To bound output size when using --query, pass --max-items N (forwarded via
                           passthrough; last-wins over the overlay default).
+
+boolean flag semantics (applies to --dryrun, --recursive, --quiet, --only-show-errors,
+                         --no-progress, --follow-symlinks on cp/rm; --recursive on ls):
+  --flag                  bare presence → enabled (true)
+  --flag true|1|yes       two-arg or =-form recognised true literals → enabled
+  --flag false|0|no       two-arg or =-form recognised false literals → disabled
+                          (aws-axi extension: real aws rejects --flag=false; we honour it)
+  --flag=<other>          unrecognised =-form value → USAGE_ERROR (e.g. --dryrun=off is an error,
+                          not a silent no-op; use --dryrun=false or --dryrun=no to disable)
+  note: two-arg form with an unrecognised non-bool token (e.g. --flag s3://bucket) is treated
+        as bare presence; the non-bool token is left as a positional (not consumed as a value)
 
 examples:
   aws-axi s3 ls
@@ -835,7 +846,12 @@ export async function s3Command(
       if (prefix === undefined) {
         // ── No-URI path → s3api list-buckets ──────────────────────────────────
         // Intercept flags that only apply to the object-listing (prefix) path.
-        if (hasFlag(rest, "--recursive")) {
+        // flagIsTrue (value-aware): --recursive=false → false → no throw (user said
+        // "don't recurse" which is the default for bucket listing — coherent silence).
+        // Bare --recursive or --recursive=true → true → USAGE_ERROR (correct: bucket
+        // listing has no recursion concept and a URI is required for object recursion).
+        // --recursive=<unrecognized> → USAGE_ERROR thrown by flagIsTrue itself (#57).
+        if (flagIsTrue(rest, "--recursive")) {
           throw new AxiError(
             "--recursive requires a s3:// URI; it is not valid when listing all buckets",
             "USAGE_ERROR",
@@ -1000,7 +1016,11 @@ export async function s3Command(
       // Intercept aws s3-level flags that have no s3api head-object equivalent.
       // head-object fetches metadata for a single key; --recursive and display
       // flags from the high-level aws s3 commands do not apply here.
-      if (hasFlag(rest, "--recursive")) {
+      // flagIsTrue (value-aware): --recursive=false → false → no throw (user said
+      // "don't recurse" — honoured silently, coherent with the cp/rm and ls paths).
+      // Bare --recursive or --recursive=true → true → USAGE_ERROR (still correct).
+      // --recursive=<unrecognized> → USAGE_ERROR thrown by flagIsTrue itself (#57).
+      if (flagIsTrue(rest, "--recursive")) {
         throw new AxiError(
           "--recursive is not valid for s3 head-object (head-object fetches metadata for a single key, not a prefix)",
           "USAGE_ERROR",

@@ -241,18 +241,19 @@ export function hasFlag(args: readonly string[], flag: string): boolean {
  * (currently: --dryrun and --recursive in s3).
  *
  * Accepted inputs and their interpretation:
- *   --flag            → true   (bare presence implies enabled)
- *   --flag true       → true   (two-arg form; recognised true literal)
- *   --flag false      → false  (two-arg form; recognised false literal)
- *   --flag 0 / no     → false  (two-arg form; recognised false literals)
- *   --flag <other>    → true   (two-arg; unrecognised non-bool → bare-presence)
+ *   --flag            → true          (bare presence implies enabled)
+ *   --flag true       → true          (two-arg form; recognised true literal)
+ *   --flag false      → false         (two-arg form; recognised false literal)
+ *   --flag 0 / no     → false         (two-arg form; recognised false literals)
+ *   --flag <other>    → true          (two-arg; unrecognised non-bool → bare-presence)
  *   --flag=true       → true
  *   --flag=1          → true
  *   --flag=yes        → true
- *   --flag=<other>    → true   (any unrecognised =value is treated as truthy)
- *   --flag=false      → false  (superset extension: real aws hard-errors here)
+ *   --flag=false      → false         (superset extension: real aws hard-errors here)
  *   --flag=0          → false
  *   --flag=no         → false
+ *   --flag=<other>    → USAGE_ERROR   (#57: unrecognised =-form value hard-errors)
+ *   --flag=           → USAGE_ERROR   (empty =-form value is also unrecognised)
  *   (absent)          → false
  *
  * ADR-0002 contract: aws-axi is a strict SUPERSET of real aws — it accepts
@@ -271,6 +272,13 @@ export function hasFlag(args: readonly string[], flag: string): boolean {
  * file).  The `=` prefix guard prevents false matches against flags sharing
  * a name prefix (e.g. --dryrun vs --dryrun-mode).
  */
+/**
+ * Recognised boolean literals for the `=`-form value in `flagIsTrue`.
+ * Values outside this set throw USAGE_ERROR (#57).
+ */
+const BOOL_TRUE_LITERALS = new Set(["true", "1", "yes"]);
+const BOOL_FALSE_LITERALS = new Set(["false", "0", "no"]);
+
 export function flagIsTrue(args: readonly string[], flag: string): boolean {
   const eqPrefix = `${flag}=`;
   for (let i = 0; i < args.length; i++) {
@@ -286,14 +294,30 @@ export function flagIsTrue(args: readonly string[], flag: string): boolean {
       const next = args[i + 1];
       if (next !== undefined && !next.startsWith("--")) {
         const v = next.toLowerCase();
-        if (v === "false" || v === "0" || v === "no") return false;
-        if (v === "true" || v === "1" || v === "yes") return true;
+        if (BOOL_FALSE_LITERALS.has(v)) return false;
+        if (BOOL_TRUE_LITERALS.has(v)) return true;
       }
       return true; // bare presence
     }
     if (a.startsWith(eqPrefix)) {
-      const v = a.slice(eqPrefix.length).toLowerCase();
-      return v !== "false" && v !== "0" && v !== "no";
+      const raw = a.slice(eqPrefix.length);
+      const v = raw.toLowerCase();
+      if (BOOL_FALSE_LITERALS.has(v)) return false;
+      if (BOOL_TRUE_LITERALS.has(v)) return true;
+      // Unrecognized =-form value: hard-error (ADR-0002-legal — real aws rejects
+      // all `--flag=<value>` forms; erroring on `--flag=off` narrows only our own
+      // superset extension, which we are free to define).  This prevents the
+      // silent no-op where `--dryrun=off` was treated as truthy (dry-run on),
+      // causing exit 0 with no bytes transferred when the user asked to disable
+      // dry-run.
+      throw new AxiError(
+        `${flag}=${raw} is not a recognised boolean value`,
+        "USAGE_ERROR",
+        [
+          `${flag} accepts: true, 1, yes (enable)  or  false, 0, no (disable)`,
+          `Bare ${flag} (no value) also enables it`,
+        ],
+      );
     }
   }
   return false;
@@ -336,11 +360,14 @@ export function flagIsTrue(args: readonly string[], flag: string): boolean {
  * always safe.  For write-guard flags (`--dryrun`, `--recursive`) where the
  * fail-safe is the opposite direction, use `flagIsTrue` instead.
  *
- * Interaction with #57: issue #57 proposes hard-erroring on unrecognised
- * boolean values for ALL boolean flags.  When that lands, both `flagIsTrue`
- * and `flagIsTrueStrict` will error before returning, making the fallback
- * difference moot.  Until then the two helpers serve different fail-safe
- * directions for `=`-form values; remove `flagIsTrueStrict` when #57 lands.
+ * Interaction with #57 (LANDED): `flagIsTrue` now throws USAGE_ERROR for
+ * any `=`-form value outside {true,1,yes,false,0,no}.  `flagIsTrueStrict`
+ * intentionally still returns `false` for unrecognised `=`-form values —
+ * the two helpers retain distinct fail-safe semantics: for confidentiality
+ * flags (`--reveal`), an unrecognised value should silently redact rather
+ * than error (fail-safe = leak nothing).  Removal of `flagIsTrueStrict` is
+ * deferred until `--reveal` callers are also updated to prefer USAGE_ERROR
+ * over silent redaction on unrecognised input.
  *
  * First-wins on repeated flags.  Same `=`-prefix guard as `flagIsTrue`.
  */

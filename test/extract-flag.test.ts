@@ -603,11 +603,74 @@ describe("flagIsTrue", () => {
     expect(flagIsTrue(["--flag=yes"], "--flag")).toBe(true);
   });
 
-  it("unrecognised =value is treated as truthy (safe default)", () => {
-    // Any value not in the explicit falsy list is truthy.
-    expect(flagIsTrue(["--flag=maybe"], "--flag")).toBe(true);
-    expect(flagIsTrue(["--flag=TRUE"], "--flag")).toBe(true); // case-insensitive → truthy
-    // "true" lowercased → truthy; "True" lowercased → "true" → truthy
+  it("case-insensitive aliases: TRUE/YES/1 → true (still recognised after #57 fix)", () => {
+    // These are in the known-true set (true/1/yes, case-insensitive) → still return true.
+    // "TRUE" lowercased → "true"; "Yes" lowercased → "yes"; "1" is always 1.
+    expect(flagIsTrue(["--flag=TRUE"], "--flag")).toBe(true);
+    expect(flagIsTrue(["--flag=Yes"], "--flag")).toBe(true);
+    expect(flagIsTrue(["--flag=1"], "--flag")).toBe(true);
+  });
+
+  // ── #57: unrecognized =-form values → USAGE_ERROR ───────────────────────────
+  //
+  // Before this fix: any value NOT in the explicit falsy list (false/0/no) was
+  // treated as truthy — including `off`, `garbage`, and empty `=`.
+  // This caused a SILENT NO-OP: `--dryrun=off` was treated as `--dryrun=true`
+  // (dry run), so the user asked to turn dry-run OFF and got a dry run (exit 0,
+  // success-shaped output, zero bytes transferred).
+  //
+  // After this fix: any value outside {true,1,yes,false,0,no} (case-insensitive)
+  // throws USAGE_ERROR with a clear message naming the flag and accepted values.
+  //
+  // ADR-0002-legal: real `aws` rejects `--dryrun=<any-value>` entirely.
+  // Erroring on `--dryrun=off` narrows only our own superset extension, which
+  // we define.  The recognised set {true,1,yes,false,0,no} is unchanged.
+  //
+  // Mutation-test (value axis): if the check is removed (all unrecognized values
+  // return true again) → "throws USAGE_ERROR" tests go RED.
+  // Mutation-test (wiring axis): if flagIsTrue is not called at the s3 dispatch
+  // site → wire test for dryrun=off goes RED.
+
+  it("--flag=off (=-form) → USAGE_ERROR (was silently truthy before #57 fix)", () => {
+    // RED before fix: returned true (silent no-op for --dryrun=off)
+    // GREEN after fix: throws USAGE_ERROR
+    expect(() => flagIsTrue(["--flag=off"], "--flag")).toThrow();
+  });
+
+  it("--flag=garbage (=-form) → USAGE_ERROR", () => {
+    expect(() => flagIsTrue(["--flag=garbage"], "--flag")).toThrow();
+  });
+
+  it("--flag= (empty =-form) → USAGE_ERROR", () => {
+    // Empty value is also unrecognized: --dryrun= is not a sensible boolean.
+    expect(() => flagIsTrue(["--flag="], "--flag")).toThrow();
+  });
+
+  it("USAGE_ERROR code is set on the thrown error for unrecognized =-form value", () => {
+    let thrown: unknown;
+    try {
+      flagIsTrue(["--flag=off"], "--flag");
+    } catch (e) {
+      thrown = e;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as { code?: string }).code).toBe("USAGE_ERROR");
+  });
+
+  it("error message names the flag and the accepted values", () => {
+    let thrown: unknown;
+    try {
+      flagIsTrue(["--dryrun=off"], "--dryrun");
+    } catch (e) {
+      thrown = e;
+    }
+    // Must name the flag so the user knows which flag is the problem.
+    expect((thrown as Error).message).toMatch(/--dryrun/);
+  });
+
+  it("--flag=maybe (=-form) → USAGE_ERROR", () => {
+    // Anything outside {true,1,yes,false,0,no} is USAGE_ERROR, not silently truthy.
+    expect(() => flagIsTrue(["--flag=maybe"], "--flag")).toThrow();
   });
 
   // ── falsy inputs ────────────────────────────────────────────────────────────
