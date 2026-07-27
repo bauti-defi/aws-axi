@@ -13,8 +13,11 @@
  *   These tests drive `s3Command` (the real CLI entrypoint) with an argv that
  *   contains an unrecognized boolean value.  No stub binary is needed because
  *   USAGE_ERROR is thrown inside the overlay BEFORE `awsExec` is called.
- *   The tests assert: (a) the promise rejects, and (b) the error code is
- *   USAGE_ERROR (not SERVICE_CLIENT_ERROR / AWS_NOT_INSTALLED / etc.).
+ *   The tests assert: (a) the promise rejects, (b) the error code is
+ *   USAGE_ERROR (not SERVICE_CLIENT_ERROR / AWS_NOT_INSTALLED / etc.), AND
+ *   (c) the error message contains the OVERLAY's own text — so a regression
+ *   that bypasses the overlay guard (letting the real `aws` child reject the
+ *   flag instead) fails the message assertion and goes RED.
  *
  * Mutation-test results (reported in PR body):
  *   (1) Value-axis: revert the unrecognized-value throw in flagIsTrue
@@ -23,11 +26,13 @@
  *   (2) Wiring-axis: bypass the flagIsTrue call at the cp dryRun dispatch site
  *       → wire test for dryrun=off goes RED (no USAGE_ERROR thrown).
  *
- * Part 1 (--recursive coherence): also covered below.
- *   --recursive=false on both the no-URI ls path and the head-object path
- *   must NOT throw USAGE_ERROR (user said "don't recurse" = default = silent ok).
- *   `flagIsTrue` with value "false" → returns false → guard condition is false →
- *   no throw.  Tests use a stub binary that returns minimal valid JSON.
+ * --recursive loud-error tests (Part 1 NOT taken — operator decision):
+ *   `hasFlag` (presence-only) guards the no-URI ls and head-object paths.
+ *   ANY form of --recursive — including =false/=no — must USAGE_ERROR there.
+ *   Tests assert both `.code === "USAGE_ERROR"` AND the overlay-specific
+ *   message substring, so a `hasFlag → flagIsTrue` regression (which lets
+ *   --recursive=false fall through to the real `aws` child) fails the message
+ *   assertion and goes RED even though the child also exits as USAGE_ERROR.
  */
 import { describe, it, expect, afterEach } from "bun:test";
 import { readFileSync, existsSync } from "node:fs";
@@ -59,11 +64,6 @@ function argvLoggingStub(logFile: string): string {
 /** Stub that always exits 0 with minimal JSON for list-buckets. */
 function listBucketsStub(): string {
   return stubBin(`#!/bin/sh\nprintf '{"Buckets":[],"Owner":null}'\nexit 0\n`);
-}
-
-/** Stub that always exits 0 with minimal JSON for head-object. */
-function headObjectStub(): string {
-  return stubBin(`#!/bin/sh\nprintf '{"ContentType":"application/octet-stream","ContentLength":0,"ETag":"etag","LastModified":"2026-01-01T00:00:00Z"}'\nexit 0\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -216,13 +216,31 @@ describe("wire: s3 cp/rm — unrecognized =-form bool values → USAGE_ERROR (#5
 //
 // The `s3 ls s3://bucket/ --recursive=false` case (prefix path) still works:
 // that path uses `flagIsTrue`, so `=false` → recursive=false → delimiter kept.
+//
+// Non-vacuous assertion requirement:
+//   Tests assert BOTH `.code === "USAGE_ERROR"` AND the OVERLAY's specific
+//   message substring. This matters for the `=false`/`=no` forms: a regression
+//   that flips the guard `hasFlag → flagIsTrue` lets those forms fall through
+//   to the real `aws` child, which ALSO exits with a usage error (code
+//   USAGE_ERROR) but with "usage: aws ..." as the message — NOT the overlay
+//   text. The message assertion catches the regression.
+//
+// Overlay messages:
+//   no-URI ls:   "--recursive requires a s3:// URI; it is not valid when listing all buckets"
+//   head-object: "--recursive is not valid for s3 head-object (head-object fetches metadata for a single key, not a prefix)"
+
+// Overlay message substrings used for non-vacuous assertions:
+const LS_NO_URI_MSG = "--recursive requires a s3:// URI";
+const HEAD_OBJECT_MSG = "--recursive is not valid for s3 head-object";
 
 describe("--recursive loud-error on s3 ls (no URI) and head-object", () => {
   // ── s3 ls (no URI) ──────────────────────────────────────────────────────────
 
-  it("s3 ls --recursive=false (no URI): USAGE_ERROR — any --recursive form is an error here", async () => {
-    // Operator decision: `--recursive=false` on the no-URI path still loud-errors.
-    // hasFlag detects presence regardless of value; real aws rejects this form outright.
+  it("s3 ls --recursive=false (no URI): USAGE_ERROR with overlay message — any --recursive form is an error here", async () => {
+    // VACUOUS WITHOUT MESSAGE ASSERTION: under regression (hasFlag → flagIsTrue),
+    // flagIsTrue("--recursive=false") → false → guard not triggered → real `aws`
+    // child is invoked → `aws` also rejects with USAGE_ERROR but with its own
+    // "usage: aws ..." text. Only the overlay message check makes this non-vacuous.
     let thrown: unknown;
     try {
       await s3Command(["ls", "--recursive=false"], undefined);
@@ -231,9 +249,10 @@ describe("--recursive loud-error on s3 ls (no URI) and head-object", () => {
     }
     expect(thrown).toBeDefined();
     expect((thrown as { code?: string }).code).toBe("USAGE_ERROR");
+    expect((thrown as { message?: string }).message).toContain(LS_NO_URI_MSG);
   });
 
-  it("s3 ls --recursive (no URI): USAGE_ERROR (unchanged — bare flag still errors)", async () => {
+  it("s3 ls --recursive (no URI): USAGE_ERROR with overlay message (unchanged — bare flag still errors)", async () => {
     let thrown: unknown;
     try {
       await s3Command(["ls", "--recursive"], undefined);
@@ -242,9 +261,10 @@ describe("--recursive loud-error on s3 ls (no URI) and head-object", () => {
     }
     expect(thrown).toBeDefined();
     expect((thrown as { code?: string }).code).toBe("USAGE_ERROR");
+    expect((thrown as { message?: string }).message).toContain(LS_NO_URI_MSG);
   });
 
-  it("s3 ls --recursive=true (no URI): USAGE_ERROR (unchanged — explicit true errors)", async () => {
+  it("s3 ls --recursive=true (no URI): USAGE_ERROR with overlay message (unchanged — explicit true errors)", async () => {
     let thrown: unknown;
     try {
       await s3Command(["ls", "--recursive=true"], undefined);
@@ -253,11 +273,12 @@ describe("--recursive loud-error on s3 ls (no URI) and head-object", () => {
     }
     expect(thrown).toBeDefined();
     expect((thrown as { code?: string }).code).toBe("USAGE_ERROR");
+    expect((thrown as { message?: string }).message).toContain(LS_NO_URI_MSG);
   });
 
-  it("s3 ls --recursive=no (no URI): USAGE_ERROR — hasFlag fires before Part 2 throw", async () => {
-    // =no is a recognised false literal (would pass flagIsTrue's check) but
-    // the no-URI path uses hasFlag, so presence alone → USAGE_ERROR.
+  it("s3 ls --recursive=no (no URI): USAGE_ERROR with overlay message — hasFlag fires before any flagIsTrue check", async () => {
+    // VACUOUS WITHOUT MESSAGE ASSERTION: =no is a recognised false literal;
+    // regression (hasFlag → flagIsTrue) would return false → fall through to child.
     let thrown: unknown;
     try {
       await s3Command(["ls", "--recursive=no"], undefined);
@@ -266,12 +287,15 @@ describe("--recursive loud-error on s3 ls (no URI) and head-object", () => {
     }
     expect(thrown).toBeDefined();
     expect((thrown as { code?: string }).code).toBe("USAGE_ERROR");
+    expect((thrown as { message?: string }).message).toContain(LS_NO_URI_MSG);
   });
 
   // ── s3 head-object ──────────────────────────────────────────────────────────
 
-  it("s3 head-object --recursive=false: USAGE_ERROR — any --recursive form is an error here", async () => {
-    // Same loud-error principle: head-object has no recursion concept.
+  it("s3 head-object --recursive=false: USAGE_ERROR with overlay message — any --recursive form is an error here", async () => {
+    // VACUOUS WITHOUT MESSAGE ASSERTION: under regression, flagIsTrue("--recursive=false")
+    // → false → head-object guard not triggered → real `aws head-object` rejects
+    // --recursive=false with its own USAGE_ERROR but different message.
     let thrown: unknown;
     try {
       await s3Command(
@@ -283,9 +307,10 @@ describe("--recursive loud-error on s3 ls (no URI) and head-object", () => {
     }
     expect(thrown).toBeDefined();
     expect((thrown as { code?: string }).code).toBe("USAGE_ERROR");
+    expect((thrown as { message?: string }).message).toContain(HEAD_OBJECT_MSG);
   });
 
-  it("s3 head-object --recursive (bare): USAGE_ERROR (unchanged)", async () => {
+  it("s3 head-object --recursive (bare): USAGE_ERROR with overlay message (unchanged)", async () => {
     let thrown: unknown;
     try {
       await s3Command(
@@ -297,6 +322,7 @@ describe("--recursive loud-error on s3 ls (no URI) and head-object", () => {
     }
     expect(thrown).toBeDefined();
     expect((thrown as { code?: string }).code).toBe("USAGE_ERROR");
+    expect((thrown as { message?: string }).message).toContain(HEAD_OBJECT_MSG);
   });
 
   // ── Positive guard: prefix path (ls s3://...) still uses flagIsTrue ────────
