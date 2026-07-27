@@ -13,7 +13,7 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main } from "../src/cli.js";
-import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
+import { stubBin, stubDir, releaseStubBins } from "./helpers/stub-bin.js";
 import { useEnvGuard } from "./helpers/env-guard.js";
 
 afterEach(() => {
@@ -178,7 +178,7 @@ describe("CLI engine fallback — overlay services take precedence", () => {
     const { output, exitCode } = await captureMain(
       ["whoami"],
       {
-        PATH: `${stub.replace(/\/aws$/, "")}:${process.env["PATH"] ?? ""}`,
+        PATH: `${stubDir(stub)}:${process.env["PATH"] ?? ""}`,
       },
     );
 
@@ -200,7 +200,7 @@ describe("CLI engine fallback — generic service dispatch", () => {
     const { output, exitCode } = await captureMain(
       ["fake-svc", "simple-op"],
       {
-        PATH: `${stub.replace(/\/aws$/, "")}:${process.env["PATH"] ?? ""}`,
+        PATH: `${stubDir(stub)}:${process.env["PATH"] ?? ""}`,
         AWS_DATA_PATH: FIXTURES_DIR,
       },
     );
@@ -215,7 +215,7 @@ describe("CLI engine fallback — generic service dispatch", () => {
     const { output, exitCode } = await captureMain(
       ["fake-svc", "required-op"],
       {
-        PATH: `${stub.replace(/\/aws$/, "")}:${process.env["PATH"] ?? ""}`,
+        PATH: `${stubDir(stub)}:${process.env["PATH"] ?? ""}`,
         AWS_DATA_PATH: FIXTURES_DIR,
       },
     );
@@ -231,7 +231,7 @@ describe("CLI engine fallback — generic service dispatch", () => {
     const { output, exitCode } = await captureMain(
       ["fake-svc"],
       {
-        PATH: `${stub.replace(/\/aws$/, "")}:${process.env["PATH"] ?? ""}`,
+        PATH: `${stubDir(stub)}:${process.env["PATH"] ?? ""}`,
         AWS_DATA_PATH: FIXTURES_DIR,
       },
     );
@@ -250,7 +250,7 @@ describe("CLI engine fallback — generic service dispatch", () => {
     const { output, exitCode } = await captureMain(
       ["fake-svc", "paginated-op"],
       {
-        PATH: `${stub.replace(/\/aws$/, "")}:${process.env["PATH"] ?? ""}`,
+        PATH: `${stubDir(stub)}:${process.env["PATH"] ?? ""}`,
         AWS_DATA_PATH: FIXTURES_DIR,
       },
     );

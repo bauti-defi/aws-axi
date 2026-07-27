@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { main } from "../src/cli.js";
+import { stubDir } from "./helpers/stub-bin.js";
 import { useEnvGuard } from "./helpers/env-guard.js";
 
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
@@ -110,9 +111,6 @@ async function captureMain(
   return { output: chunks.join(""), exitCode };
 }
 
-function stubPath(binary: string): string {
-  return binary.replace(/\/aws$/, "");
-}
 
 // ── EC2 overlay tests ─────────────────────────────────────────────────────────
 
@@ -139,7 +137,7 @@ describe("overlay fall-through — ec2", () => {
     const { output, exitCode } = await captureMain(
       ["ec2", "describe-vpcs"],
       {
-        PATH: `${stubPath(stub)}:${process.env["PATH"] ?? ""}`,
+        PATH: `${stubDir(stub)}:${process.env["PATH"] ?? ""}`,
         AWS_DATA_PATH: FIXTURES_DIR,
       },
     );
@@ -172,7 +170,7 @@ describe("overlay fall-through — ec2", () => {
     const { output, exitCode } = await captureMain(
       ["ec2", "describe-regions"],
       {
-        PATH: `${stubPath(stub)}:${process.env["PATH"] ?? ""}`,
+        PATH: `${stubDir(stub)}:${process.env["PATH"] ?? ""}`,
         AWS_DATA_PATH: FIXTURES_DIR,
       },
     );
@@ -195,7 +193,7 @@ describe("overlay fall-through — ec2", () => {
     const { output, exitCode } = await captureMain(
       ["ec2", "totally-bogus-op"],
       {
-        PATH: `${stubPath(stub)}:${process.env["PATH"] ?? ""}`,
+        PATH: `${stubDir(stub)}:${process.env["PATH"] ?? ""}`,
         AWS_DATA_PATH: FIXTURES_DIR,
       },
     );
@@ -225,7 +223,7 @@ describe("overlay fall-through — logs", () => {
     const { output, exitCode } = await captureMain(
       ["logs", "describe-log-groups"],
       {
-        PATH: `${stubPath(stub)}:${process.env["PATH"] ?? ""}`,
+        PATH: `${stubDir(stub)}:${process.env["PATH"] ?? ""}`,
         AWS_DATA_PATH: FIXTURES_DIR,
       },
     );
@@ -255,7 +253,7 @@ describe("overlay fall-through — logs", () => {
     const { output, exitCode } = await captureMain(
       ["logs", "filter-log-events", "--log-group-name", "/aws/lambda/my-fn"],
       {
-        PATH: `${stubPath(stub)}:${process.env["PATH"] ?? ""}`,
+        PATH: `${stubDir(stub)}:${process.env["PATH"] ?? ""}`,
         AWS_DATA_PATH: FIXTURES_DIR,
       },
     );
@@ -273,7 +271,7 @@ describe("overlay fall-through — logs", () => {
     const { output, exitCode } = await captureMain(
       ["logs", "totally-bogus-logs-op"],
       {
-        PATH: `${stubPath(stub)}:${process.env["PATH"] ?? ""}`,
+        PATH: `${stubDir(stub)}:${process.env["PATH"] ?? ""}`,
         AWS_DATA_PATH: FIXTURES_DIR,
       },
     );
