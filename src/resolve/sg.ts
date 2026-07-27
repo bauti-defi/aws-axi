@@ -50,6 +50,14 @@ export interface ResolveSgOptions {
 
 const cache = new Map<string, ResolvedSg | null>();
 
+/**
+ * Clear the in-process cache.
+ * @internal — exposed only for test teardown between test cases.
+ */
+export function _clearCache(): void {
+  cache.clear();
+}
+
 // ---------------------------------------------------------------------------
 // Implementation
 // ---------------------------------------------------------------------------

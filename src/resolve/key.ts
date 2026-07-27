@@ -68,6 +68,14 @@ export interface ResolveKeyOptions {
 
 const aliasMapCache = new Map<string, ReadonlyMap<string, string>>();
 
+/**
+ * Clear the in-process alias-map cache.
+ * @internal — exposed only for test teardown between test cases.
+ */
+export function _clearCache(): void {
+  aliasMapCache.clear();
+}
+
 function aliasCacheKey(options: ResolveKeyOptions): string {
   return [
     options.binary ?? "",

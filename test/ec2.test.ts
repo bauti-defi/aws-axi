@@ -6,23 +6,15 @@
  * No mocks — the full `awsJson` exec seam runs with a subprocess boundary.
  * Stubs emit pinned EC2 JSON; we assert on curated output shapes.
  *
- * Pool vs. unique split:
- *   POOL  — networking reads (describe-vpcs / describe-subnets / describe-security-groups)
- *           and describe-instances with an empty Reservations array. These code paths
- *           never reach resolveSg or resolveSubnet, so the binary path never touches a
- *           binary-path-keyed module-level cache. Safe to recycle from the pool.
- *
- *   UNIQUE — all describe-instances tests backed by INSTANCE_FULL, INSTANCE_MINIMAL, or
- *            INSTANCES_PAGE_ONE. Every one of those fixtures contains a SubnetId, which
- *            causes ec2.ts to call resolveSubnet (keyed on `${binary}::${id}`). Any pool
- *            slot shared between two such tests would collide on the subnet cache, returning
- *            stale enriched data. uniqueStubBin() ensures each test owns a fresh inode and
- *            therefore a distinct cache key.
+ * All stubs use the pooled allocator (`stubBin`). Resolver caches (resolveSg,
+ * resolveSubnet, resolveVpc, loadAliasMap) are cleared after every test by the
+ * global afterEach in test/helpers/global-hooks.ts, so recycled pool slots
+ * never serve stale cached enrichment data to a subsequent test.
  */
 import { describe, it, expect, afterEach } from "bun:test";
 import { ec2Run } from "../src/commands/ec2.js";
 import { AxiError } from "axi-sdk-js";
-import { stubBin, releaseStubBins, uniqueStubBin } from "./helpers/stub-bin.js";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
 
 // ---------------------------------------------------------------------------
 // Stub factory
@@ -411,16 +403,13 @@ function shellQuoteMulti(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`;
 }
 
-// The default produces a UNIQUE inode (safe for all tests). Pass { pooled: true }
-// only for INSTANCES_EMPTY tests (no instances → no enrichment → no binary-path-keyed
-// resolver caches are touched). Any test providing instances with SubnetId or
-// SecurityGroups reaches resolveSubnet/resolveSg, which memoize per binary path —
-// those MUST use the safe default (unique inode).
+// All describe-instances stubs use the pooled allocator. Resolver caches are
+// cleared after every test by the global afterEach in global-hooks.ts, so pool
+// slot reuse never serves a stale subnet/sg cache hit.
 function createDispatchStub(
   responses: {
     readonly [operation: string]: { readonly stdout: string; readonly exitCode?: number };
   },
-  { pooled = false }: { pooled?: boolean } = {},
 ): string {
   const cases = Object.entries(responses)
     .map(([op, { stdout, exitCode }]) => {
@@ -444,7 +433,7 @@ function createDispatchStub(
     "esac",
   ].join("\n");
 
-  return pooled ? stubBin(script) : uniqueStubBin(script);
+  return stubBin(script);
 }
 
 // ---------------------------------------------------------------------------
@@ -767,7 +756,7 @@ describe("ec2Run describe-instances — empty state", () => {
   it("returns empty instances list with count 0 and help suggestion", async () => {
     const stub = createDispatchStub({
       "describe-instances": { stdout: INSTANCES_EMPTY },
-    }, { pooled: true });
+    });
 
     const result = await ec2Run({
       operation: "describe-instances",

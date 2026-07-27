@@ -32,21 +32,20 @@
  * and guarded by `test/stub-bin.test.ts`, which fails if a stale image is ever
  * served.
  *
- * WHEN YOU MUST NOT POOL
- * ----------------------
- * Several resolvers memoize for the lifetime of the process under a key that
- * includes the binary path:
+ * WHEN TO USE `uniqueStubBin`
+ * ---------------------------
+ * Since PR #105, all six module-level resolver caches export `_clearCache()`
+ * and are cleared after every test by the global afterEach registered in
+ * `test/helpers/global-hooks.ts` (loaded via bunfig.toml preload). Pool slot
+ * recycling is therefore safe for all resolvers.
  *
- *   src/resolve/key.ts     (loadAliasMap — kms)
- *   src/resolve/sg.ts, subnet.ts, vpc.ts   (ec2)
+ * Use `uniqueStubBin` only when you need the binary PATH itself to be unique
+ * across calls — e.g. a test that inspects argv[0], or a stub whose identity
+ * must survive a pool cursor reset. For all resolver-related tests, `stubBin`
+ * is correct and faster.
  *
- * A pooled path handed to two different test cases would serve the FIRST
- * case's cached value to the second — a silent wrong-answer, far worse than a
- * slow test. Those tests must use `uniqueStubBin()`, which pays the ~400 ms to
- * mint a fresh inode and buys real cache isolation.
- *
- * Resolvers whose cache key omits the binary (`bucket.ts`, `role.ts`,
- * `policy.ts` — keyed on profile:region:name) are unaffected either way.
+ * `uniqueStubBin` remains available as an escape hatch for unusual cases.
+ * Its own self-tests live in `test/stub-bin.test.ts` and are not affected.
  */
 import { writeFileSync, chmodSync, mkdtempSync, rmSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
@@ -102,8 +101,13 @@ export function releaseStubBins(): void {
 
 /**
  * Allocate a stub at a path that is never reused for the lifetime of the
- * process. Costs a fresh-inode exec (~300-650 ms on macOS) — only use it when
- * a binary-path-keyed cache in `src/resolve/` makes path identity load-bearing.
+ * process. Costs a fresh-inode exec (~300-650 ms on macOS).
+ *
+ * Since PR #105 all resolver caches export `_clearCache()` and are cleared by
+ * the global afterEach — binary-path uniqueness is no longer required for cache
+ * isolation. This function remains available as an escape hatch for tests that
+ * genuinely require a unique binary path for other reasons (e.g. argv[0] checks,
+ * identity-sensitive stub wiring). For resolver tests, prefer `stubBin`.
  */
 export function uniqueStubBin(script: string): string {
   const dir = mkdtempSync(join(POOL_ROOT, "unique-"));

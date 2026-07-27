@@ -1,2 +1,5 @@
 [install]
 exact = true
+
+[test]
+preload = ["./test/helpers/global-hooks.ts"]
