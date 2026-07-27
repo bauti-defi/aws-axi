@@ -242,14 +242,22 @@ export function parseAwsError(
   }
 
   // ── usage/validation errors ────────────────────────────────────────────
-  // exit 252 is the sole classifier: the aws CLI argument-parser exits 252 on
-  // every validation failure. No stderr anchor is reliable — every aws stderr
-  // begins with a bare \n, so a raw /^usage:/i test can never match the start
-  // of the string. The "usage: aws..." preamble only appears on *some* 252
-  // exits (e.g. bad --instance-type); other 252 exits emit "Unknown options:"
-  // or "[ERROR]: argument …" with no usage line at all. Empirically verified
-  // across 10+ error shapes on aws-cli 2.33.13 — all produced exit 252; none
-  // produced "usage:" text with any other exit code.
+  // exit 252 is the sole classifier: the aws CLI argparse layer exits 252 for
+  // flag-level failures (unknown options, missing required subcommands, invalid
+  // enum values such as unrecognised --instance-types).  The "usage: aws..."
+  // preamble appears on *some* 252 exits but not all — "Unknown options:" and
+  // "[ERROR]: argument …" shapes emit no usage line.
+  //
+  // A separate class of validation failures exits 255 and never emits "usage:":
+  // these are Python-level type-coercion errors that occur after argparse
+  // accepts the token (e.g. --max-keys notanumber, --cli-read-timeout abc,
+  // --cli-connect-timeout xyz, malformed --region strings).  Those fall through
+  // to UNKNOWN, which is correct — they are not argparse-level errors.
+  //
+  // Empirically verified on aws-cli/2.33.13 (darwin/arm64):
+  //   exit 252: --bogusflag, --instance-types notavalidtype, missing subcommand
+  //   exit 255: --max-keys notanumber, --cli-read-timeout abc,
+  //             --cli-connect-timeout xyz, --region 'invalid-format!!'
   if (exitCode === 252) {
     return {
       code: "USAGE_ERROR",
