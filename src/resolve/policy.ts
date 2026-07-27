@@ -36,6 +36,19 @@ export interface ResolvePolicyOptions {
 // Module-level cache — lives for the process lifetime (one CLI invocation).
 const MODULE_CACHE = new Map<string, ResolvedPolicy>();
 
+/**
+ * Clear the module-level policy cache.
+ *
+ * Called by the global afterEach in test/helpers/global-hooks.ts after every
+ * test so pooled stub binaries are safe to reuse without cross-test contamination.
+ * Not intended for production use.
+ *
+ * @internal
+ */
+export function _clearCache(): void {
+  MODULE_CACHE.clear();
+}
+
 interface IamRawPolicy {
   readonly PolicyName: string;
   readonly PolicyId: string;

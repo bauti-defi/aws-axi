@@ -34,7 +34,7 @@
  *
  * WHEN TO USE `uniqueStubBin`
  * ---------------------------
- * Since PR #105, all six module-level resolver caches export `_clearCache()`
+ * Since PR #112, all eight module-level resolver caches export `_clearCache()`
  * and are cleared after every test by the global afterEach registered in
  * `test/helpers/global-hooks.ts` (loaded via bunfig.toml preload). Pool slot
  * recycling is therefore safe for all resolvers.

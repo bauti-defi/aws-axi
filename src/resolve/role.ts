@@ -36,6 +36,19 @@ export interface ResolveRoleOptions {
 // Module-level cache — lives for the process lifetime (one CLI invocation).
 const MODULE_CACHE = new Map<string, ResolvedRole>();
 
+/**
+ * Clear the module-level role cache.
+ *
+ * Called by the global afterEach in test/helpers/global-hooks.ts after every
+ * test so pooled stub binaries are safe to reuse without cross-test contamination.
+ * Not intended for production use.
+ *
+ * @internal
+ */
+export function _clearCache(): void {
+  MODULE_CACHE.clear();
+}
+
 interface IamGetRoleResponse {
   readonly Role: {
     readonly RoleName: string;
