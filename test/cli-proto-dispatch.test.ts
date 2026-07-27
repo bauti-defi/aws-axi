@@ -297,9 +297,11 @@ describe("CLI prototype-safety — Y5: --help on prototype keys must not crash",
 // with the denylist is caught at test time, not in prod.
 //
 // Mutation coverage:
-//   M-denylist: remove "update" from PROXY_DENYLIST → this test still passes
+//   M-denylist:  remove "update" from PROXY_DENYLIST → this test still passes
 //     (no intersection), but Y4 "update still reaches SDK updater" catches it.
-//   M-overlay:  add "update" to OVERLAY_COMMANDS → this test turns RED.
+//   M-overlay:   add "update" to OVERLAY_COMMANDS → this test turns RED.
+//   M-readonly:  widen PROXY_DENYLIST back to Set<string> → the @ts-expect-error
+//     in "is typed ReadonlySet" becomes an unused directive → typecheck FAILS (RED).
 
 describe("CLI prototype-safety — Y6: PROXY_DENYLIST ∩ OVERLAY_COMMANDS === ∅", () => {
   it("no OVERLAY_COMMANDS key appears in PROXY_DENYLIST", () => {
@@ -319,5 +321,21 @@ describe("CLI prototype-safety — Y6: PROXY_DENYLIST ∩ OVERLAY_COMMANDS === �
 
   it("PROXY_DENYLIST is a Set (not a plain object)", () => {
     expect(PROXY_DENYLIST).toBeInstanceOf(Set);
+  });
+
+  it("PROXY_DENYLIST is typed ReadonlySet — .add() is a compile-time type error", () => {
+    // Compile-time proof that PROXY_DENYLIST cannot be mutated by repo code.
+    // ReadonlySet<string> does not expose .add(); any call site that attempts
+    // PROXY_DENYLIST.add(...) becomes a TypeScript compile error caught by
+    // `bun run typecheck` in CI before the code can reach production.
+    //
+    // If tsc reports this @ts-expect-error directive as "unused", it means
+    // PROXY_DENYLIST was widened back to a mutable Set<string> — the
+    // immutability contract has been broken.
+    //
+    // Note: the underlying runtime object IS a Set, so at runtime this call
+    // succeeds. The enforcement is purely at the type-checking layer.
+    // @ts-expect-error  Property 'add' does not exist on type 'ReadonlySet<string>'
+    PROXY_DENYLIST.add("__readonly_probe__");
   });
 });

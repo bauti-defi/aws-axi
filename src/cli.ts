@@ -219,7 +219,12 @@ export const OVERLAY_COMMANDS: Readonly<Record<string, AxiCliCommand<AwsContext>
  *
  * Exported for shape-pin tests (see test/cli-proto-dispatch.test.ts:Y6).
  */
-export const PROXY_DENYLIST = new Set<string>(["update", "then", "catch", "finally"]);
+export const PROXY_DENYLIST: ReadonlySet<string> = new Set<string>([
+  "update",
+  "then",
+  "catch",
+  "finally",
+]);
 
 /**
  * Load-time invariant: OVERLAY_COMMANDS and PROXY_DENYLIST must be disjoint.
