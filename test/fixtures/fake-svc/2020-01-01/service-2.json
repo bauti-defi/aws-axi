@@ -36,6 +36,10 @@
       "name": "GetDBThing",
       "http": { "method": "GET", "requestUri": "/" },
       "output": { "shape": "GetDBThingResponse" }
+    },
+    "NoOutputOp": {
+      "name": "NoOutputOp",
+      "http": { "method": "POST", "requestUri": "/" }
     }
   },
   "shapes": {

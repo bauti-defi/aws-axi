@@ -232,6 +232,17 @@ export async function awsJson<T = unknown>(
     throw new AxiError(result.error.message, result.error.code, [...result.error.suggestions]);
   }
 
+  // Empty-body 200 success: many AWS write operations (e.g. sqs purge-queue,
+  // iam put-role-policy, iam delete-role-policy, iam attach/detach-role-policy)
+  // return HTTP 200 with an empty body. The aws CLI produces empty or
+  // whitespace-only stdout for these calls. JSON.parse("") would throw and
+  // misclassify the successful call as UNKNOWN — gate on empty stdout before
+  // attempting JSON.parse. This is safe: the result.error check above already
+  // guarantees the call exited 0; empty stdout on exit 0 is unambiguous success.
+  if (result.stdout.trim() === "") {
+    return { ok: true } as T;
+  }
+
   try {
     return JSON.parse(result.stdout) as T;
   } catch {
