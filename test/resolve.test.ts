@@ -1,16 +1,16 @@
 /**
- * Tests for the resolve-vpc / resolve-subnet / resolve-sg / resolve-role primitives.
+ * Tests for the resolve-vpc / resolve-subnet / resolve-sg primitives.
  *
  * No mocks — real stub aws binaries via the `binary` seam. Each primitive
  * resolves an AWS resource id to a human name using the Name tag (or
  * group-name for SGs), with in-process caching across repeated calls.
  *
- * These stubs MUST come from `uniqueStubBin`, not the pool: `resolve/vpc.ts`,
- * `subnet.ts` and `sg.ts` memoize for the lifetime of the process under a key
- * that includes the binary path. A recycled path would let one test's cached
- * entry satisfy the next test's lookup — the "caches results" and "returns
- * null on AWS error" cases both go RED when that happens, which is how this
- * was caught. The per-test fresh inode IS the cache isolation here.
+ * All stubs use the pooled allocator (`stubBin`). The resolver caches
+ * (vpc, subnet, sg) are cleared after every test by the global afterEach in
+ * test/helpers/global-hooks.ts, so recycled pool slots never serve stale cached
+ * results to a subsequent test. The "caches results" tests call the resolver
+ * twice within one `it()`, so an afterEach clear cannot weaken them — it makes
+ * them stronger by guaranteeing a cold start for each test.
  */
 import { describe, it, expect, afterEach } from "bun:test";
 import { rmSync, mkdtempSync, readFileSync, existsSync } from "node:fs";
@@ -19,7 +19,7 @@ import { tmpdir } from "node:os";
 import { resolveVpc } from "../src/resolve/vpc.js";
 import { resolveSubnet } from "../src/resolve/subnet.js";
 import { resolveSg } from "../src/resolve/sg.js";
-import { uniqueStubBin } from "./helpers/stub-bin.js";
+import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
 
 // ---------------------------------------------------------------------------
 // Stub factory
@@ -48,20 +48,23 @@ function createStub(spec: {
   ]
     .filter(Boolean)
     .join("\n");
-  const p = uniqueStubBin(lines);
-  return p;
+  return stubBin(lines);
 }
 
 /**
  * Creates a stub that records call count in a counter file and returns
  * valid output only on the first invocation. Used to verify caching.
+ *
+ * The stub is pooled (stubBin). The counter file is a unique sidecar — the
+ * pool slot is overwritten each test, so calling the stub twice within one
+ * `it()` is the only reliable way to observe the counter: a second test
+ * seeing counter=0 again is the desired behavior (afterEach clears the
+ * cache, so the stub would be called fresh).
  */
 function createCountingStub(stdout: string): {
   readonly binary: string;
   readonly counterFile: string;
 } {
-  // The stub itself is pooled, but this dir still holds the sibling counter
-  // file that the stub reads and writes across invocations.
   const dir = mkdtempSync(join(tmpdir(), "aws-axi-resolve-count-"));
   tempDirs.push(dir);
   const counterFile = join(dir, "calls");
@@ -82,11 +85,11 @@ function createCountingStub(stdout: string): {
     `exit 1`,
   ].join("\n");
 
-  const p = uniqueStubBin(script);
-  return { binary: p, counterFile };
+  return { binary: stubBin(script), counterFile };
 }
 
 afterEach(() => {
+  releaseStubBins();
   for (const dir of tempDirs.splice(0)) {
     try {
       rmSync(dir, { recursive: true });

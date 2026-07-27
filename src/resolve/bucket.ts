@@ -37,6 +37,14 @@ export interface ResolveBucketOptions {
 // A CLI process is short-lived so a simple Map is sufficient.
 const cache = new Map<string, BucketInfo>();
 
+/**
+ * Clear the in-process cache.
+ * @internal — exposed only for test teardown between test cases.
+ */
+export function _clearCache(): void {
+  cache.clear();
+}
+
 function cacheKey(options: ResolveBucketOptions): string {
   const profile = options.context?.profile ?? "";
   const region = options.context?.region ?? "";
