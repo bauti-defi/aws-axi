@@ -216,8 +216,31 @@ export const OVERLAY_COMMANDS: Readonly<Record<string, AxiCliCommand<AwsContext>
  * - "then" / "catch" / "finally": if the Proxy returned handlers for these, the commands
  *   object would be a thenable, causing `Promise.resolve(commands)` to spin recursively
  *   and breaking any async code that touches the commands map.
+ *
+ * Exported for shape-pin tests (see test/cli-proto-dispatch.test.ts:Y6).
  */
-const PROXY_DENYLIST = new Set<string>(["update", "then", "catch", "finally"]);
+export const PROXY_DENYLIST = new Set<string>(["update", "then", "catch", "finally"]);
+
+/**
+ * Load-time invariant: OVERLAY_COMMANDS and PROXY_DENYLIST must be disjoint.
+ *
+ * Rationale: OVERLAY_COMMANDS is frozen (Object.freeze). The ES Proxy [[Get]]
+ * invariant requires that a trap returning `undefined` for a non-configurable,
+ * non-writable own property throws a TypeError. The Proxy trap checks
+ * PROXY_DENYLIST BEFORE Object.hasOwn, so a denylisted key present in the
+ * frozen OVERLAY_COMMANDS would cause every `commands[key]` lookup to throw —
+ * killing the entire CLI silently. This assertion converts that latent,
+ * hard-to-diagnose mid-dispatch crash into an immediate, named import-time error.
+ */
+for (const key of Object.keys(OVERLAY_COMMANDS)) {
+  if (PROXY_DENYLIST.has(key)) {
+    throw new Error(
+      `aws-axi invariant violation: overlay key "${key}" collides with PROXY_DENYLIST. ` +
+        `Overlays must not shadow reserved keys (${[...PROXY_DENYLIST].join(", ")}). ` +
+        `Remove "${key}" from OVERLAY_COMMANDS or from PROXY_DENYLIST.`,
+    );
+  }
+}
 
 /**
  * Build the command dispatch map: a Proxy over the overlay record that returns

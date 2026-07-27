@@ -26,7 +26,7 @@
 import { describe, it, expect, afterEach } from "bun:test";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { main, OVERLAY_COMMANDS, COMMAND_HELP } from "../src/cli.js";
+import { main, OVERLAY_COMMANDS, COMMAND_HELP, PROXY_DENYLIST } from "../src/cli.js";
 import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
 import { useEnvGuard } from "./helpers/env-guard.js";
 
@@ -281,4 +281,43 @@ describe("CLI prototype-safety — Y5: --help on prototype keys must not crash",
       expect(output).not.toContain("native code");
     });
   }
+});
+
+// ── Y6: PROXY_DENYLIST and OVERLAY_COMMANDS must be disjoint ─────────────────
+//
+// The hazard: OVERLAY_COMMANDS is frozen (Object.freeze). The ES Proxy [[Get]]
+// invariant requires that a trap returning `undefined` for a non-configurable,
+// non-writable own property throws a TypeError. The Proxy checks PROXY_DENYLIST
+// BEFORE Object.hasOwn, so if any overlay key matched a denylist key the whole
+// CLI would die with an opaque TypeError on every command lookup.
+//
+// The fix: a load-time assertion in src/cli.ts throws immediately with a clear
+// error if the invariant is ever violated (fail-fast beats mid-dispatch crash).
+// This test pins the invariant so a future overlay registration that collides
+// with the denylist is caught at test time, not in prod.
+//
+// Mutation coverage:
+//   M-denylist: remove "update" from PROXY_DENYLIST → this test still passes
+//     (no intersection), but Y4 "update still reaches SDK updater" catches it.
+//   M-overlay:  add "update" to OVERLAY_COMMANDS → this test turns RED.
+
+describe("CLI prototype-safety — Y6: PROXY_DENYLIST ∩ OVERLAY_COMMANDS === ∅", () => {
+  it("no OVERLAY_COMMANDS key appears in PROXY_DENYLIST", () => {
+    const overlayKeys = Object.keys(OVERLAY_COMMANDS);
+    const collisions = overlayKeys.filter((k) => PROXY_DENYLIST.has(k));
+    expect(collisions).toEqual([]);
+  });
+
+  it("PROXY_DENYLIST contains the four reserved members", () => {
+    // Pin the exact denylist so a member removal is caught by this test
+    // rather than only by the behavioural gate in Y4.
+    expect(PROXY_DENYLIST.has("update")).toBe(true);
+    expect(PROXY_DENYLIST.has("then")).toBe(true);
+    expect(PROXY_DENYLIST.has("catch")).toBe(true);
+    expect(PROXY_DENYLIST.has("finally")).toBe(true);
+  });
+
+  it("PROXY_DENYLIST is a Set (not a plain object)", () => {
+    expect(PROXY_DENYLIST).toBeInstanceOf(Set);
+  });
 });
