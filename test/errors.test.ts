@@ -354,6 +354,69 @@ describe("parseAwsError — unknown/general errors", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// USAGE_ERROR classification
+//
+// Three invariants are guarded here:
+//
+//   (a) EXIT CODE: exit 252 → USAGE_ERROR regardless of stderr content.
+//       Guards the exit-code gate itself — any weakening of the 252
+//       predicate silently drops unknown-flag and missing-subcommand
+//       errors into UNKNOWN.
+//
+//   (b) DISCRIMINATING: exit code is the SOLE classifier — stderr content
+//       is not sufficient. The same usage-shaped text at a non-252 exit
+//       must fall through to UNKNOWN, not USAGE_ERROR. This pins the
+//       removal of the dead /^usage:/i regex branch: stderr content
+//       alone must never promote a non-252 exit to USAGE_ERROR.
+//
+//   (c) MESSAGE: the message field reflects actual stderr content (first
+//       non-blank line), not a hardcoded fallback string. Guards that
+//       parseAwsError passes real stderr through unchanged.
+//
+// Measured on aws-cli/2.33.13 (darwin/arm64):
+//   exit 252 → argparse-level: unknown flags, missing subcommands, invalid enums
+//   exit 255 → Python type-coercion: --max-keys notanumber, --cli-read-timeout abc
+// ---------------------------------------------------------------------------
+describe("parseAwsError — USAGE_ERROR", () => {
+  it("exit 252 with plain 'Unknown options' stderr → USAGE_ERROR (no usage: preamble)", () => {
+    // Captured shape: bad flag on s3 ls → no "usage:" line at all.
+    // This stderr would fall through to UNKNOWN without the exit-code guard.
+    const result = parseAwsError("\nUnknown options: --bogusflag\n", 252);
+    expect(result.code).toBe("USAGE_ERROR");
+    expect(result.message).toBe("Unknown options: --bogusflag");
+    expect(awsExitCode(result.code)).toBe(252);
+  });
+
+  it("exit 252 with 'usage: aws...' preamble stderr → USAGE_ERROR", () => {
+    // Captured shape: bad flag on ec2 → stderr begins \nusage: aws [options]...
+    // The preamble starts after a leading \n; a raw /^usage:/i test can never fire.
+    // Classification is carried entirely by the exit-code guard.
+    const result = parseAwsError(
+      "\nusage: aws [options] <command> <subcommand> [<subcommand> ...] [parameters]\n" +
+        "To see help text, you can run:\n\n  aws help\n  aws <command> help\n",
+      252,
+    );
+    expect(result.code).toBe("USAGE_ERROR");
+    expect(result.message).toBe(
+      "usage: aws [options] <command> <subcommand> [<subcommand> ...] [parameters]",
+    );
+    expect(awsExitCode(result.code)).toBe(252);
+  });
+
+  it("usage-shaped stderr with a non-252 exit must not be classified as USAGE_ERROR", () => {
+    // Property guarded: exit code is the sole classifier — stderr content is
+    // not sufficient. Input has NO leading \n so /^usage:/i would match it
+    // directly; the test verifies that no such regex path exists and the
+    // non-252 exit falls through to UNKNOWN.
+    const result = parseAwsError(
+      "usage: aws [options] <command> <subcommand> [<subcommand> ...] [parameters]\n",
+      255,
+    );
+    expect(result.code).toBe("UNKNOWN");
+  });
+});
+
 describe("awsExitCode", () => {
   it("returns 252 for USAGE_ERROR", () => {
     expect(awsExitCode("USAGE_ERROR")).toBe(252);
