@@ -21,6 +21,34 @@ import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import { awsRaw } from "../aws.js";
 import { loadService, getWaiter, pascalToKebab, type ServiceModel } from "../model.js";
+import { SERVICE_ALIASES } from "../engine.js";
+
+/**
+ * Inverse of SERVICE_ALIASES: maps botocore model names to their AWS CLI
+ * high-level command names where these differ.
+ *
+ * Derived from the single source of truth in engine.ts (as noted in the
+ * SERVICE_ALIASES JSDoc) so there is no separate hand-maintained table here.
+ *
+ * S3 is the motivating case (#76): the waiter model lives under `s3/` in
+ * botocore, but `aws s3 wait` is not a valid command — the CLI exposes S3
+ * waiters under `s3api wait`. Every other well-known service (`ec2`, `lambda`,
+ * `rds`, `ecs`, …) uses the same name for both the model directory and the
+ * CLI command, so they are unaffected.
+ *
+ * CodeDeploy has the same shape: model dir is `codedeploy/` but the CLI
+ * command is `deploy`. Both are covered by this inverse map.
+ *
+ * config/configservice: `config` has no waiters-2.json in botocore, so the
+ * entry is present in the map but never consulted by waitRun.
+ *
+ * Examples:
+ *   "s3"         → "s3api"   (aws s3 wait …   invalid; aws s3api wait … works)
+ *   "codedeploy" → "deploy"  (aws codedeploy wait … invalid; aws deploy wait … works)
+ */
+const WAIT_SERVICE_REMAP: ReadonlyMap<string, string> = new Map(
+  Object.entries(SERVICE_ALIASES).map(([cliName, modelName]) => [modelName, cliName] as const),
+);
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -168,11 +196,19 @@ export async function waitRun(options: WaitRunOptions): Promise<WaitResult> {
   const waiterDef = getWaiter(model, pascalKey)!;
   const budgetSeconds = waiterDef.delay * waiterDef.maxAttempts;
 
-  // 2. Shell to `aws <service> wait <waiterName> [...flags]`
+  // 2. Shell to `aws <cliService> wait <waiterName> [...flags]`
   //    awsRaw appends --output json (harmless for wait; produces no output).
   //    The kebab waiter name is passed unchanged — that is what `aws` expects.
+  //
+  //    cliService may differ from options.service for services where the
+  //    botocore model directory name differs from the AWS CLI command name.
+  //    WAIT_SERVICE_REMAP (inverse of SERVICE_ALIASES) resolves this:
+  //      "s3"         → "s3api"   (aws s3 wait is invalid; s3 waiters live under s3api)
+  //      "codedeploy" → "deploy"  (aws codedeploy wait is invalid; use deploy)
+  //    All other services map to themselves (Map.get returns undefined → fallback).
+  const cliService = WAIT_SERVICE_REMAP.get(options.service) ?? options.service;
   const result = await awsRaw(
-    [options.service, "wait", options.waiterName, ...options.flags],
+    [cliService, "wait", options.waiterName, ...options.flags],
     { binary: options.binary, context: options.context, configPath: options.configPath },
   );
 
