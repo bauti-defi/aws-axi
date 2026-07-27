@@ -41,7 +41,7 @@
  *   - Equals form: --function-name=my-function works
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { rmSync, readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { lambdaRun } from "../src/commands/lambda.js";
