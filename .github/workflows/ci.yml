@@ -11,6 +11,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The suite binds to the runner image's preinstalled AWS CLI:
+      #   - real-binary e2e (no-region, sso-auth-expired, wire-reveal) spawn `aws` directly
+      #   - live-botocore (model, s3api-routing) read its bundled botocore data tree
+      # ubuntu-24.04 currently ships 2.36.2. aws-cli >= 2.34.0 emits a different
+      # stderr shape than 2.33.x (prefix + enhanced-error wrapper) — see
+      # src/errors.ts and test/fixtures/region-errors/README.md. Recording the
+      # version here is what makes the next stderr regression diagnosable.
+      - name: Verify AWS CLI present (live-botocore + real-binary e2e tests depend on it)
+        run: |
+          aws --version
+          echo "aws-cli: $(aws --version 2>&1)" >> "$GITHUB_STEP_SUMMARY"
+
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
