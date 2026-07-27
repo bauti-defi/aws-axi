@@ -3,10 +3,19 @@
  *
  * Two tiers:
  *   1. Fixture-based (deterministic): pinned synthetic service under test/fixtures/.
- *   2. Live-path: validates real botocore discovery and a stable real service (STS).
+ *   2. Live-path: validates real botocore discovery and stable real services (STS, EC2).
+ *
+ * Live-path design (probe-once contract):
+ *   - `findBotocoreDataDir()` is called ONCE at module level (see `liveDataDir` below).
+ *   - "aws CLI absent" is the SOLE reason to skip. Any other failure (renamed service
+ *     dir, missing model file) must propagate RED — not be swallowed by a bare catch.
+ *   - Each live describe-block checks `liveDataDir` and either runs its `it` suite
+ *     or falls through to a single `it.skip` that makes the nonzero skip count visible
+ *     in the run summary.
  */
 import { describe, it, expect } from "bun:test";
 import { join } from "node:path";
+import { readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
   findBotocoreDataDir,
@@ -18,6 +27,15 @@ import {
 } from "../src/model.js";
 
 const FIXTURES_DIR = join(fileURLToPath(import.meta.url), "..", "fixtures");
+
+// Probe ONCE outside the tests. "aws CLI absent" is the SOLE tolerated skip
+// reason; every other failure (renamed / missing model dir) must propagate RED.
+let liveDataDir: string | undefined;
+try {
+  liveDataDir = findBotocoreDataDir();
+} catch {
+  liveDataDir = undefined;
+}
 
 // ── Fixture-based tests ───────────────────────────────────────────────────────
 
@@ -178,99 +196,73 @@ describe("findBotocoreDataDir", () => {
     ).toThrow(/does not exist/);
   });
 
-  it("discovers the real botocore data dir via which aws on this machine", () => {
-    // Live path — requires aws CLI installed. Skip if not found.
-    let found: string | undefined;
-    try {
-      found = findBotocoreDataDir();
-    } catch {
-      // aws CLI not installed in this environment — skip
-      return;
-    }
-    expect(found).toBeTruthy();
-    // Must contain at least one service directory
-    const { readdirSync } = require("node:fs");
-    const entries = readdirSync(found) as string[];
-    expect(entries.length).toBeGreaterThan(0);
-  });
+  if (liveDataDir === undefined) {
+    it.skip("SKIPPED: aws CLI not installed — live data-dir discovery is UNVERIFIED", () => {});
+  } else {
+    it("discovers the real botocore data dir via which aws on this machine", () => {
+      // No try/catch — any error other than "aws CLI absent" must go RED.
+      expect(liveDataDir).toBeTruthy();
+      const entries = readdirSync(liveDataDir as string);
+      expect(entries.length).toBeGreaterThan(0);
+    });
+  }
 });
 
 // ── live botocore — STS ───────────────────────────────────────────────────────
 
 describe("loadService — live botocore (STS)", () => {
-  it("loads real STS model and AssumeRole has required params", () => {
-    let stsModel;
-    try {
-      stsModel = loadService("sts");
-    } catch {
-      // aws CLI not installed — skip
-      return;
-    }
-    const ar = getOperation(stsModel, "AssumeRole");
-    expect(ar.required).toContain("RoleArn");
-    expect(ar.required).toContain("RoleSessionName");
-  });
+  if (liveDataDir === undefined) {
+    it.skip("SKIPPED: aws CLI not installed — live STS mapping is UNVERIFIED", () => {});
+  } else {
+    it("loads real STS model and AssumeRole has required params", () => {
+      // No try/catch — model-missing errors must go RED.
+      const stsModel = loadService("sts", { dataDir: liveDataDir });
+      const ar = getOperation(stsModel, "AssumeRole");
+      expect(ar.required).toContain("RoleArn");
+      expect(ar.required).toContain("RoleSessionName");
+    });
 
-  it("GetCallerIdentity has empty required and no errors", () => {
-    let stsModel;
-    try {
-      stsModel = loadService("sts");
-    } catch {
-      return;
-    }
-    const gci = getOperation(stsModel, "GetCallerIdentity");
-    expect(gci.required).toEqual([]);
-    expect(gci.errors).toEqual([]);
-  });
+    it("GetCallerIdentity has empty required and no errors", () => {
+      const stsModel = loadService("sts", { dataDir: liveDataDir });
+      const gci = getOperation(stsModel, "GetCallerIdentity");
+      expect(gci.required).toEqual([]);
+      expect(gci.errors).toEqual([]);
+    });
 
-  it("STS has no paginators for GetCallerIdentity", () => {
-    let stsModel;
-    try {
-      stsModel = loadService("sts");
-    } catch {
-      return;
-    }
-    expect(getPaginator(stsModel, "GetCallerIdentity")).toBeUndefined();
-  });
+    it("STS has no paginators for GetCallerIdentity", () => {
+      const stsModel = loadService("sts", { dataDir: liveDataDir });
+      expect(getPaginator(stsModel, "GetCallerIdentity")).toBeUndefined();
+    });
 
-  it("STS has no waiters", () => {
-    let stsModel;
-    try {
-      stsModel = loadService("sts");
-    } catch {
-      return;
-    }
-    expect(listWaiters(stsModel)).toEqual([]);
-  });
+    it("STS has no waiters", () => {
+      const stsModel = loadService("sts", { dataDir: liveDataDir });
+      expect(listWaiters(stsModel)).toEqual([]);
+    });
+  }
 });
 
 // ── live botocore — EC2 ───────────────────────────────────────────────────────
 
 describe("loadService — live botocore (EC2)", () => {
-  it("DescribeInstances paginator has result_key Reservations", () => {
-    let ec2Model;
-    try {
-      ec2Model = loadService("ec2");
-    } catch {
-      return;
-    }
-    const pg = getPaginator(ec2Model, "DescribeInstances");
-    expect(pg).toBeDefined();
-    expect(pg?.resultKeys).toContain("Reservations");
-  });
+  if (liveDataDir === undefined) {
+    it.skip("SKIPPED: aws CLI not installed — live EC2 mapping is UNVERIFIED", () => {});
+  } else {
+    it("DescribeInstances paginator has result_key Reservations", () => {
+      // No try/catch — model-missing errors must go RED.
+      const ec2Model = loadService("ec2", { dataDir: liveDataDir });
+      const pg = getPaginator(ec2Model, "DescribeInstances");
+      expect(pg).toBeDefined();
+      expect(pg?.resultKeys).toContain("Reservations");
+    });
 
-  it("EC2 has an InstanceRunning waiter targeting DescribeInstances", () => {
-    let ec2Model;
-    try {
-      ec2Model = loadService("ec2");
-    } catch {
-      return;
-    }
-    const waiter = getWaiter(ec2Model, "InstanceRunning");
-    expect(waiter).toBeDefined();
-    expect(waiter?.operation).toBe("DescribeInstances");
-    expect(waiter?.delay).toBe(15);
-    expect(waiter?.maxAttempts).toBe(40);
-    expect(listWaiters(ec2Model)).toContain("InstanceRunning");
-  });
+    it("EC2 has an InstanceRunning waiter targeting DescribeInstances", () => {
+      const ec2Model = loadService("ec2", { dataDir: liveDataDir });
+      const waiter = getWaiter(ec2Model, "InstanceRunning");
+      expect(waiter).toBeDefined();
+      expect(waiter?.operation).toBe("DescribeInstances");
+      expect(waiter?.delay).toBe(15);
+      expect(waiter?.maxAttempts).toBe(40);
+      expect(listWaiters(ec2Model)).toContain("InstanceRunning");
+    });
+  }
 });
