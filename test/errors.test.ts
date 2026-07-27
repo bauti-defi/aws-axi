@@ -360,19 +360,19 @@ describe("parseAwsError — unknown/general errors", () => {
 // Three invariants are guarded here:
 //
 //   (a) EXIT CODE: exit 252 → USAGE_ERROR regardless of stderr content.
-//       The mutation target is the exitCode === 252 predicate. Removing it
-//       causes the two "exit 252" tests below to fall through to UNKNOWN.
+//       Guards the exit-code gate itself — any weakening of the 252
+//       predicate silently drops unknown-flag and missing-subcommand
+//       errors into UNKNOWN.
 //
-//   (b) DISCRIMINATING: usage-shaped stderr with a non-252 exit must NOT be
-//       classified as USAGE_ERROR. This pins the removal of the dead
-//       /^usage:/i clause: if that clause were present, "usage: aws..." at
-//       exit 255 would spuriously return USAGE_ERROR instead of UNKNOWN.
-//       Mutating the guard back to (exitCode === 252 || /^usage:/i.test(...))
-//       makes this test RED.
+//   (b) DISCRIMINATING: exit code is the SOLE classifier — stderr content
+//       is not sufficient. The same usage-shaped text at a non-252 exit
+//       must fall through to UNKNOWN, not USAGE_ERROR. This pins the
+//       removal of the dead /^usage:/i regex branch: stderr content
+//       alone must never promote a non-252 exit to USAGE_ERROR.
 //
-//   (c) MESSAGE: the message field carries the first non-blank line of stderr,
-//       not a hardcoded literal. Replacing firstLine(stderr) with a literal
-//       makes the message assertion RED.
+//   (c) MESSAGE: the message field reflects actual stderr content (first
+//       non-blank line), not a hardcoded fallback string. Guards that
+//       parseAwsError passes real stderr through unchanged.
 //
 // Measured on aws-cli/2.33.13 (darwin/arm64):
 //   exit 252 → argparse-level: unknown flags, missing subcommands, invalid enums
@@ -405,11 +405,12 @@ describe("parseAwsError — USAGE_ERROR", () => {
   });
 
   it("usage-shaped stderr with a non-252 exit must not be classified as USAGE_ERROR", () => {
-    // Property guarded: the exit-code is the sole classifier — stderr content
-    // is not sufficient. A "usage: aws..." prefix emitted at exit 255 (e.g.
-    // from a wrapper script) must fall through to UNKNOWN, not USAGE_ERROR.
+    // Property guarded: exit code is the sole classifier — stderr content is
+    // not sufficient. Input has NO leading \n so /^usage:/i would match it
+    // directly; the test verifies that no such regex path exists and the
+    // non-252 exit falls through to UNKNOWN.
     const result = parseAwsError(
-      "\nusage: aws [options] <command> <subcommand> [<subcommand> ...] [parameters]\n",
+      "usage: aws [options] <command> <subcommand> [<subcommand> ...] [parameters]\n",
       255,
     );
     expect(result.code).toBe("UNKNOWN");
