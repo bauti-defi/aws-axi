@@ -411,14 +411,16 @@ function shellQuoteMulti(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`;
 }
 
-// unique=true for any test that provides an instance with a SubnetId or SecurityGroups,
-// because those reach resolveSubnet/resolveSg — binary-path-keyed module-level caches.
-// unique=false (pool) is safe only for INSTANCES_EMPTY (no instances → no enrichment).
+// The default produces a UNIQUE inode (safe for all tests). Pass { pooled: true }
+// only for INSTANCES_EMPTY tests (no instances → no enrichment → no binary-path-keyed
+// resolver caches are touched). Any test providing instances with SubnetId or
+// SecurityGroups reaches resolveSubnet/resolveSg, which memoize per binary path —
+// those MUST use the safe default (unique inode).
 function createDispatchStub(
   responses: {
     readonly [operation: string]: { readonly stdout: string; readonly exitCode?: number };
   },
-  unique = false,
+  { pooled = false }: { pooled?: boolean } = {},
 ): string {
   const cases = Object.entries(responses)
     .map(([op, { stdout, exitCode }]) => {
@@ -442,7 +444,7 @@ function createDispatchStub(
     "esac",
   ].join("\n");
 
-  return unique ? uniqueStubBin(script) : stubBin(script);
+  return pooled ? stubBin(script) : uniqueStubBin(script);
 }
 
 // ---------------------------------------------------------------------------
@@ -602,7 +604,7 @@ describe("ec2Run describe-instances — enriched happy path", () => {
       "describe-instances": { stdout: INSTANCE_FULL },
       "describe-security-groups": { stdout: SG_ENRICH },
       "describe-subnets": { stdout: SUBNET_ENRICH },
-    }, true);
+    });
 
     const result = await ec2Run({
       operation: "describe-instances",
@@ -650,7 +652,7 @@ describe("ec2Run describe-instances — enriched happy path", () => {
     const stub = createDispatchStub({
       "describe-instances": { stdout: INSTANCE_MINIMAL },
       "describe-subnets": { stdout: SUBNET_ENRICH },
-    }, true);
+    });
 
     const result = await ec2Run({
       operation: "describe-instances",
@@ -666,7 +668,7 @@ describe("ec2Run describe-instances — enriched happy path", () => {
     const stub = createDispatchStub({
       "describe-instances": { stdout: INSTANCE_MINIMAL },
       "describe-subnets": { stdout: SUBNET_ENRICH },
-    }, true);
+    });
 
     const result = await ec2Run({
       operation: "describe-instances",
@@ -682,7 +684,7 @@ describe("ec2Run describe-instances — enriched happy path", () => {
     const stub = createDispatchStub({
       "describe-instances": { stdout: INSTANCE_MINIMAL },
       "describe-subnets": { stdout: SUBNET_ENRICH },
-    }, true);
+    });
 
     const result = await ec2Run({
       operation: "describe-instances",
@@ -698,7 +700,7 @@ describe("ec2Run describe-instances — enriched happy path", () => {
     const stub = createDispatchStub({
       "describe-instances": { stdout: INSTANCE_MINIMAL },
       "describe-subnets": { stdout: SUBNET_ENRICH },
-    }, true);
+    });
 
     const result = await ec2Run({
       operation: "describe-instances",
@@ -721,7 +723,7 @@ describe("ec2Run describe-instances — pagination cap", () => {
       "describe-instances": { stdout: INSTANCES_PAGE_ONE },
       "describe-security-groups": { stdout: SG_ENRICH },
       "describe-subnets": { stdout: SUBNET_ENRICH },
-    }, true);
+    });
 
     const result = await ec2Run({
       operation: "describe-instances",
@@ -745,7 +747,7 @@ describe("ec2Run describe-instances — pagination cap", () => {
       "describe-instances": { stdout: INSTANCE_FULL },
       "describe-security-groups": { stdout: SG_ENRICH },
       "describe-subnets": { stdout: SUBNET_ENRICH },
-    }, true);
+    });
 
     const result = await ec2Run({
       operation: "describe-instances",
@@ -765,7 +767,7 @@ describe("ec2Run describe-instances — empty state", () => {
   it("returns empty instances list with count 0 and help suggestion", async () => {
     const stub = createDispatchStub({
       "describe-instances": { stdout: INSTANCES_EMPTY },
-    });
+    }, { pooled: true });
 
     const result = await ec2Run({
       operation: "describe-instances",

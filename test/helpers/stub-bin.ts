@@ -49,7 +49,7 @@
  * `policy.ts` — keyed on profile:region:name) are unaffected either way.
  */
 import { writeFileSync, chmodSync, mkdtempSync, rmSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 
 /** Root for every stub this process creates; removed on exit. */
@@ -138,7 +138,7 @@ export function uniqueStubDir(): string {
  * four scattered call-sites to be found and updated.
  */
 export function stubDir(binary: string): string {
-  return binary.replace(/\/aws$/, "");
+  return dirname(binary);
 }
 
 process.on("exit", () => {

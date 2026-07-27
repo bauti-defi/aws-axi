@@ -14,10 +14,10 @@
  * Tests that supply a response containing FUNCTION_RECORD (which has VpcConfig
  * with a shared SG_ID / SUBNET_ID) MUST use a unique stub path so a cached SG
  * or subnet name from one test can never be served to a different test. Those
- * tests call createLambdaStub(spec, true).
+ * tests use the default (no second argument) which produces a unique inode.
  *
  * Tests that exercise invoke, empty-state list-functions, or unknown-subcommand
- * never reach resolveVpcConfig and are safe to pool (createLambdaStub(spec)).
+ * never reach resolveVpcConfig and are safe to pool — pass { pooled: true }.
  *
  * Stub dispatch model (case on $2 = the Lambda sub-operation):
  *   list-functions  → curated multi-function JSON, optional NextToken
@@ -238,7 +238,7 @@ interface LambdaStubSpec {
   readonly listFunctionsStderr?: string;
 }
 
-function createLambdaStub(spec: LambdaStubSpec, unique = false): string {
+function createLambdaStub(spec: LambdaStubSpec, { pooled = false }: { pooled?: boolean } = {}): string {
 
   const lines: string[] = ["#!/bin/sh", 'case "$1" in'];
 
@@ -383,7 +383,7 @@ function createLambdaStub(spec: LambdaStubSpec, unique = false): string {
     "esac",
   );
 
-  return unique ? uniqueStubBin(lines.join("\n")) : stubBin(lines.join("\n"));
+  return pooled ? stubBin(lines.join("\n")) : uniqueStubBin(lines.join("\n"));
 }
 
 afterEach(() => {
@@ -411,7 +411,7 @@ function assertInvocation(r: LambdaRunResult): asserts r is { readonly invocatio
 
 describe("lambdaRun list-functions — happy path", () => {
   it("returns curated function list for two functions", async () => {
-    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO }, true);
+    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO });
 
     const result = await lambdaRun({
       subcommand: "list-functions",
@@ -435,7 +435,7 @@ describe("lambdaRun list-functions — happy path", () => {
   });
 
   it("count string shows N total when not truncated", async () => {
-    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO }, true);
+    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO });
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
     assertFunctions(result);
 
@@ -449,7 +449,7 @@ describe("lambdaRun list-functions — happy path", () => {
 
 describe("lambdaRun list-functions — pagination", () => {
   it("reports truncation honestly on synthesized NextToken — does NOT gate on NextMarker", async () => {
-    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TRUNCATED }, true);
+    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TRUNCATED });
     const result = await lambdaRun({
       subcommand: "list-functions",
       args: ["--max-items", "1"],
@@ -491,7 +491,7 @@ describe("lambdaRun list-functions — pagination", () => {
 
   it("accepts --next-token to resume pagination", async () => {
     // Stub returns the truncated list regardless; we just verify no error + token respected
-    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO }, true);
+    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO });
     const result = await lambdaRun({
       subcommand: "list-functions",
       args: ["--next-token", "AQICAHiGqSomePaginationToken=="],
@@ -506,7 +506,7 @@ describe("lambdaRun list-functions — pagination", () => {
 
 describe("lambdaRun list-functions — empty state", () => {
   it("returns a definitive empty state with guidance", async () => {
-    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_EMPTY });
+    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_EMPTY }, { pooled: true });
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
     assertFunctions(result);
 
@@ -522,7 +522,7 @@ describe("lambdaRun list-functions — enrichment", () => {
   it("resolves role ARN to name without a network call (parsed from ARN)", async () => {
     const stub = createLambdaStub({
       listFunctions: LIST_FUNCTIONS_TWO,
-    }, true);
+    });
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
     assertFunctions(result);
 
@@ -536,7 +536,7 @@ describe("lambdaRun list-functions — enrichment", () => {
       listFunctions: LIST_FUNCTIONS_TWO,
       describeSecurityGroups: SG_RESPONSE,
       describeSubnets: SUBNET_RESPONSE,
-    }, true);
+    });
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
     assertFunctions(result);
 
@@ -551,7 +551,7 @@ describe("lambdaRun list-functions — enrichment", () => {
       listFunctions: LIST_FUNCTIONS_TWO,
       kmsDescribeKey: KMS_DESCRIBE_KEY,
       kmsListAliases: KMS_LIST_ALIASES,
-    }, true);
+    });
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
     assertFunctions(result);
 
@@ -563,7 +563,7 @@ describe("lambdaRun list-functions — enrichment", () => {
     const stub = createLambdaStub({
       listFunctions: LIST_FUNCTIONS_TWO,
       logsDescribeLogGroups: LOG_GROUP_RESPONSE,
-    }, true);
+    });
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
     assertFunctions(result);
 
@@ -578,7 +578,7 @@ describe("lambdaRun list-functions — enrichment", () => {
     const stub = createLambdaStub({
       listFunctions: LIST_FUNCTIONS_TWO,
       // No SG/subnet enrichment stubs → stub returns empty fallback response
-    }, true);
+    });
     const result = await lambdaRun({ subcommand: "list-functions", args: [], binary: stub });
     assertFunctions(result);
 
@@ -601,7 +601,7 @@ describe("lambdaRun get-function — happy path", () => {
       kmsDescribeKey: KMS_DESCRIBE_KEY,
       kmsListAliases: KMS_LIST_ALIASES,
       logsDescribeLogGroups: LOG_GROUP_RESPONSE,
-    }, true);
+    });
 
     const result = await lambdaRun({
       subcommand: "get-function",
@@ -623,7 +623,7 @@ describe("lambdaRun get-function — happy path", () => {
   });
 
   it("requires a function name", async () => {
-    const stub = createLambdaStub({ getFunction: GET_FUNCTION_RESPONSE }, true);
+    const stub = createLambdaStub({ getFunction: GET_FUNCTION_RESPONSE });
     await expect(
       lambdaRun({ subcommand: "get-function", args: [], binary: stub }),
     ).rejects.toMatchObject({ code: "USAGE_ERROR" });
@@ -638,7 +638,7 @@ describe("lambdaRun get-function-configuration — happy path", () => {
       getFunctionConfiguration: GET_FUNCTION_CONFIGURATION_RESPONSE,
       describeSecurityGroups: SG_RESPONSE,
       describeSubnets: SUBNET_RESPONSE,
-    }, true);
+    });
 
     const result = await lambdaRun({
       subcommand: "get-function-configuration",
@@ -655,7 +655,7 @@ describe("lambdaRun get-function-configuration — happy path", () => {
   });
 
   it("requires a function name", async () => {
-    const stub = createLambdaStub({ getFunctionConfiguration: GET_FUNCTION_CONFIGURATION_RESPONSE }, true);
+    const stub = createLambdaStub({ getFunctionConfiguration: GET_FUNCTION_CONFIGURATION_RESPONSE });
     await expect(
       lambdaRun({ subcommand: "get-function-configuration", args: [], binary: stub }),
     ).rejects.toMatchObject({ code: "USAGE_ERROR" });
@@ -669,7 +669,7 @@ describe("lambdaRun invoke — success", () => {
     const stub = createLambdaStub({
       invokeMetadata: INVOKE_METADATA_OK,
       invokePayload: INVOKE_PAYLOAD_OK,
-    });
+    }, { pooled: true });
 
     const result = await lambdaRun({
       subcommand: "invoke",
@@ -692,7 +692,7 @@ describe("lambdaRun invoke — success", () => {
     const stub = createLambdaStub({
       invokeMetadata: INVOKE_METADATA_OK,
       invokePayload: INVOKE_PAYLOAD_OK,
-    });
+    }, { pooled: true });
     // Should not throw; payload flag is forwarded to aws
     const result = await lambdaRun({
       subcommand: "invoke",
@@ -709,7 +709,7 @@ describe("lambdaRun invoke — FunctionError", () => {
     const stub = createLambdaStub({
       invokeMetadata: INVOKE_METADATA_ERROR,
       invokePayload: INVOKE_PAYLOAD_ERROR,
-    });
+    }, { pooled: true });
 
     // Must NOT throw — FunctionError is an invocation-level result, not an infra error
     const result = await lambdaRun({
@@ -733,7 +733,7 @@ describe("lambdaRun invoke — usage errors", () => {
     const stub = createLambdaStub({
       invokeMetadata: INVOKE_METADATA_OK,
       invokePayload: INVOKE_PAYLOAD_OK,
-    });
+    }, { pooled: true });
     await expect(
       lambdaRun({ subcommand: "invoke", args: [], binary: stub }),
     ).rejects.toMatchObject({ code: "USAGE_ERROR" });
@@ -744,7 +744,7 @@ describe("lambdaRun invoke — usage errors", () => {
 
 describe("lambdaRun — unknown subcommand", () => {
   it("throws USAGE_ERROR for unrecognised operations", async () => {
-    const stub = createLambdaStub({});
+    const stub = createLambdaStub({}, { pooled: true });
     await expect(
       lambdaRun({ subcommand: "delete-function", args: [], binary: stub }),
     ).rejects.toMatchObject({ code: "USAGE_ERROR" });
@@ -755,7 +755,7 @@ describe("lambdaRun — unknown subcommand", () => {
 
 describe("lambdaCommand — CLI arg dispatch", () => {
   it("defaults to list-functions when no subcommand given", async () => {
-    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO }, true);
+    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO });
     const result = await lambdaCommand([], undefined, stub);
     expect("lambda" in result).toBe(true);
     const inner = result["lambda"] as Record<string, unknown>;
@@ -763,20 +763,20 @@ describe("lambdaCommand — CLI arg dispatch", () => {
   });
 
   it("wraps result under a lambda key", async () => {
-    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO }, true);
+    const stub = createLambdaStub({ listFunctions: LIST_FUNCTIONS_TWO });
     const result = await lambdaCommand(["list-functions"], undefined, stub);
     expect(Object.keys(result)).toContain("lambda");
   });
 
   it("throws USAGE_ERROR for unknown subcommand", async () => {
-    const stub = createLambdaStub({});
+    const stub = createLambdaStub({}, { pooled: true });
     await expect(
       lambdaCommand(["delete-function"], undefined, stub),
     ).rejects.toMatchObject({ code: "USAGE_ERROR" });
   });
 
   it("dispatches get-function with positional function name", async () => {
-    const stub = createLambdaStub({ getFunction: GET_FUNCTION_RESPONSE }, true);
+    const stub = createLambdaStub({ getFunction: GET_FUNCTION_RESPONSE });
     const result = await lambdaCommand(["get-function", FN_NAME], undefined, stub);
     const inner = result["lambda"] as Record<string, unknown>;
     expect("function" in inner).toBe(true);
@@ -786,7 +786,7 @@ describe("lambdaCommand — CLI arg dispatch", () => {
     const stub = createLambdaStub({
       invokeMetadata: INVOKE_METADATA_OK,
       invokePayload: INVOKE_PAYLOAD_OK,
-    });
+    }, { pooled: true });
     const result = await lambdaCommand(
       ["invoke", "--function-name", FN_NAME],
       undefined,
@@ -1107,7 +1107,7 @@ describe("lambdaRun get-function — global bool flag does not eat function name
       kmsDescribeKey: KMS_DESCRIBE_KEY,
       kmsListAliases: KMS_LIST_ALIASES,
       logsDescribeLogGroups: LOG_GROUP_RESPONSE,
-    }, true);
+    });
 
     // On broken head f66878c, --no-cli-pager eats FN_NAME (my-function)
     // → extractPositionals returns [] → USAGE_ERROR.

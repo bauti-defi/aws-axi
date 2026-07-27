@@ -35,8 +35,9 @@ import { useEnvGuard } from "./helpers/env-guard.js";
 // All commands exercised here (ec2 describe-instances with SecurityGroups:[],
 // iam, logs, ssm, kms describe-key) either have no binary-path-keyed cache or
 // are called with fixtures that never trigger the VpcConfig enrichment path.
-// One exception: the kms list-keys test (line ~636) reaches loadAliasMap and
-// MUST use uniqueStubBin — enforced by passing unique=true to createArgGuardStub.
+// One exception: the kms list-keys test reaches loadAliasMap and MUST use a
+// unique inode — that test uses createArgGuardStub with the default (no second
+// argument), which now produces a unique inode by design.
 
 function shellQuote(s: string): string {
   return `'${s.replaceAll("'", "'\\''")}'`;
@@ -81,7 +82,7 @@ function createArgGuardStub(
     validStdout: string;
     fallbackStdout?: string; // when requiredArg is absent but we should NOT fail (e.g. secondary calls)
   },
-  unique = false,
+  { pooled = false }: { pooled?: boolean } = {},
 ): string {
   const missingMsg = spec.requiredNextArg
     ? `MISSING_PAIR: ${spec.requiredArg} ${spec.requiredNextArg} was not forwarded`
@@ -115,7 +116,7 @@ function createArgGuardStub(
       : `  printf '%s' ${shellQuote(missingMsg)} >&2 && exit 1`,
     "fi",
   ].join("\n");
-  return unique ? uniqueStubBin(script) : stubBin(script);
+  return pooled ? stubBin(script) : uniqueStubBin(script);
 }
 
 /**
@@ -315,7 +316,7 @@ describe("ec2 overlay passthrough", () => {
     const binary = createArgGuardStub({
       requiredArg: "--filters",
       validStdout: ONE_INSTANCE,
-    });
+    }, { pooled: true });
 
     const result = await ec2Run({
       operation: "describe-instances",
@@ -338,7 +339,7 @@ describe("ec2 overlay passthrough", () => {
     const binary = createArgGuardStub({
       requiredArg: "--filters=Name=instance-state-name,Values=running",
       validStdout: ONE_INSTANCE,
-    });
+    }, { pooled: true });
 
     const result = await ec2Run({
       operation: "describe-instances",
@@ -365,7 +366,7 @@ describe("ec2 overlay passthrough", () => {
           },
         ],
       }),
-    });
+    }, { pooled: true });
 
     const result = await ec2Run({
       operation: "describe-vpcs",
@@ -457,7 +458,7 @@ describe("iam overlay passthrough — silent-drop regression", () => {
           },
         ],
       }),
-    });
+    }, { pooled: true });
 
     const result = await iamRun({
       op: "list-roles",
@@ -495,7 +496,7 @@ describe("iam overlay passthrough — silent-drop regression", () => {
       validStdout: JSON.stringify({
         Policies: [],
       }),
-    });
+    }, { pooled: true });
 
     const result = await iamRun({
       op: "list-policies",
@@ -525,7 +526,7 @@ describe("logs overlay passthrough — silent-drop regression", () => {
           },
         ],
       }),
-    });
+    }, { pooled: true });
 
     const result = await describeLogGroupsRun({
       passthrough: ["--log-group-name-prefix", "/aws/lambda"],
@@ -550,7 +551,7 @@ describe("logs overlay passthrough — silent-drop regression", () => {
           },
         ],
       }),
-    });
+    }, { pooled: true });
 
     // filterRun is the typed interface; we pass the passthrough as part of
     // the options after the fix is in place.
@@ -592,7 +593,7 @@ describe("kms overlay passthrough — positional + passthrough", () => {
       }),
       // For the secondary list-aliases call (no --grant-tokens), return empty aliases.
       fallbackStdout: JSON.stringify({ Aliases: [] }),
-    });
+    }, { pooled: true });
 
     const result = await kmsRun({
       subcommand: "describe-key",
@@ -610,6 +611,7 @@ describe("kms overlay passthrough — positional + passthrough", () => {
     // kmsRun list-keys calls loadAliasMap (src/resolve/key.ts), which memoizes
     // per binary path. This case MUST use a unique stub path so the cache entry
     // for this binary never contaminates other tests sharing a pool slot.
+    // No second argument = default unique inode (safe).
     const binary = createArgGuardStub({
       requiredArg: "--key-usage",
       // list-aliases secondary call also needs Aliases response
@@ -617,7 +619,7 @@ describe("kms overlay passthrough — positional + passthrough", () => {
         Keys: [{ KeyId: "key-1", KeyArn: "arn:aws:kms:us-east-1:123:key/key-1" }],
       }),
       fallbackStdout: JSON.stringify({ Aliases: [] }),
-    }, true);
+    });
 
     const result = await kmsRun({
       subcommand: "list-keys",
@@ -674,7 +676,7 @@ describe("ec2 overlay passthrough — full CLI integration", () => {
     const binary = createArgGuardStub({
       requiredArg: "--filters",
       validStdout: ONE_INSTANCE,
-    });
+    }, { pooled: true });
 
     const { output, exitCode } = await captureMain(
       [
@@ -715,7 +717,7 @@ describe("logs overlay passthrough — --query bypass at CLI adapter layer", () 
     const binary = createArgGuardStub({
       requiredArg: "--query",
       validStdout: RAW_QUERY_RESULT,
-    });
+    }, { pooled: true });
 
     const { output, exitCode } = await captureMain(
       ["logs", "tail", "/aws/lambda/fn", "--query", "events[].message"],
@@ -733,7 +735,7 @@ describe("logs overlay passthrough — --query bypass at CLI adapter layer", () 
     const binary = createArgGuardStub({
       requiredArg: "--query",
       validStdout: JSON.stringify(["group-a", "group-b"]),
-    });
+    }, { pooled: true });
 
     const { output, exitCode } = await captureMain(
       ["logs", "describe-log-groups", "--query", "logGroups[].logGroupName"],
@@ -761,7 +763,7 @@ describe("s3 overlay passthrough — --query bypass", () => {
     const binary = createArgGuardStub({
       requiredArg: "--query",
       validStdout: JSON.stringify(["file1.txt", "file2.txt"]),
-    });
+    }, { pooled: true });
 
     const { output, exitCode } = await captureMain(
       ["s3", "ls", "s3://b/", "--query", "Contents[].Key"],
@@ -826,7 +828,7 @@ describe("s3 overlay passthrough — positional ordering", () => {
     const binary = createArgGuardStub({
       requiredArg: "--sse-kms-key-id",
       validStdout: "",
-    });
+    }, { pooled: true });
 
     const { exitCode } = await captureMain(
       ["s3", "cp", "/tmp/f.txt", "s3://b/f.txt", "--sse", "aws:kms", "--sse-kms-key-id", "alias/k"],
@@ -910,7 +912,7 @@ describe("--query bypass at captureMain level — ssm/kms/lambda/secrets/s3-head
     const binary = createArgGuardStub({
       requiredArg: "--query",
       validStdout: JSON.stringify(MARKER),
-    });
+    }, { pooled: true });
 
     const { output, exitCode } = await captureMain(
       ["ssm", "get-parameter", "--name", "/test/param", "--query", "Parameter.Value"],
@@ -932,7 +934,7 @@ describe("--query bypass at captureMain level — ssm/kms/lambda/secrets/s3-head
       requiredArg: "--query",
       validStdout: JSON.stringify(MARKER),
       fallbackStdout: JSON.stringify({ Aliases: [] }),
-    });
+    }, { pooled: true });
 
     const { output, exitCode } = await captureMain(
       ["kms", "list-keys", "--query", "Keys[0].KeyId"],
@@ -952,7 +954,7 @@ describe("--query bypass at captureMain level — ssm/kms/lambda/secrets/s3-head
     const binary = createArgGuardStub({
       requiredArg: "--query",
       validStdout: JSON.stringify(MARKER),
-    });
+    }, { pooled: true });
 
     const { output, exitCode } = await captureMain(
       ["lambda", "list-functions", "--query", "Functions[0].FunctionName"],
@@ -979,7 +981,7 @@ describe("--query bypass at captureMain level — ssm/kms/lambda/secrets/s3-head
     const binary = createArgGuardStub({
       requiredArg: "--query",
       validStdout: JSON.stringify("secret-value"),
-    });
+    }, { pooled: true });
 
     const { output, exitCode } = await captureMain(
       ["secretsmanager", "get-secret-value", "--secret-id", "my-secret", "--query", "SecretString"],
@@ -998,7 +1000,7 @@ describe("--query bypass at captureMain level — ssm/kms/lambda/secrets/s3-head
     const binary = createArgGuardStub({
       requiredArg: "--query",
       validStdout: JSON.stringify(MARKER),
-    });
+    }, { pooled: true });
 
     const { output, exitCode } = await captureMain(
       ["secretsmanager", "get-secret-value", "--secret-id", "my-secret", "--reveal", "--query", "SecretString"],
@@ -1016,7 +1018,7 @@ describe("--query bypass at captureMain level — ssm/kms/lambda/secrets/s3-head
     const binary = createArgGuardStub({
       requiredArg: "--query",
       validStdout: JSON.stringify(MARKER),
-    });
+    }, { pooled: true });
 
     const { output, exitCode } = await captureMain(
       ["s3", "head-object", "--bucket", "my-bucket", "--key", "my/key.txt", "--query", "ContentType"],
@@ -1172,7 +1174,7 @@ describe("s3 ls flag translation — #38", () => {
     const binary = createArgGuardStub({
       requiredArg: "--delimiter",
       validStdout: ONE_OBJECT_RESPONSE,
-    });
+    }, { pooled: true });
 
     const { output, exitCode } = await captureMain(
       ["s3", "ls", "s3://b/"],
@@ -1300,7 +1302,7 @@ describe("s3 ls flag translation — #38", () => {
     const binary = createArgGuardStub({
       requiredArg: "--page-size",
       validStdout: ONE_OBJECT_RESPONSE,
-    });
+    }, { pooled: true });
 
     const { output, exitCode } = await captureMain(
       ["s3", "ls", "s3://b/", "--page-size", "5"],
@@ -1494,7 +1496,7 @@ describe("s3 ls --starting-token on no-URI path — issue #44", () => {
     const binary = createArgGuardStub({
       requiredArg: "--starting-token",
       validStdout: LIST_BUCKETS_WITH_PAGINATION,
-    });
+    }, { pooled: true });
 
     const { output, exitCode } = await captureMain(
       ["s3", "ls", "--starting-token", "TOKEN123"],
@@ -1514,7 +1516,7 @@ describe("s3 ls --starting-token on no-URI path — issue #44", () => {
     const binary = createArgGuardStub({
       requiredArg: "--starting-token",
       validStdout: LIST_BUCKETS_WITH_PAGINATION,
-    });
+    }, { pooled: true });
 
     const { output, exitCode } = await captureMain(
       ["s3", "ls", "--starting-token", "TOKEN123"],
@@ -1537,7 +1539,7 @@ describe("s3 ls --starting-token on no-URI path — issue #44", () => {
     const binary = createArgGuardStub({
       requiredArg: "--max-items",
       validStdout: LIST_BUCKETS_WITH_PAGINATION,
-    });
+    }, { pooled: true });
 
     const { output, exitCode } = await captureMain(
       ["s3", "ls"],
@@ -1922,7 +1924,7 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
       requiredArg: "--max-items",
       requiredNextArg: "5",
       validStdout: JSON.stringify(["key-id-1"]),
-    });
+    }, { pooled: true });
 
     const { exitCode } = await captureMain(
       ["kms", "list-keys", "--query", "Keys[].KeyId", "--max-items", "5"],
@@ -1939,7 +1941,7 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
       requiredArg: "--max-items",
       requiredNextArg: "5",
       validStdout: JSON.stringify(["alias/my-key"]),
-    });
+    }, { pooled: true });
 
     const { exitCode } = await captureMain(
       [
@@ -1965,7 +1967,7 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
       requiredArg: "--max-items",
       requiredNextArg: "5",
       validStdout: JSON.stringify(["fn-a"]),
-    });
+    }, { pooled: true });
 
     const { exitCode } = await captureMain(
       [
@@ -1990,7 +1992,7 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
       requiredArg: "--max-items",
       requiredNextArg: "5",
       validStdout: JSON.stringify(["secret-a"]),
-    });
+    }, { pooled: true });
 
     const { exitCode } = await captureMain(
       [
@@ -2015,7 +2017,7 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
       requiredArg: "--max-items",
       requiredNextArg: "5",
       validStdout: JSON.stringify(["/my/app/key"]),
-    });
+    }, { pooled: true });
 
     const { exitCode } = await captureMain(
       [
@@ -2040,7 +2042,7 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
       requiredArg: "--max-items",
       requiredNextArg: "5",
       validStdout: JSON.stringify(["/my/app/key"]),
-    });
+    }, { pooled: true });
 
     const { exitCode } = await captureMain(
       [
@@ -2065,7 +2067,7 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
       requiredArg: "--max-items",
       requiredNextArg: "5",
       validStdout: JSON.stringify(["vpc-abc123"]),
-    });
+    }, { pooled: true });
 
     const { exitCode } = await captureMain(
       ["ec2", "describe-vpcs", "--query", "Vpcs[].VpcId", "--max-items", "5"],
@@ -2085,7 +2087,7 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
       requiredArg: "--max-items",
       requiredNextArg: "5",
       validStdout: JSON.stringify(["role-a"]),
-    });
+    }, { pooled: true });
 
     const { exitCode } = await captureMain(
       ["iam", "list-roles", "--query", "Roles[].RoleName", "--max-items", "5"],
@@ -2114,7 +2116,7 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
       requiredArg: "--max-items",
       requiredNextArg: "3",
       validStdout: JSON.stringify({ events: [] }),
-    });
+    }, { pooled: true });
 
     const { exitCode } = await captureMain(
       [
@@ -2141,7 +2143,7 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
       requiredArg: "--max-items",
       requiredNextArg: "3",
       validStdout: JSON.stringify({ events: [] }),
-    });
+    }, { pooled: true });
 
     const { exitCode } = await captureMain(
       [
@@ -2164,7 +2166,7 @@ describe("--query + explicit cap: re-cap IS forwarded to child (guard stubs)", (
       requiredArg: "--max-items",
       requiredNextArg: "3",
       validStdout: JSON.stringify({ logGroups: [] }),
-    });
+    }, { pooled: true });
 
     const { exitCode } = await captureMain(
       [

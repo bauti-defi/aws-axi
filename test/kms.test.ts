@@ -132,11 +132,14 @@ interface KmsStubSpec {
 /**
  * Create a real shell stub that dispatches on $2 (the kms subcommand).
  *
- * Pass `unique = true` for tests that invoke kmsRun list-keys (which calls
- * loadAliasMap, a process-lifetime binary-path-keyed cache). All other
- * subcommands are cache-free and default to the recycled pool.
+ * The default produces a UNIQUE inode (safe for all tests). Pass
+ * `{ pooled: true }` only for tests that are safe to pool — i.e. those
+ * that do NOT invoke kmsRun list-keys or loadAliasMap directly, because
+ * those functions use a process-lifetime binary-path-keyed cache
+ * (src/resolve/key.ts). Pooling a cached test yields stale alias data
+ * with a green result — a silent wrong answer.
  */
-function createKmsStub(spec: KmsStubSpec, unique = false): string {
+function createKmsStub(spec: KmsStubSpec, { pooled = false }: { pooled?: boolean } = {}): string {
   const defaultExit = spec.exitCode ?? 0;
   const lines: string[] = ["#!/bin/sh", 'case "$2" in'];
 
@@ -214,7 +217,7 @@ function createKmsStub(spec: KmsStubSpec, unique = false): string {
     "esac",
   );
 
-  return unique ? uniqueStubBin(lines.join("\n")) : stubBin(lines.join("\n"));
+  return pooled ? stubBin(lines.join("\n")) : uniqueStubBin(lines.join("\n"));
 }
 
 afterEach(() => {
@@ -225,14 +228,14 @@ afterEach(() => {
 
 describe("loadAliasMap", () => {
   it("returns a map of keyId → aliasName", async () => {
-    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO }, true);
+    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO });
     const map = await loadAliasMap({ binary: stub });
 
     expect(map.get(KEY_ID_1)).toBe(KEY_ALIAS_1);
   });
 
   it("ignores AWS-managed aliases with no TargetKeyId", async () => {
-    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO }, true);
+    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO });
     const map = await loadAliasMap({ binary: stub });
 
     // alias/aws/s3 has TargetKeyId: undefined — not in the map
@@ -240,7 +243,7 @@ describe("loadAliasMap", () => {
   });
 
   it("returns empty map for empty alias list", async () => {
-    const stub = createKmsStub({ listAliases: LIST_ALIASES_EMPTY }, true);
+    const stub = createKmsStub({ listAliases: LIST_ALIASES_EMPTY });
     const map = await loadAliasMap({ binary: stub });
 
     expect(map.size).toBe(0);
@@ -250,7 +253,7 @@ describe("loadAliasMap", () => {
     // The stub only knows list-aliases — a second call with a DIFFERENT stub
     // would fail. But since the first call populates the cache under the first
     // binary path, reusing the same path returns the cached result.
-    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO }, true);
+    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO });
     const map1 = await loadAliasMap({ binary: stub });
     const map2 = await loadAliasMap({ binary: stub });
 
@@ -266,7 +269,7 @@ describe("resolveKey", () => {
       describeKey: DESCRIBE_KEY_1,
       listAliasesForKey: LIST_ALIASES_FOR_KEY_1,
       listAliases: LIST_ALIASES_FOR_KEY_1,
-    });
+    }, { pooled: true });
 
     const resolved = await resolveKey(KEY_ID_1, { binary: stub });
 
@@ -280,7 +283,7 @@ describe("resolveKey", () => {
     const stub = createKmsStub({
       describeKey: DESCRIBE_KEY_1,
       listAliases: LIST_ALIASES_FOR_KEY_1,
-    });
+    }, { pooled: true });
 
     const resolved = await resolveKey(KEY_ALIAS_1, { binary: stub });
 
@@ -292,7 +295,7 @@ describe("resolveKey", () => {
     const stub = createKmsStub({
       describeKey: DESCRIBE_KEY_1,
       listAliases: LIST_ALIASES_EMPTY,
-    });
+    }, { pooled: true });
 
     const resolved = await resolveKey(KEY_ID_2, { binary: stub });
 
@@ -303,7 +306,7 @@ describe("resolveKey", () => {
     const stub = createKmsStub({
       describeKeyStderr: NOT_FOUND_STDERR,
       describeKeyExitCode: 254,
-    });
+    }, { pooled: true });
 
     await expect(resolveKey("alias/nonexistent", { binary: stub })).rejects.toMatchObject({
       code: "SERVICE_CLIENT_ERROR",
@@ -318,7 +321,7 @@ describe("kmsRun list-keys — happy path", () => {
     const stub = createKmsStub({
       listKeys: LIST_KEYS_TWO,
       listAliases: LIST_ALIASES_TWO,
-    }, true);
+    });
 
     const result = await kmsRun({
       subcommand: "list-keys",
@@ -345,7 +348,7 @@ describe("kmsRun list-keys — happy path", () => {
     const stub = createKmsStub({
       listKeys: LIST_KEYS_TWO,
       listAliases: LIST_ALIASES_EMPTY,
-    }, true);
+    });
 
     const result = await kmsRun({ subcommand: "list-keys", args: [], binary: stub });
     if (!("listKeys" in result)) throw new Error("wrong discriminant");
@@ -361,7 +364,7 @@ describe("kmsRun list-keys — empty state", () => {
     const stub = createKmsStub({
       listKeys: LIST_KEYS_EMPTY,
       listAliases: LIST_ALIASES_EMPTY,
-    }, true);
+    });
 
     const result = await kmsRun({ subcommand: "list-keys", args: [], binary: stub });
     if (!("listKeys" in result)) throw new Error("wrong discriminant");
@@ -377,7 +380,7 @@ describe("kmsRun list-keys — pagination", () => {
     const stub = createKmsStub({
       listKeys: LIST_KEYS_ONE_TRUNCATED,
       listAliases: LIST_ALIASES_EMPTY,
-    }, true);
+    });
 
     const result = await kmsRun({
       subcommand: "list-keys",
@@ -421,7 +424,7 @@ describe("kmsRun list-keys — pagination", () => {
 
 describe("kmsRun list-aliases — happy path", () => {
   it("returns curated alias list", async () => {
-    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO });
+    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO }, { pooled: true });
 
     const result = await kmsRun({ subcommand: "list-aliases", args: [], binary: stub });
 
@@ -438,7 +441,7 @@ describe("kmsRun list-aliases — happy path", () => {
   });
 
   it("count string shows N total", async () => {
-    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO });
+    const stub = createKmsStub({ listAliases: LIST_ALIASES_TWO }, { pooled: true });
     const result = await kmsRun({ subcommand: "list-aliases", args: [], binary: stub });
     if (!("listAliases" in result)) throw new Error("wrong discriminant");
     const { listAliases } = result as { readonly listAliases: KmsListAliasesResult };
@@ -448,7 +451,7 @@ describe("kmsRun list-aliases — happy path", () => {
 
 describe("kmsRun list-aliases — empty state", () => {
   it("returns message and suggestion when no aliases exist", async () => {
-    const stub = createKmsStub({ listAliases: LIST_ALIASES_EMPTY });
+    const stub = createKmsStub({ listAliases: LIST_ALIASES_EMPTY }, { pooled: true });
     const result = await kmsRun({ subcommand: "list-aliases", args: [], binary: stub });
     if (!("listAliases" in result)) throw new Error("wrong discriminant");
     const { listAliases } = result as { readonly listAliases: KmsListAliasesResult };
@@ -465,7 +468,7 @@ describe("kmsRun describe-key — happy path", () => {
       describeKey: DESCRIBE_KEY_1,
       listAliasesForKey: LIST_ALIASES_FOR_KEY_1,
       listAliases: LIST_ALIASES_FOR_KEY_1,
-    });
+    }, { pooled: true });
 
     const result = await kmsRun({
       subcommand: "describe-key",
@@ -491,7 +494,7 @@ describe("kmsRun describe-key — happy path", () => {
     const stub = createKmsStub({
       describeKey: DESCRIBE_KEY_1,
       listAliases: LIST_ALIASES_FOR_KEY_1,
-    });
+    }, { pooled: true });
 
     const result = await kmsRun({
       subcommand: "describe-key",
@@ -506,7 +509,7 @@ describe("kmsRun describe-key — happy path", () => {
 
 describe("kmsRun describe-key — errors", () => {
   it("requires a key identifier (positional arg)", async () => {
-    const stub = createKmsStub({ describeKey: DESCRIBE_KEY_1 });
+    const stub = createKmsStub({ describeKey: DESCRIBE_KEY_1 }, { pooled: true });
 
     await expect(
       kmsRun({ subcommand: "describe-key", args: [], binary: stub }),
@@ -517,7 +520,7 @@ describe("kmsRun describe-key — errors", () => {
     const stub = createKmsStub({
       describeKeyStderr: NOT_FOUND_STDERR,
       describeKeyExitCode: 254,
-    });
+    }, { pooled: true });
 
     await expect(
       kmsRun({ subcommand: "describe-key", args: ["alias/nonexistent"], binary: stub }),
@@ -545,7 +548,7 @@ describe("kmsRun describe-key — global bool flag does not eat key positional",
       describeKey: DESCRIBE_KEY_1,
       listAliasesForKey: LIST_ALIASES_FOR_KEY_1,
       listAliases: LIST_ALIASES_FOR_KEY_1,
-    });
+    }, { pooled: true });
 
     // On broken head f66878c, --no-cli-pager eats KEY_ALIAS_1 (alias/my-app-key)
     // → extractPositionals returns [] → USAGE_ERROR.
@@ -565,7 +568,7 @@ describe("kmsRun describe-key — global bool flag does not eat key positional",
       describeKey: DESCRIBE_KEY_1,
       listAliasesForKey: LIST_ALIASES_FOR_KEY_1,
       listAliases: LIST_ALIASES_FOR_KEY_1,
-    });
+    }, { pooled: true });
 
     const result = await kmsRun({
       subcommand: "describe-key",
@@ -583,7 +586,7 @@ describe("kmsRun get-key-policy — happy path", () => {
   it("returns the parsed key policy (JSON embedded in Policy string)", async () => {
     const stub = createKmsStub({
       getKeyPolicy: GET_KEY_POLICY_1,
-    });
+    }, { pooled: true });
 
     const result = await kmsRun({
       subcommand: "get-key-policy",
@@ -604,7 +607,7 @@ describe("kmsRun get-key-policy — happy path", () => {
   });
 
   it("uses custom --policy-name when specified", async () => {
-    const stub = createKmsStub({ getKeyPolicy: GET_KEY_POLICY_1 });
+    const stub = createKmsStub({ getKeyPolicy: GET_KEY_POLICY_1 }, { pooled: true });
 
     const result = await kmsRun({
       subcommand: "get-key-policy",
@@ -617,7 +620,7 @@ describe("kmsRun get-key-policy — happy path", () => {
   });
 
   it("requires a key identifier", async () => {
-    const stub = createKmsStub({ getKeyPolicy: GET_KEY_POLICY_1 });
+    const stub = createKmsStub({ getKeyPolicy: GET_KEY_POLICY_1 }, { pooled: true });
 
     await expect(
       kmsRun({ subcommand: "get-key-policy", args: [], binary: stub }),
@@ -640,7 +643,7 @@ describe("kmsCommand — arg dispatch", () => {
     const stub = createKmsStub({
       listKeys: LIST_KEYS_TWO,
       listAliases: LIST_ALIASES_TWO,
-    }, true);
+    });
 
     // kmsCommand doesn't accept binary — test via kmsRun result shape
     const run = await kmsRun({ subcommand: "list-keys", args: [], binary: stub });
@@ -692,7 +695,7 @@ describe("kmsRun list-keys — --flag=value form", () => {
     const stub = createKmsStub({
       listKeys: LIST_KEYS_TWO,
       listAliases: LIST_ALIASES_EMPTY,
-    }, true);
+    });
     // Should not throw — the token is ignored by our stub, but extraction works
     const result = await kmsRun({
       subcommand: "list-keys",
@@ -704,7 +707,7 @@ describe("kmsRun list-keys — --flag=value form", () => {
   });
 
   it("--policy-name=custom is respected in get-key-policy", async () => {
-    const stub = createKmsStub({ getKeyPolicy: GET_KEY_POLICY_1 });
+    const stub = createKmsStub({ getKeyPolicy: GET_KEY_POLICY_1 }, { pooled: true });
 
     const result = await kmsRun({
       subcommand: "get-key-policy",
@@ -730,7 +733,7 @@ describe("kmsRun list-keys — alias-map AccessDenied degrades gracefully", () =
       listAliasesStderr:
         "An error occurred (AccessDeniedException) when calling the ListAliases operation: User is not authorized",
       listAliasesExitCode: 254,
-    }, true);
+    });
 
     // Must NOT throw
     const result = await kmsRun({
@@ -760,7 +763,7 @@ describe("kmsRun get-key-policy — non-JSON Policy fallback", () => {
     const rawPolicyNotJson = JSON.stringify({
       Policy: "this-is-not-json { broken",
     });
-    const stub = createKmsStub({ getKeyPolicy: rawPolicyNotJson });
+    const stub = createKmsStub({ getKeyPolicy: rawPolicyNotJson }, { pooled: true });
 
     // Must NOT throw
     const result = await kmsRun({
