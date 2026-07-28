@@ -279,18 +279,18 @@ describe("E2E — real aws binary with broken SSO config emits AUTH_EXPIRED / ex
       home,
     });
 
-    if (axiResult.exitCode !== 253) {
-      throw new Error(
-        `Built binary (${DIST_BIN}) exited ${axiResult.exitCode} (expected 253).\n` +
-          `aws version: ${AWS_VERSION}\n` +
-          `aws-axi stderr: ${JSON.stringify(axiResult.stderr)}\n` +
-          `This means the binary is still returning UNKNOWN/255 despite unit tests passing. ` +
-          `Check whether real aws stderr is trimmed before reaching parseAwsError in src/aws.ts.`,
-      );
-    }
-
-    expect(axiResult.exitCode).toBe(253);
-  });
+    // Use expect() — not throw — so that if this runs after a bun test-framework
+    // timeout, it is attributed to this test rather than reported as an
+    // "Unhandled error between tests" falsely pointing at src/errors.ts.
+    expect(
+      axiResult.exitCode,
+      `Built binary (${DIST_BIN}) should exit 253 (AUTH_EXPIRED).\n` +
+        `aws: ${AWS_VERSION}\n` +
+        `aws-axi stderr: ${JSON.stringify(axiResult.stderr)}\n` +
+        `If exit code is 1 and the suite was run under bare 'bun test' (5000ms),\n` +
+        `the binary was likely killed by the test framework timeout — not a product bug.`,
+    ).toBe(253);
+  }, 20000);
 
   it("REAL AWS BINARY: legacy sso format, expired token → AUTH_EXPIRED (exit 253)", async () => {
     if (!AWS_BIN) {
@@ -355,7 +355,7 @@ describe("E2E — real aws binary with broken SSO config emits AUTH_EXPIRED / ex
 
     expect(parsed.code).toBe("AUTH_EXPIRED");
     expect(awsExitCode(parsed.code)).toBe(253);
-  });
+  }, 20000);
 
   it("REAL AWS BINARY: new sso-session format, NO cached token → AUTH_EXPIRED (exit 253)", async () => {
     if (!AWS_BIN) {
@@ -410,5 +410,5 @@ describe("E2E — real aws binary with broken SSO config emits AUTH_EXPIRED / ex
 
     expect(parsed.code).toBe("AUTH_EXPIRED");
     expect(awsExitCode(parsed.code)).toBe(253);
-  });
+  }, 20000);
 });
