@@ -22,6 +22,20 @@
  * aws version used during development:
  *   aws-cli/2.33.13 Python/3.13.11 Darwin/25.2.0
  * CI runner: >= 2.34.0 (adds "aws: [ERROR]: " prefix — handled by normalization).
+ *
+ * Timing note (macOS, slice #92):
+ *   The real aws binary pays a once-per-process warm-up cliff on macOS:
+ *     ~400ms  when last exec was <8s ago (warm)
+ *     ~4,470ms when last exec was >8s ago (cold, 1.4 GB Python bundle cold-start)
+ *   This file is the first real-aws consumer in bun's alphabetical file order,
+ *   so it pays the cold-start for the whole suite. Under full-suite load the
+ *   first test here takes ~5.9s (warm-up + built-binary spawn), well above
+ *   bun's 5000ms default.
+ *   Note: `aws --version` does NOT pre-warm the service path — the warm-up
+ *   applies to any aws service call regardless of prior --version execs.
+ *   Each `it()` therefore carries an explicit 20000ms third argument, matching
+ *   package.json's `bun test --timeout 20000`, so the budget holds under every
+ *   invocation including bare `bun test`.
  */
 import { describe, it, expect, afterEach } from "bun:test";
 import { execFileSync, execFile } from "node:child_process";
@@ -219,18 +233,21 @@ describe("E2E — real aws binary with no region emits NO_REGION / exit 252", ()
     // This catches the class of bug where tests trim but production doesn't.
     const axiResult = await spawnBuiltAxi({ configFile, isolatedHome });
 
-    if (axiResult.exitCode !== 252) {
-      throw new Error(
-        `Built binary (${DIST_BIN}) exited ${axiResult.exitCode} (expected 252).\n` +
-          `aws version: ${AWS_VERSION}\n` +
-          `aws-axi stderr: ${JSON.stringify(axiResult.stderr)}\n` +
-          `This means the binary is still returning UNKNOWN/255 despite unit tests passing. ` +
-          `Check whether real aws stderr is trimmed before reaching parseAwsError in src/aws.ts.`,
-      );
-    }
-
-    expect(axiResult.exitCode).toBe(252);
-  });
+    // Use expect() — not throw — so that if this runs after a bun test-framework
+    // timeout, it is attributed to this test rather than reported as an
+    // "Unhandled error between tests" falsely pointing at src/errors.ts.
+    // (A throw after abandonment propagates as an unhandled rejection with no
+    // test context; an expect() failure with a test context already timed out
+    // is silently attributed to the same test.)
+    expect(
+      axiResult.exitCode,
+      `Built binary (${DIST_BIN}) should exit 252 (NO_REGION).\n` +
+        `aws: ${AWS_VERSION}\n` +
+        `aws-axi stderr: ${JSON.stringify(axiResult.stderr)}\n` +
+        `If exit code is 1 and the suite was run under bare 'bun test' (5000ms),\n` +
+        `the binary was likely killed by the test framework timeout — not a product bug.`,
+    ).toBe(252);
+  }, 20000);
 
   it("REAL AWS BINARY: region-less failure must NOT classify as AUTH_EXPIRED (direction invariant)", async () => {
     if (!AWS_BIN) {
@@ -254,5 +271,5 @@ describe("E2E — real aws binary with no region emits NO_REGION / exit 252", ()
     expect(parsed.code).not.toBe("AUTH_EXPIRED");
     expect(parsed.code).not.toBe("UNKNOWN");
     expect(parsed.code).toBe("NO_REGION");
-  });
+  }, 20000);
 });

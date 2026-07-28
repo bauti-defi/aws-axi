@@ -196,7 +196,7 @@ describe("wire-harness: real aws binary + fake SecretsManager endpoint", () => {
     );
     // The overlay reveals when --reveal is bare
     expect(output).toContain(PLAINTEXT);
-  });
+  }, 20000);
 
   /**
    * Anchor test 2: default (no flag): plaintext is ABSENT.
@@ -208,7 +208,7 @@ describe("wire-harness: real aws binary + fake SecretsManager endpoint", () => {
     );
     expect(output).not.toContain(PLAINTEXT);
     expect(output).toContain("<redacted>");
-  });
+  }, 20000);
 
   /**
    * The actual fix — two-arg form.
@@ -228,7 +228,7 @@ describe("wire-harness: real aws binary + fake SecretsManager endpoint", () => {
     // LEAKED on 52fc4ce; REDACTED on this branch.
     expect(output).not.toContain(PLAINTEXT);
     expect(output).toContain("<redacted>");
-  });
+  }, 20000);
 
   it("--reveal 0 (two-arg): plaintext ABSENT", async () => {
     const { output } = await captureMain(
@@ -236,7 +236,7 @@ describe("wire-harness: real aws binary + fake SecretsManager endpoint", () => {
       { ...FAKE_ENV, AWS_ENDPOINT_URL: endpointUrl },
     );
     expect(output).not.toContain(PLAINTEXT);
-  });
+  }, 20000);
 
   it("--reveal no (two-arg): plaintext ABSENT", async () => {
     const { output } = await captureMain(
@@ -244,7 +244,7 @@ describe("wire-harness: real aws binary + fake SecretsManager endpoint", () => {
       { ...FAKE_ENV, AWS_ENDPOINT_URL: endpointUrl },
     );
     expect(output).not.toContain(PLAINTEXT);
-  });
+  }, 20000);
 
   it("--reveal=false (=-form): plaintext ABSENT (covered by round-1; re-confirmed)", async () => {
     const { output } = await captureMain(
@@ -252,7 +252,7 @@ describe("wire-harness: real aws binary + fake SecretsManager endpoint", () => {
       { ...FAKE_ENV, AWS_ENDPOINT_URL: endpointUrl },
     );
     expect(output).not.toContain(PLAINTEXT);
-  });
+  }, 20000);
 
   /**
    * --query guard: without --reveal, --query must be a hard USAGE_ERROR.
@@ -267,7 +267,7 @@ describe("wire-harness: real aws binary + fake SecretsManager endpoint", () => {
     expect(output).not.toContain(PLAINTEXT);
     expect(output).toContain("USAGE_ERROR");
     expect(exitCode).toBe(252);
-  });
+  }, 20000);
 
   it("--query with --reveal: plaintext reachable (opt-in path)", async () => {
     // With --reveal, the caller has explicitly consented; --query is allowed.
@@ -277,5 +277,5 @@ describe("wire-harness: real aws binary + fake SecretsManager endpoint", () => {
     );
     // The JMESPath result is the raw SecretString value — present by design.
     expect(output).toContain(PLAINTEXT);
-  });
+  }, 20000);
 });
