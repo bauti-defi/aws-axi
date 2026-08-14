@@ -68,7 +68,7 @@
  * --flag=-1                          | "-1"        | "-1"             | true
  * --flag -1                          | "-1"        | "-1"             | true
  * --flag (final token)               | undefined   | undefined        | true  ← diff
- * --flag a --flag b                  | "a"         | "a"              | true  (first-wins)
+ * --flag a --flag b                  | "b"         | "b"              | true  (last-wins)
  * --flag --other                     | "--other"   | "--other"        | true
  * --limit when --limit-type=val      | undefined   | undefined        | false
  * Mutates argv?                      | no          | yes (splice)     | no
@@ -85,8 +85,12 @@
  *   |   from extractFlag/locateFlag                     |             | _extractTailArgs (--since=1h),
  *   |                                                   |             | _extractFilterArgs (--limit=5),
  *   |                                                   |             | kmsRun --max-items=N, kmsRun --policy-name=custom
- * M2| Last-wins instead of first-wins on repeated flags | RED  3 fail | first-wins (equals form), first-wins
- *   |                                                   |             | (two-arg form), agreement matrix
+ * M2| First-wins instead of last-wins on repeated flags | RED 15 fail | last-wins (equals, two-arg, mixed forms),
+ *   |   (verified by mutating locateFlag to return its  |             | locateFlag last match, occurrence modes,
+ *   |    first match)                                   |             | ref divergence, later-malformed-occurrence
+ *   |                                                   |             | throw, iam resolveKeyArg last-wins ×3,
+ *   |                                                   |             | secrets duplicate --secret-id ×2,
+ *   |                                                   |             | s3 presign duplicate --expires-in ×2
  * M3| --flag at end-of-argv returns "" instead of       | RED  2 fail | "returns undefined when flag is the final
  *   |   undefined                                       |             | token", agreement matrix
  * M4| Break prefix guard (--limit matches --limit-type) | RED  2 fail | "does NOT false-match a flag that is a
@@ -182,8 +186,10 @@ describe("extractFlag — equals form (--flag=value)", () => {
     assertExtractFlag(["--limit-type=value"], "--limit", undefined);
   });
 
-  it("returns first match when equals form appears twice (first-wins)", () => {
-    assertExtractFlag(["--flag=first", "--flag=second"], "--flag", "first");
+  it("returns last match when equals form appears twice (last-wins)", () => {
+    // Not assertExtractFlag: refExtractFlag is the first-wins historical shape
+    // and intentionally diverges here (see the divergence test below).
+    expect(extractFlag(["--flag=first", "--flag=second"], "--flag")).toBe("second");
   });
 });
 
@@ -206,8 +212,14 @@ describe("extractFlag — two-arg form (--flag value)", () => {
     expect(() => extractFlag(["--flag", "--other"], "--flag")).toThrow();
   });
 
-  it("returns first match when two-arg form appears twice (first-wins)", () => {
-    assertExtractFlag(["--flag", "a", "--flag", "b"], "--flag", "a");
+  it("returns last match when two-arg form appears twice (last-wins)", () => {
+    // Not assertExtractFlag: intentional divergence from refExtractFlag.
+    expect(extractFlag(["--flag", "a", "--flag", "b"], "--flag")).toBe("b");
+  });
+
+  it("returns last match when the two forms are mixed (last-wins)", () => {
+    expect(extractFlag(["--flag=a", "--flag", "b"], "--flag")).toBe("b");
+    expect(extractFlag(["--flag", "a", "--flag=b"], "--flag")).toBe("b");
   });
 
   it("returns undefined when flag is the final token (no value follows)", () => {
@@ -246,7 +258,6 @@ describe("extractFlag — non-mutation contract", () => {
       [["--flag=-1"], "--flag", "-1"],
       [["--flag", "-1"], "--flag", "-1"],
       [["--flag"], "--flag", undefined],
-      [["--flag", "a", "--flag", "b"], "--flag", "a"],
       [["--limit-type=val"], "--limit", undefined],
       [[], "--flag", undefined],
     ];
@@ -261,6 +272,13 @@ describe("extractFlag — non-mutation contract", () => {
     // extractFlag (fixed in #54) throws for this input.
     expect(refExtractFlag(["--flag", "--other"], "--flag")).toBe("--other");
     expect(() => extractFlag(["--flag", "--other"], "--flag")).toThrow();
+  });
+
+  it("refExtractFlag diverges from extractFlag on repeated flags (intentional)", () => {
+    // refExtractFlag is first-wins (the historical shape).  extractFlag now
+    // resolves the LAST occurrence, matching real aws CLI duplicate handling.
+    expect(refExtractFlag(["--flag", "a", "--flag", "b"], "--flag")).toBe("a");
+    expect(extractFlag(["--flag", "a", "--flag", "b"], "--flag")).toBe("b");
   });
 });
 
@@ -341,18 +359,19 @@ describe("locateFlag — two-arg form", () => {
     expect(locateFlag(["--flag"], "--flag")).toBeUndefined();
   });
 
-  it("returns first match only (first-wins)", () => {
+  it("returns the last match (last-wins), with start pointing at it", () => {
+    // start/span must describe the SELECTED occurrence — pullFlag (logs.ts)
+    // splices at m.start, so a stale start would remove the wrong tokens.
     const m = locateFlag(["--flag", "a", "--flag", "b"], "--flag");
-    expect(m?.value).toBe("a");
-    expect(m?.start).toBe(0);
+    expect(m).toStrictEqual({ value: "b", start: 2, span: 2 });
   });
 });
 
 describe("value-flag occurrence modes", () => {
   const args = ["--key=first", "--key", "last"];
 
-  it("keeps the first value for locateFlag", () => {
-    expect(locateFlag(args, "--key")).toStrictEqual({ value: "first", start: 0, span: 1 });
+  it("keeps the last value for locateFlag", () => {
+    expect(locateFlag(args, "--key")).toStrictEqual({ value: "last", start: 1, span: 2 });
   });
 
   it("keeps the last value for resolveKeyArg", () => {
@@ -485,22 +504,22 @@ describe("locateFlag / extractFlag — throws when next token is a flag (#54)", 
     expect(extractFlag(["--flag"], "--flag")).toBeUndefined();
   });
 
-  it("throws even when a valid equals form follows later (first-wins is definitive)", () => {
-    // First occurrence is --flag --other-flag (bare + next-is-flag) → throws
-    // immediately.  The equals form at index 2 is never reached: first-wins
-    // means the first occurrence is definitive, whether valid or malformed.
-    // The user should put the equals form first: ["--flag=real", "--other-flag"].
+  it("throws when an earlier occurrence is malformed, even if a valid one follows", () => {
+    // Under last-wins the scan visits EVERY occurrence, so a malformed one
+    // anywhere in argv is reported rather than skipped.  #54's guard is about
+    // ambiguity: `--flag --other-flag` cannot be read as a value, whichever
+    // occurrence would ultimately win.
     expect(() =>
       extractFlag(["--flag", "--other-flag", "--flag=real"], "--flag"),
     ).toThrow(/--flag/);
   });
 
-  it("equals form first → returns value, no throw (even if a later bare form is malformed)", () => {
-    // First occurrence is --flag=real (equals form, valid) → returns "real".
-    // The later bare --flag --other-flag is never reached (first-wins).
-    expect(
+  it("throws when a LATER occurrence is malformed (last-wins reaches it)", () => {
+    // RED under first-wins: the scan returned "real" at index 0 and never saw
+    // the malformed trailing occurrence.
+    expect(() =>
       extractFlag(["--flag=real", "--flag", "--other-flag"], "--flag"),
-    ).toBe("real");
+    ).toThrow(/--flag/);
   });
 });
 
@@ -724,6 +743,11 @@ describe("flagIsTrue", () => {
   });
 
   // ── first-wins on repeated flags ────────────────────────────────────────────
+  //
+  // DELIBERATELY DIFFERENT from the value-flag helpers (extractFlag/locateFlag),
+  // which are last-wins to match real aws.  A repeated boolean TOGGLE resolves
+  // on its first occurrence so the fail-safe direction (dry-run stays on, the
+  // secret stays redacted) cannot be undone by a trailing duplicate.
 
   it("first occurrence wins: --flag=false --flag=true → false", () => {
     expect(flagIsTrue(["--flag=false", "--flag=true"], "--flag")).toBe(false);

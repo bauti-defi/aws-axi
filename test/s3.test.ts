@@ -616,6 +616,68 @@ printf '%s\n' 'https://release-bucket.s3.amazonaws.com/scripts/deploy.sh?X-Amz-S
 });
 
 // ---------------------------------------------------------------------------
+// s3Command — presign duplicate --expires-in (last-wins, ADR-0002)
+//
+// Real `aws` resolves a repeated flag by using its LAST occurrence:
+//   aws s3 presign <uri> --expires-in 60 --expires-in 120  → 120s expiry.
+// Reading the FIRST value here silently signs a URL with a different lifetime
+// than the caller's final argument asked for.
+// ---------------------------------------------------------------------------
+
+describe("s3Command — presign duplicate --expires-in", () => {
+  it("uses the LAST --expires-in occurrence (two-arg form)", async () => {
+    const stub = stubBin(`#!/bin/sh
+if [ "$1" != "s3" ] || [ "$2" != "presign" ]; then
+  exit 1
+fi
+if [ "$4" != "--expires-in" ] || [ "$5" != "120" ]; then
+  exit 1
+fi
+printf '%s\n' 'https://release-bucket.s3.amazonaws.com/scripts/deploy.sh?X-Amz-Signature=last'
+`);
+
+    const result = await s3Command(
+      [
+        "presign",
+        "s3://release-bucket/scripts/deploy.sh",
+        "--expires-in",
+        "60",
+        "--expires-in",
+        "120",
+      ],
+      undefined,
+      stub,
+    );
+
+    expect(result["url"]).toBe(
+      "https://release-bucket.s3.amazonaws.com/scripts/deploy.sh?X-Amz-Signature=last",
+    );
+  });
+
+  it("uses the LAST --expires-in occurrence across mixed forms", async () => {
+    const stub = stubBin(`#!/bin/sh
+if [ "$1" != "s3" ] || [ "$2" != "presign" ]; then
+  exit 1
+fi
+if [ "$4" != "--expires-in" ] || [ "$5" != "120" ]; then
+  exit 1
+fi
+printf '%s\n' 'https://release-bucket.s3.amazonaws.com/scripts/deploy.sh?X-Amz-Signature=last'
+`);
+
+    const result = await s3Command(
+      ["presign", "s3://release-bucket/scripts/deploy.sh", "--expires-in=60", "--expires-in", "120"],
+      undefined,
+      stub,
+    );
+
+    expect(result["url"]).toBe(
+      "https://release-bucket.s3.amazonaws.com/scripts/deploy.sh?X-Amz-Signature=last",
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
 // s3Command — equals-form regression tests (ADR-0002 compliance)
 //
 // These tests prove that the equals form (--flag=value) is correctly parsed

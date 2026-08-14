@@ -157,10 +157,8 @@ type FlagLocation = {
   readonly span: 1 | 2;
 };
 
-type FlagOccurrence = "first" | "last";
-
 /**
- * Locate a named value flag with first- or last-occurrence selection.
+ * Locate a named value flag, resolving duplicates to the LAST occurrence.
  *
  * Accepts both forms agents commonly use:
  *   --flag value   → span 2 (flag token + separate value token)
@@ -170,6 +168,12 @@ type FlagOccurrence = "first" | "last";
  * with no following value in two-arg form.
  *
  * Contract notes:
+ *   - Duplicate flags resolve to the LAST occurrence, matching real `aws`
+ *     (ADR-0002 § "Owned-flag duplicate resolution"). Reading the first value
+ *     would silently act on a different secret / key / expiry than the one the
+ *     caller's final argument named.
+ *   - Because the scan visits every occurrence, a malformed occurrence anywhere
+ *     in argv throws (see the USAGE_ERROR note below) rather than being skipped.
  *   - Does NOT mutate the input array.
  *   - Does NOT reject values that start with a single `-` (e.g. --limit=-1 is valid).
  *   - Throws USAGE_ERROR when the two-arg form's next token starts with `--`
@@ -179,10 +183,9 @@ type FlagOccurrence = "first" | "last";
  *   - The `=` suffix in the prefix check (`${flag}=`) prevents false matches
  *     against flags that share a prefix (e.g. --limit vs --limit-type).
  */
-function locateFlagOccurrence(
+export function locateFlag(
   args: readonly string[],
   flag: string,
-  occurrence: FlagOccurrence,
 ): FlagLocation | undefined {
   const eqPrefix = `${flag}=`;
   let selected: FlagLocation | undefined;
@@ -213,22 +216,10 @@ function locateFlagOccurrence(
     }
 
     if (location === undefined) continue;
-    if (occurrence === "first") return location;
     selected = location;
   }
 
   return selected;
-}
-
-/**
- * Locate the first occurrence of a named flag in argv, returning its value and
- * the range of tokens it occupies.
- */
-export function locateFlag(
-  args: readonly string[],
-  flag: string,
-): FlagLocation | undefined {
-  return locateFlagOccurrence(args, flag, "first");
 }
 
 // ── hasFlag ───────────────────────────────────────────────────────────────────
@@ -290,9 +281,12 @@ export function hasFlag(args: readonly string[], flag: string): boolean {
  * regardless of the flag value (e.g. --bucket-name-prefix on the object
  * listing path), `hasFlag` is correct — presence is all that matters there.
  *
- * First-wins on repeated flags (consistent with every other parser in this
- * file).  The `=` prefix guard prevents false matches against flags sharing
- * a name prefix (e.g. --dryrun vs --dryrun-mode).
+ * First-wins on repeated flags — deliberately NOT the last-wins rule that
+ * `locateFlag` applies to value flags, so a trailing duplicate cannot undo a
+ * guard the caller already stated (`--dryrun --dryrun=false` stays a dry run).
+ * See ADR-0002 § "Owned-flag duplicate resolution".  The `=` prefix guard
+ * prevents false matches against flags sharing a name prefix (e.g. --dryrun vs
+ * --dryrun-mode).
  */
 /**
  * Recognised boolean literals for the `=`-form value in `flagIsTrue`.
@@ -391,7 +385,9 @@ export function flagIsTrue(args: readonly string[], flag: string): boolean {
  * deferred until `--reveal` callers are also updated to prefer USAGE_ERROR
  * over silent redaction on unrecognised input.
  *
- * First-wins on repeated flags.  Same `=`-prefix guard as `flagIsTrue`.
+ * First-wins on repeated flags, for the same fail-safe reason as `flagIsTrue`
+ * (`--reveal=false --reveal` stays redacted).  See ADR-0002 § "Owned-flag
+ * duplicate resolution".  Same `=`-prefix guard as `flagIsTrue`.
  */
 export function flagIsTrueStrict(args: readonly string[], flag: string): boolean {
   const eqPrefix = `${flag}=`;
@@ -536,10 +532,10 @@ export function extractPositionals(
  *   --<flag> <value>     flag form       — real aws's only accepted form
  *   --<flag>=<value>     equals form     — real aws's equals variant
  *
- * Duplicate flags: real `aws` resolves duplicates by using the LAST occurrence
- * (ADR-0002, lines 190-193). `resolveKeyArg` matches this: when the same owned
- * flag appears more than once the last value wins, silently — identical to real
- * `aws` behaviour.
+ * Duplicate flags: real `aws` resolves duplicates by using the LAST occurrence.
+ * `resolveKeyArg` matches this: when the same owned flag appears more than once
+ * the last value wins, silently — identical to real `aws` behaviour. See
+ * ADR-0002 § "Owned-flag duplicate resolution".
  *
  * Error cases (all → USAGE_ERROR):
  *   conflict   — both positional AND flag supplied in the same call; message
@@ -574,8 +570,7 @@ export function resolveKeyArg({
   const positional = positionals[0] as string | undefined;
 
   // Flag form: --flag value  or  --flag=value (last-wins on duplicates per ADR-0002)
-  const flagLoc = locateFlagOccurrence(args, flagName, "last");
-  const flagValue = flagLoc?.value;
+  const flagValue = locateFlag(args, flagName)?.value;
 
   // Conflict: both forms in the same call — real aws cannot hit this (it does
   // not accept positionals for these operations) so we define the policy:
@@ -611,7 +606,7 @@ export function resolveKeyArg({
  *   --flag value   (space-separated)
  *   --flag=value   (equals-separated, including --flag= for an empty value)
  *
- * Returns the first match (first-wins on repeated flags).
+ * Returns the last match (last-wins on repeated flags, matching real `aws`).
  * Returns `undefined` when the flag is absent OR when it is the final token
  * with no following value in two-arg form.
  *

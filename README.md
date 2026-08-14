@@ -21,9 +21,11 @@ aws-axi <service> <operation> [--flags]   # mirrors: aws <service> <operation> [
 
 > [!WARNING]
 > **aws-axi is young.** Hand-polished overlays cover only the hot-path services; everything else runs
-> through a generic engine that works but is less polished and may have bugs. **Secret values on the
-> engine path are not redacted** (only the `ssm`/`secretsmanager` overlays redact). Use it carefully, and
-> if it ever blocks you, fall back to raw `aws` for that call. **Found a bug or a gap? Please
+> through a generic engine that works but is less polished and may have bugs. Secret values are redacted
+> by default on the `ssm`/`secretsmanager` overlays **and** on the Secrets Manager engine path, but
+> **every other engine-path response is unredacted** — including SSM operations the `ssm` overlay does not
+> cover, which fall through to the engine. Use it carefully, and if it ever blocks you, fall back to raw
+> `aws` for that call. **Found a bug or a gap? Please
 > [file an issue](https://github.com/bauti-defi/aws-axi/issues/new)** — see [Reporting issues](#reporting-issues).
 
 ## Why
@@ -176,7 +178,7 @@ generic engine. Two deliberate named exceptions exist for `s3 ls` (see below).
 | ---------------- | ------------------ | -------------------------------------------------------------------------------------------- | ---------------------------------- |
 | STS              | `whoami`           | identity fused with profile, region, credential source                                       | —                                  |
 | EC2              | `ec2`              | `describe-vpcs`, `describe-subnets`, `describe-security-groups`, `describe-instances`         | → generic engine                   |
-| S3               | `s3`               | `ls`, `cp`, `rm`, `head-object`, `create-bucket` (idempotent)                                | → generic engine                   |
+| S3               | `s3`               | `ls`, `cp`, `rm`, `presign` (GET-only), `head-object`, `create-bucket` (idempotent)           | → generic engine                   |
 | IAM              | `iam`              | `list-roles`, `get-role`, `list-policies`, `get-policy`, `list-attached-role-policies`       | → generic engine                   |
 | CloudWatch Logs  | `logs`             | `tail`, `filter`, `describe-log-groups`                                                       | → generic engine                   |
 | KMS              | `kms`              | `list-keys`, `list-aliases`, `describe-key`, `get-key-policy`                                 | → generic engine                   |
@@ -190,13 +192,16 @@ Plus: `setup hooks` (ambient SessionStart context) and the SDK built-in `update`
 
 **Generic engine coverage.** `aws-axi <service> <operation>` works for any service/operation in your
 installed `aws` CLI's botocore models — required-param validation, capped pagination, and structured
-errors, but a generic projection (no reference-name enrichment, no idempotency niceties, **no secret
-redaction**).
+errors, but a generic projection (no reference-name enrichment, no idempotency niceties, and — outside
+Secrets Manager — **no secret redaction**).
 
 **Not implemented yet / known limitations:**
 
-- **No redaction on the engine path.** Only the `ssm` and `secretsmanager` overlays redact secret values.
-  Reading a secret via the raw engine (e.g. some other service's secret-bearing field) prints it in the clear.
+- **Engine-path redaction is Secrets Manager-only.** The `ssm` and `secretsmanager` overlays redact, and
+  the engine recursively redacts `SecretString` / `SecretBinary` on `secretsmanager` responses. Everything else
+  on the engine path still prints in the clear — another service's secret-bearing field (e.g. an RDS or Cognito
+  response), and also SSM parameter operations outside the overlay's curated set (e.g. `ssm get-parameter-history`),
+  which fall through to the engine.
 - **Mutations are mostly raw.** Idempotency / `--dryrun` niceties exist only for the S3 overlay
   (`cp`, `rm`, `create-bucket`); other writes go through the engine unguarded.
 - **`logs tail` is a snapshot, not a live follow** (`aws logs tail --follow` has no equivalent).
@@ -230,12 +235,14 @@ Where the ergonomics differ, here is the map both ways:
 | `aws s3 ls --bucket-name-prefix foo`                   | `aws-axi s3 ls --bucket-name-prefix foo`               | `--bucket-name-prefix` translated to `--prefix` on `list-buckets`          |
 | `aws s3api list-buckets`                               | `aws-axi s3 ls`                                        | High-level `s3 ls` with no target lists buckets; output capped at 20 + TOON (use `--starting-token` to page; `--query` bypasses cap) |
 | `aws s3api list-buckets --starting-token TOK`          | `aws-axi s3 ls --starting-token TOK`                   | `--starting-token` forwarded on both paths (`list-buckets` is genuinely paginated); output capped + TOON |
+| `aws s3 presign s3://bucket/key --expires-in 3600`      | `aws-axi s3 presign s3://bucket/key --expires-in 3600` | GET-only presigned URL; `--expires-in` defaults to 3600 and is bounded to 1–604800 seconds; extra positionals are a `USAGE_ERROR` |
 | `aws logs tail <group> --since 1h`                     | `aws-axi logs tail <group> --since 1h`                | Same flag; snapshot (no `--follow`), capped with `--limit`                  |
 | `aws logs filter-log-events --log-group-name <g> --filter-pattern ERROR` | `aws-axi logs filter <g> ERROR`     | Positional group + pattern                                                  |
 | `aws ssm send-command … && sleep 12 && aws ssm get-command-invocation …` | `aws-axi ssm run --instance-ids i-… --commands "docker ps"` | One call: sends, polls, returns unescaped stdout/stderr/remoteExitCode. Exit codes: remote shell exit propagated verbatim (1..249); delivery failure (TimedOut/Undeliverable/Cancelled) → 254; InProgress → 0 (no false failure for polling loops); `--query` → USAGE_ERROR (no single underlying response to target — use `get-command-invocation --query` instead) |
 | `aws ssm get-command-invocation --command-id … --instance-id …` (output has `\n`-escaped blobs) | `aws-axi ssm get-command-invocation --command-id … --instance-id … [--wait]` | `--wait` polls until terminal; stdout/stderr rendered as line arrays (unescaped) |
 | `aws ssm get-parameter --name <n> --with-decryption`   | `aws-axi ssm get-parameter <n> --reveal`              | Redacted by default; `--reveal` opts in (adds `--with-decryption`)         |
 | `aws secretsmanager get-secret-value --secret-id <id>` | `aws-axi secretsmanager get-secret-value <id> --reveal` | Redacted by default; `--reveal` opts in                                   |
+| `aws secretsmanager get-secret-value --secret-id <id> --query SecretString --output text` | `aws-axi secretsmanager get-secret-value <id> --reveal --raw` | `--raw` writes the byte-exact `SecretString` to stdout with no wrapper and no trailing newline (for command substitution). Requires `--reveal`; rejects `--query`; `SecretBinary` is a `USAGE_ERROR` |
 | `aws kms describe-key --key-id alias/foo`              | `aws-axi kms describe-key alias/foo`                   | Positional id; accepts id, ARN, or alias                                    |
 | `aws lambda invoke --function-name f --payload '<json>' --cli-binary-format raw-in-base64-out out.json` | `aws-axi lambda invoke --function-name f --payload '<json>'` | `--cli-binary-format` handled automatically; result returned inline |
 | `aws ec2 wait instance-running --instance-ids i-…`     | `aws-axi wait ec2 instance-running --instance-ids i-…`| `wait` is a top-level verb; waiter names stay kebab-case; adds a polling budget |
@@ -264,7 +271,12 @@ Where the ergonomics differ, here is the map both ways:
   Write operations that return HTTP 200 with an empty body (e.g. `sqs purge-queue`, `iam put-role-policy`,
   `iam delete-role-policy`) emit `ok: true` — confirming success without an ambiguous blank output.
 
-- **Redaction** — `ssm` and `secretsmanager` overlays redact values unless `--reveal` is passed.
+- **Redaction** — `ssm` and `secretsmanager` overlays redact values unless `--reveal` is passed. The
+  generic engine also redacts `SecretString` / `SecretBinary` recursively on `secretsmanager` responses.
+  On secret-bearing Secrets Manager operations (`get-secret-value`, `batch-get-secret-value`), `--query`
+  without `--reveal` is a hard `USAGE_ERROR` — JMESPath is applied by the `aws` CLI before aws-axi sees
+  the response, so allowing it would silently bypass redaction. Pass `--reveal` to opt in, then `--query`
+  applies normally.
 - **Idempotency** — overlay mutations (e.g. `s3 create-bucket`) report what changed and are safe to re-run.
 - **No `.env` loading (installed CLI)** — the distributed launcher never reads `.env` from the current
   directory. Only genuinely-exported shell environment variables and `~/.aws/*` config are honored,
@@ -274,11 +286,17 @@ Where the ergonomics differ, here is the map both ways:
   change the output, never restrict the input. Exception: `--output` is stripped (always `json` internally);
   `--query` is forwarded verbatim, bypasses the overlay's curated projection, and suppresses the
   default `--max-items` cap (botocore auto-pages to completion; explicit `--max-items` still wins).
+  Exception: redaction wins over `--query` on secret-bearing Secrets Manager operations (see
+  **Redaction** above).
 - **Two-arg flag form** — `--flag <value>` is the normal form. If the value token starts with `--`,
   aws-axi throws `USAGE_ERROR` immediately rather than silently treating another flag as a value. Fix:
   use the equals form (`--flag=<value>`) or reorder so the value precedes the next flag.
-- **Duplicate owned flags** — if the same flag appears more than once (e.g. `--role-name old
-  --role-name new`), the last value wins — matching real `aws` CLI behaviour.
+- **Duplicate owned flags** — if the same value-taking flag appears more than once (e.g. `--role-name old
+  --role-name new`), the last value wins — matching real `aws` CLI behaviour. Every occurrence is still
+  validated, so a malformed one anywhere in the argv is a `USAGE_ERROR` even if a later occurrence would
+  have won. Exception: repeated boolean toggles (`--dryrun`, `--recursive`, `--reveal`) resolve on their
+  **first** occurrence so a trailing duplicate cannot undo the fail-safe direction — `--dryrun --dryrun=false`
+  stays a dry run, `--reveal=false --reveal` stays redacted.
 
 ## Reporting issues
 
