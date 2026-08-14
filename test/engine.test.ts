@@ -563,6 +563,103 @@ describe("engineRun — --query bypass: cap suppressed on paginated ops", () => 
     expect(result).toMatchObject({ result: "recapped-ok" });
   });
 });
+// ── Secrets Manager generic-engine redaction ─────────────────────────────────
+
+describe("engineRun — Secrets Manager generic output redaction", () => {
+  const secretResponse = {
+    SecretValues: [
+      {
+        Name: "first-secret",
+        SecretString: "SENTINEL-STRING-FIRST-59",
+        Metadata: {
+          SecretBinary: "SENTINEL-BINARY-NESTED-59",
+          VersionId: "version-1",
+        },
+      },
+      {
+        Name: "second-secret",
+        Details: {
+          SecretString: "SENTINEL-STRING-NESTED-59",
+          SecretBinary: "SENTINEL-BINARY-SECOND-59",
+        },
+      },
+    ],
+    SecretBinary: "SENTINEL-BINARY-TOP-59",
+    NextToken: "next-page",
+  };
+
+  it("recursively redacts every SecretString and SecretBinary by default", async () => {
+    const result = await engineRun({
+      service: "secretsmanager",
+      operation: "batch-get-secret-value",
+      args: ["--secret-id-list", "first-secret", "second-secret"],
+      binary: createStub({ stdout: JSON.stringify(secretResponse) }),
+    });
+
+    expect(JSON.stringify(result)).not.toContain("SENTINEL-");
+    expect(result).toMatchObject({
+      SecretValues: [
+        {
+          Name: "first-secret",
+          SecretString: "<redacted>",
+          Metadata: {
+            SecretBinary: "<redacted>",
+            VersionId: "version-1",
+          },
+        },
+        {
+          Name: "second-secret",
+          Details: {
+            SecretString: "<redacted>",
+            SecretBinary: "<redacted>",
+          },
+        },
+      ],
+      SecretBinary: "<redacted>",
+      NextToken: "next-page",
+    });
+  });
+
+  it("reveals secret values only when --reveal is explicit and keeps it out of AWS argv", async () => {
+    const noRevealForwardingStub = createArgBanStub({
+      bannedArg: "--reveal",
+      validStdout: JSON.stringify(secretResponse),
+    });
+
+    const result = await engineRun({
+      service: "secretsmanager",
+      operation: "batch-get-secret-value",
+      args: ["--secret-id-list", "first-secret", "second-secret", "--reveal"],
+      binary: noRevealForwardingStub,
+    });
+
+    expect(result["SecretValues"]).toEqual(secretResponse.SecretValues);
+    expect(result["SecretBinary"]).toBe("SENTINEL-BINARY-TOP-59");
+    expect(result["NextToken"]).toBe("next-page");
+  });
+
+  it("rejects a secret-bearing --query unless --reveal is explicit", async () => {
+    const stub = createStub({ stdout: JSON.stringify(secretResponse) });
+
+    await expect(
+      engineRun({
+        service: "secretsmanager",
+        operation: "batch-get-secret-value",
+        args: [
+          "--secret-id-list",
+          "first-secret",
+          "--query",
+          "SecretValues[].SecretString",
+        ],
+        binary: stub,
+      }),
+    ).rejects.toMatchObject({
+      code: "USAGE_ERROR",
+      message: "--query on a secret-bearing operation would bypass redaction.",
+    });
+  });
+});
+
 
 // ── Error mapping via taxonomy ────────────────────────────────────────────────
 

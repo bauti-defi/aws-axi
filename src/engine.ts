@@ -149,6 +149,84 @@ function hasQueryFlag(args: readonly string[]): boolean {
   return args.some((a) => a === "--query" || a.startsWith("--query="));
 }
 
+const REVEAL_VALUES: Readonly<Record<string, boolean>> = {
+  true: true,
+  "1": true,
+  yes: true,
+  false: false,
+  "0": false,
+  no: false,
+};
+const REDACTED_SECRET_VALUE = "<redacted>";
+const SECRET_BEARING_SECRETS_MANAGER_OPERATIONS: Readonly<Record<string, true>> = {
+  "get-secret-value": true,
+  "batch-get-secret-value": true,
+};
+
+/**
+ * Parse aws-axi's confidentiality opt-in while removing it from child AWS args.
+ * The value rules match overlay `--reveal`: only recognised true values reveal;
+ * unrecognised equals-form values fail closed.
+ */
+function extractReveal(args: readonly string[]): {
+  readonly reveal: boolean;
+  readonly withoutReveal: readonly string[];
+} {
+  let reveal = false;
+  let found = false;
+  const withoutReveal: string[] = [];
+
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--reveal") {
+      if (!found) {
+        found = true;
+        const value = args[i + 1]?.toLowerCase();
+        reveal =
+          value === undefined || !Object.hasOwn(REVEAL_VALUES, value)
+            ? true
+            : REVEAL_VALUES[value]!;
+      }
+      const next = args[i + 1]?.toLowerCase();
+      if (next !== undefined && Object.hasOwn(REVEAL_VALUES, next)) {
+        i++;
+      }
+      continue;
+    }
+    if (arg.startsWith("--reveal=")) {
+      if (!found) {
+        found = true;
+        const value = arg.slice("--reveal=".length).toLowerCase();
+        reveal = Object.hasOwn(REVEAL_VALUES, value)
+          ? REVEAL_VALUES[value]!
+          : false;
+      }
+      continue;
+    }
+    withoutReveal.push(arg);
+  }
+
+  return { reveal, withoutReveal };
+}
+
+/** Clone a JSON-shaped result and replace every secret-bearing value recursively. */
+function redactSecretValues(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(redactSecretValues);
+  }
+  if (value !== null && typeof value === "object") {
+    const redacted: Record<string, unknown> = {};
+    for (const [key, nested] of Object.entries(value)) {
+      redacted[key] =
+        key === "SecretString" || key === "SecretBinary"
+          ? REDACTED_SECRET_VALUE
+          : redactSecretValues(nested);
+    }
+    return redacted;
+  }
+  return value;
+}
+
 /**
  * Format the distilled signature for a USAGE_ERROR message.
  * Gives the agent a compact view of what the operation expects.
@@ -248,9 +326,12 @@ export async function engineRun(
   // pascalKey is verified to exist in the map — non-null assertion is safe.
   const opInfo = model.operations.get(pascalKey) as OperationInfo;
 
-  // ── 3. Validate required params ────────────────────────────────────────────
-  // Strip --output first (it affects arg scanning but not required-param check)
-  const cleanedArgs = stripOutputFlag(options.args);
+  // --reveal is aws-axi's explicit confidentiality opt-in for generic
+  // Secrets Manager operations; AWS itself must never receive the wrapper flag.
+  const secretOptions =
+    service === "secretsmanager" ? extractReveal(options.args) : undefined;
+  const reveal = secretOptions?.reveal ?? false;
+  const cleanedArgs = stripOutputFlag(secretOptions?.withoutReveal ?? options.args);
 
   const missingRequired = opInfo.required.filter(
     (p) => !isParamPresent(p, cleanedArgs),
@@ -276,6 +357,18 @@ export async function engineRun(
   // hasMaxItemsFlag gates on the user-supplied value already present in
   // cleanedArgs, so an explicit --max-items + --query combination is honored.
   const queryActive = hasQueryFlag(cleanedArgs);
+  if (
+    service === "secretsmanager" &&
+    Object.hasOwn(SECRET_BEARING_SECRETS_MANAGER_OPERATIONS, operation) &&
+    queryActive &&
+    !reveal
+  ) {
+    throw new AxiError(
+      "--query on a secret-bearing operation would bypass redaction.",
+      "USAGE_ERROR",
+      ["Pass --reveal to confirm you want the plaintext, or drop --query."],
+    );
+  }
   if (paginator !== undefined && !hasMaxItemsFlag(cleanedArgs) && !queryActive) {
     awsArgs.push("--max-items", String(maxItemsCap));
   }
@@ -311,7 +404,10 @@ export async function engineRun(
   if (queryActive) {
     return raw;
   }
-  return projectOutput(raw, paginator, service, operation);
+  const output = projectOutput(raw, paginator, service, operation);
+  return service === "secretsmanager" && !reveal
+    ? (redactSecretValues(output) as Record<string, unknown>)
+    : output;
 }
 
 /**
