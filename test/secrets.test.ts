@@ -877,3 +877,62 @@ describe("secretsCommand — dispatch", () => {
     expect("secretList" in (wrapped["secretsmanager"] as object)).toBe(true);
   });
 });
+
+// ─── duplicate owned flags — last-wins (ADR-0002) ────────────────────────────
+//
+// Real `aws` resolves a repeated flag by using its LAST occurrence:
+//   aws secretsmanager get-secret-value --secret-id FIRST --secret-id LAST
+// fetches LAST.  Reading the FIRST value here would silently return a
+// DIFFERENT secret than the one the caller's final argument named.
+
+describe("secretsRun get-secret-value — duplicate --secret-id", () => {
+  it("resolves to the LAST --secret-id occurrence (two-arg form)", async () => {
+    const stub = stubBin(`#!/bin/sh
+case "$1-$2" in
+  secretsmanager-get-secret-value)
+    if [ "$3" != "--secret-id" ]; then exit 253; fi
+    printf '{"ARN":"arn:aws:secretsmanager:us-east-1:123456789012:secret:%s-AbCdEf","Name":"%s","VersionId":"v1","SecretString":"value","VersionStages":["AWSCURRENT"]}' "$4" "$4"
+    exit 0;;
+  secretsmanager-describe-secret)
+    printf '%s' ${shellQuote(DESCRIBE_SECRET_NO_KMS)}
+    exit 0;;
+  *)
+    exit 254;;
+esac
+`);
+
+    const result = await secretsRun({
+      subcommand: "get-secret-value",
+      args: ["--secret-id", "first-secret", "--secret-id", "last-secret"],
+      binary: stub,
+    });
+
+    assertSecret(result);
+    expect(result.secret.name).toBe("last-secret");
+  });
+
+  it("resolves to the LAST --secret-id occurrence across mixed forms", async () => {
+    const stub = stubBin(`#!/bin/sh
+case "$1-$2" in
+  secretsmanager-get-secret-value)
+    if [ "$3" != "--secret-id" ]; then exit 253; fi
+    printf '{"ARN":"arn:aws:secretsmanager:us-east-1:123456789012:secret:%s-AbCdEf","Name":"%s","VersionId":"v1","SecretString":"value","VersionStages":["AWSCURRENT"]}' "$4" "$4"
+    exit 0;;
+  secretsmanager-describe-secret)
+    printf '%s' ${shellQuote(DESCRIBE_SECRET_NO_KMS)}
+    exit 0;;
+  *)
+    exit 254;;
+esac
+`);
+
+    const result = await secretsRun({
+      subcommand: "get-secret-value",
+      args: ["--secret-id=first-secret", "--secret-id", "last-secret"],
+      binary: stub,
+    });
+
+    assertSecret(result);
+    expect(result.secret.name).toBe("last-secret");
+  });
+});
