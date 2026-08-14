@@ -1031,6 +1031,13 @@ export async function s3Command(
           ["Usage: aws-axi s3 presign s3://my-bucket/path/to/object --expires-in 3600"],
         );
       }
+      if (extractPositionals(rest).length !== 1) {
+        throw new AxiError(
+          "s3 presign does not accept extra positional arguments",
+          "USAGE_ERROR",
+          ["Usage: aws-axi s3 presign s3://my-bucket/path/to/object --expires-in 3600"],
+        );
+      }
       parseS3ObjectUri(uri);
       const rawExpiry = extractFlag(rest, "--expires-in");
       if (hasFlag(rest, "--expires-in") && rawExpiry === undefined) {

@@ -595,6 +595,24 @@ printf '%s\n' 'https://release-bucket.s3.amazonaws.com/scripts/deploy.sh?X-Amz-S
       message: expect.stringContaining("positive whole number"),
     });
   });
+
+  it("rejects an extra bare positional before invoking AWS", async () => {
+    const stub = createStub({
+      stdout: "https://release-bucket.s3.amazonaws.com/scripts/deploy.sh?X-Amz-Signature=unexpected\n",
+      exitCode: 0,
+    });
+
+    await expect(
+      s3Command(
+        ["presign", "s3://release-bucket/scripts/deploy.sh", "unexpected", "--expires-in", "300"],
+        undefined,
+        stub,
+      ),
+    ).rejects.toMatchObject({
+      code: "USAGE_ERROR",
+      message: expect.stringContaining("extra positional"),
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
