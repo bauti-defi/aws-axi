@@ -26,7 +26,7 @@ import type { AwsRunOptions } from "../aws.js";
 import { awsJson } from "../aws.js";
 import { resolveKey } from "../resolve/key.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrueStrict, extractPositionals } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrueStrict, extractPositionals, hasFlag } from "../overlay-args.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -158,6 +158,7 @@ flags (overlay-specific):
   --profile <name>      AWS profile (inherited from global --profile)
   --region <region>     AWS region  (inherited from global --region)
   --reveal              Show actual secret value (get-secret-value only)
+  --raw                 Write only SecretString to stdout (requires --reveal; get-secret-value only)
   --query <expr>        JMESPath; bypasses overlay projection, returns raw result.
                         Output is unbounded (botocore auto-pages all results; default
                         cap suppressed). To bound output, pass --max-items N.
@@ -191,6 +192,7 @@ examples:
  */
 const SECRETS_BOOL_FLAGS = new Set([
   "--reveal",
+  "--raw",
   "--include-planned-deletion",
   "--no-include-planned-deletion",
 ]);
@@ -214,6 +216,84 @@ function countString(n: number, nextToken: string | undefined): string {
     return `showing ${n} (truncated); next-token=${nextToken}`;
   }
   return `${n} total`;
+}
+
+/**
+ * Returns whether this get-secret-value invocation requests the dedicated raw
+ * output path. Presence rather than truthiness is intentional: explicit false
+ * values are rejected by the raw path instead of leaking through to the AWS CLI.
+ */
+export function isRawSecretValueRequest(args: readonly string[]): boolean {
+  return hasFlag(args, "--raw");
+}
+
+/**
+ * Fetch a revealed string secret for command substitution.
+ *
+ * This deliberately bypasses the overlay projection: callers of the exported
+ * function receive the exact SecretString, while the CLI adapter owns writing it
+ * without a trailing newline or presentation wrapper.
+ */
+export async function rawSecretStringRun(options: SecretsRunOptions): Promise<string> {
+  const reveal = flagIsTrueStrict(options.args, "--reveal");
+  const raw = flagIsTrueStrict(options.args, "--raw");
+
+  if (!raw) {
+    throw new AxiError("--raw must be enabled to request raw secret output", "USAGE_ERROR");
+  }
+  if (!reveal) {
+    throw new AxiError("--raw requires --reveal to confirm plaintext output", "USAGE_ERROR", [
+      "Pass both --reveal and --raw to write SecretString to stdout.",
+    ]);
+  }
+
+  const positionals = extractPositionals(options.args, SECRETS_BOOL_FLAGS);
+  const secretId = extractFlag(options.args, "--secret-id") ?? positionals[0];
+  if (secretId === undefined || secretId === "") {
+    throw new AxiError(
+      "get-secret-value requires a secret name or ARN",
+      "USAGE_ERROR",
+      [
+        "Usage: aws-axi secretsmanager get-secret-value <id> --reveal --raw",
+        "Or: aws-axi secretsmanager get-secret-value --secret-id <id> --reveal --raw",
+      ],
+    );
+  }
+
+  const rawPassthrough = collectPassthroughFlags(
+    options.args,
+    ["--secret-id"],
+    ["--reveal", "--raw"],
+    { service: "secretsmanager", operation: "get-secret-value" },
+  );
+  const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+
+  if (hasQuery) {
+    throw new AxiError(
+      "--raw returns SecretString directly and cannot be combined with --query.",
+      "USAGE_ERROR",
+      ["Drop --query, or use --reveal --query without --raw for a JMESPath result."],
+    );
+  }
+
+  const valueResponse = await awsJson<RawGetSecretValueResponse>(
+    ["secretsmanager", "get-secret-value", "--secret-id", secretId, ...passthrough],
+    toRunOpts(options),
+  );
+
+  if (valueResponse.SecretString !== undefined) {
+    return valueResponse.SecretString;
+  }
+  if (valueResponse.SecretBinary !== undefined) {
+    throw new AxiError(
+      "SecretBinary is not supported by --raw; this mode only writes SecretString.",
+      "USAGE_ERROR",
+    );
+  }
+  throw new AxiError(
+    "GetSecretValue returned neither SecretString nor SecretBinary.",
+    "SERVICE_CLIENT_ERROR",
+  );
 }
 
 function toRunOpts(options: SecretsRunOptions): AwsRunOptions {
