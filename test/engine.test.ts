@@ -121,6 +121,46 @@ function createArgGuardStub(spec: {
   return p;
 }
 
+/**
+ * Emulate the AWS CLI's pagination validation: a service's own page-size flag
+ * cannot coexist with the CLI-level --max-items cap. A coherent translated
+ * invocation must retain the caller's bound as --max-items and omit the
+ * incompatible service flag.
+ */
+function createServicePaginationConflictStub(spec: {
+  servicePaginationFlag: string;
+  maxItems: string;
+  validStdout: string;
+}): string {
+  function shellQuote(s: string): string {
+    return `'${s.replaceAll("'", "'\\''")}'`;
+  }
+
+  const script = [
+    "#!/bin/sh",
+    "expect_max_items_value=0",
+    "has_max_items=0",
+    'for arg in "$@"; do',
+    `  if [ "$arg" = ${shellQuote(spec.servicePaginationFlag)} ]; then`,
+    `    printf 'INCOMPATIBLE_PAGINATION_FLAGS: %s cannot be combined with --max-items\\n' ${shellQuote(spec.servicePaginationFlag)} >&2`,
+    "    exit 252",
+    "  fi",
+    '  if [ "$expect_max_items_value" = "1" ]; then',
+    `    [ "$arg" = ${shellQuote(spec.maxItems)} ] && has_max_items=1`,
+    "    expect_max_items_value=0",
+    "    continue",
+    "  fi",
+    '  [ "$arg" = "--max-items" ] && expect_max_items_value=1',
+    "done",
+    'if [ "$has_max_items" = "0" ]; then',
+    `  printf 'MISSING_TRANSLATED_CAP: expected --max-items %s\\n' ${shellQuote(spec.maxItems)} >&2`,
+    "  exit 1",
+    "fi",
+    `printf '%s' ${shellQuote(spec.validStdout)}`,
+  ].join("\n");
+  return stubBin(script);
+}
+
 afterEach(() => {
   for (const dir of tempDirs.splice(0)) {
     try {
@@ -497,6 +537,62 @@ describe("engineRun — pagination cap (paginated-op)", () => {
       }),
     );
     expect(result["count"]).toBe(1);
+  });
+});
+
+describe("engineRun — service pagination controls", () => {
+  it("translates Logs --limit into the CLI cap without losing continuation", async () => {
+    const stub = createServicePaginationConflictStub({
+      servicePaginationFlag: "--limit",
+      maxItems: "2",
+      validStdout: JSON.stringify({
+        events: [{ message: "one" }, { message: "two" }],
+        NextToken: "logs-next",
+      }),
+    });
+
+    const result = await engineRun({
+      service: "logs",
+      operation: "filter-log-events",
+      args: ["--log-group-name", "/app/service", "--limit", "2"],
+      dataDir: FIXTURES_DIR,
+      binary: stub,
+    });
+
+    expect(result["count"]).toBe(2);
+    expect(result["truncated"]).toBe(true);
+    expect(result["nextToken"]).toBe("logs-next");
+    expect(result["help"]).toEqual([
+      "Showing 2 items (more available).",
+      "Resume with: aws-axi logs filter-log-events --starting-token logs-next",
+    ]);
+  });
+
+  it("translates ECR --max-results into the CLI cap without losing continuation", async () => {
+    const stub = createServicePaginationConflictStub({
+      servicePaginationFlag: "--max-results",
+      maxItems: "3",
+      validStdout: JSON.stringify({
+        imageDetails: [{}, {}, {}],
+        NextToken: "ecr-next",
+      }),
+    });
+
+    const result = await engineRun({
+      service: "ecr",
+      operation: "describe-images",
+      args: ["--repository-name", "images", "--max-results", "3"],
+      dataDir: FIXTURES_DIR,
+      binary: stub,
+    });
+
+    expect(result["count"]).toBe(3);
+    expect(result["truncated"]).toBe(true);
+    expect(result["nextToken"]).toBe("ecr-next");
+    expect(result["help"]).toEqual([
+      "Showing 3 items (more available).",
+      "Resume with: aws-axi ecr describe-images --starting-token ecr-next",
+    ]);
   });
 });
 
