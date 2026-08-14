@@ -527,6 +527,95 @@ describe("s3RmRun", () => {
 });
 
 // ---------------------------------------------------------------------------
+// s3Command — presign
+// ---------------------------------------------------------------------------
+
+describe("s3Command — presign", () => {
+  it("returns a GET presigned URL using the S3 URI, expiry, profile, and region context", async () => {
+    const stub = stubBin(`#!/bin/sh
+if [ "$1" != "s3" ] || [ "$2" != "presign" ] || [ "$3" != "s3://release-bucket/scripts/deploy.sh" ]; then
+  exit 1
+fi
+if [ "$4" != "--expires-in" ] || [ "$5" != "300" ] || [ "$6" != "--output" ] || [ "$7" != "json" ]; then
+  exit 1
+fi
+if [ "$AWS_PROFILE" != "release" ] || [ "$AWS_REGION" != "us-west-2" ] || [ "$AWS_DEFAULT_REGION" != "us-west-2" ]; then
+  exit 1
+fi
+printf '%s\n' 'https://release-bucket.s3.us-west-2.amazonaws.com/scripts/deploy.sh?X-Amz-Signature=test'
+`);
+
+    const result = await s3Command(
+      ["presign", "s3://release-bucket/scripts/deploy.sh", "--expires-in", "300"],
+      { profile: "release", region: "us-west-2" },
+      stub,
+    );
+
+    expect(result["url"]).toBe(
+      "https://release-bucket.s3.us-west-2.amazonaws.com/scripts/deploy.sh?X-Amz-Signature=test",
+    );
+  });
+
+  it("uses AWS CLI's one-hour default expiry when --expires-in is omitted", async () => {
+    const stub = stubBin(`#!/bin/sh
+if [ "$1" != "s3" ] || [ "$2" != "presign" ] || [ "$3" != "s3://release-bucket/scripts/deploy.sh" ]; then
+  exit 1
+fi
+if [ "$4" != "--expires-in" ] || [ "$5" != "3600" ]; then
+  exit 1
+fi
+printf '%s\n' 'https://release-bucket.s3.amazonaws.com/scripts/deploy.sh?X-Amz-Signature=default'
+`);
+
+    const result = await s3Command(
+      ["presign", "s3://release-bucket/scripts/deploy.sh"],
+      undefined,
+      stub,
+    );
+
+    expect(result["url"]).toBe(
+      "https://release-bucket.s3.amazonaws.com/scripts/deploy.sh?X-Amz-Signature=default",
+    );
+  });
+
+  it("rejects a presign URI without an object key", async () => {
+    await expect(
+      s3Command(["presign", "s3://release-bucket", "--expires-in", "300"], undefined),
+    ).rejects.toMatchObject({
+      code: "USAGE_ERROR",
+      message: expect.stringContaining("object key"),
+    });
+  });
+
+  it("rejects a non-positive presign expiry", async () => {
+    await expect(
+      s3Command(["presign", "s3://release-bucket/scripts/deploy.sh", "--expires-in", "0"], undefined),
+    ).rejects.toMatchObject({
+      code: "USAGE_ERROR",
+      message: expect.stringContaining("positive whole number"),
+    });
+  });
+
+  it("rejects an extra bare positional before invoking AWS", async () => {
+    const stub = createStub({
+      stdout: "https://release-bucket.s3.amazonaws.com/scripts/deploy.sh?X-Amz-Signature=unexpected\n",
+      exitCode: 0,
+    });
+
+    await expect(
+      s3Command(
+        ["presign", "s3://release-bucket/scripts/deploy.sh", "unexpected", "--expires-in", "300"],
+        undefined,
+        stub,
+      ),
+    ).rejects.toMatchObject({
+      code: "USAGE_ERROR",
+      message: expect.stringContaining("extra positional"),
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
 // s3Command — equals-form regression tests (ADR-0002 compliance)
 //
 // These tests prove that the equals form (--flag=value) is correctly parsed

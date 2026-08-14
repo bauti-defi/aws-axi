@@ -1,5 +1,5 @@
 /**
- * `aws-axi s3` — S3 overlay: ls / cp / rm / head-object / create-bucket.
+ * `aws-axi s3` — S3 overlay: ls / cp / rm / presign / head-object / create-bucket.
  *
  * Design choices:
  *   - ls (no URI)    → s3api list-buckets          (JSON, capped at S3_PAGE_SIZE; bypass with --query)
@@ -13,7 +13,7 @@
  *   s3HeadObjectRun(options)    → S3HeadObjectResult
  *   s3CreateBucketRun(options)  → S3CreateBucketResult
  *   s3CpRun(options)            → S3CpResult
- *   s3RmRun(options)            → S3RmResult
+ *   s3PresignRun(options)        → S3PresignResult
  *   s3Command(args, context)    → AxiCliCommand adapter
  *   S3_PAGE_SIZE                → pagination cap constant
  *   S3_HELP                     → help text
@@ -179,6 +179,49 @@ function parseS3Uri(uri: string): { readonly bucket: string; readonly prefix: st
     bucket: rest.slice(0, slashIdx),
     prefix: rest.slice(slashIdx + 1),
   };
+}
+
+/** Validate an S3 object URI for presigning and return its bucket/key parts. */
+function parseS3ObjectUri(uri: string): { readonly bucket: string; readonly key: string } {
+  const { bucket, prefix: key } = parseS3Uri(uri);
+  if (bucket.length === 0 || key.length === 0) {
+    throw new AxiError(
+      "s3 presign requires an s3:// URI with a bucket and object key",
+      "USAGE_ERROR",
+      ["Usage: aws-axi s3 presign s3://my-bucket/path/to/object --expires-in 3600"],
+    );
+  }
+  return { bucket, key };
+}
+
+const S3_PRESIGN_DEFAULT_EXPIRY_SECONDS = 3600;
+const S3_PRESIGN_MAX_EXPIRY_SECONDS = 604_800;
+
+/** Parse the AWS CLI's bounded integer expiry option for S3 presigning. */
+function parsePresignExpiry(rawExpiry: string | undefined): number {
+  if (rawExpiry === undefined) {
+    return S3_PRESIGN_DEFAULT_EXPIRY_SECONDS;
+  }
+  if (!/^\d+$/.test(rawExpiry)) {
+    throw new AxiError(
+      "--expires-in must be a positive whole number of seconds no greater than 604800",
+      "USAGE_ERROR",
+      ["Example: aws-axi s3 presign s3://my-bucket/object --expires-in 3600"],
+    );
+  }
+  const expiry = Number(rawExpiry);
+  if (
+    !Number.isSafeInteger(expiry)
+    || expiry < 1
+    || expiry > S3_PRESIGN_MAX_EXPIRY_SECONDS
+  ) {
+    throw new AxiError(
+      "--expires-in must be a positive whole number of seconds no greater than 604800",
+      "USAGE_ERROR",
+      ["Use an expiry between 1 and 604800 seconds"],
+    );
+  }
+  return expiry;
 }
 
 // ---------------------------------------------------------------------------
@@ -747,6 +790,55 @@ export async function s3RmRun(options: S3RmRunOptions): Promise<S3RmResult> {
 }
 
 // ---------------------------------------------------------------------------
+// s3PresignRun — presign GET URLs
+// ---------------------------------------------------------------------------
+
+export interface S3PresignResult {
+  readonly url: string;
+}
+
+export interface S3PresignRunOptions {
+  /** S3 URI for the object to retrieve. */
+  readonly uri: string;
+  /** URL lifetime in seconds. Defaults to the AWS CLI's one-hour default. */
+  readonly expiresIn?: number;
+  readonly binary?: string;
+  /** Unknown AWS CLI flags to forward verbatim (e.g. --endpoint-url). */
+  readonly passthrough?: readonly string[];
+  readonly context?: AwsContext;
+}
+
+/** Generate a presigned GET URL through the AWS CLI's S3 convenience command. */
+export async function s3PresignRun(options: S3PresignRunOptions): Promise<S3PresignResult> {
+  parseS3ObjectUri(options.uri);
+  const expiresIn = options.expiresIn ?? S3_PRESIGN_DEFAULT_EXPIRY_SECONDS;
+  if (
+    !Number.isSafeInteger(expiresIn)
+    || expiresIn < 1
+    || expiresIn > S3_PRESIGN_MAX_EXPIRY_SECONDS
+  ) {
+    throw new AxiError(
+      "--expires-in must be a positive whole number of seconds no greater than 604800",
+      "USAGE_ERROR",
+      ["Use an expiry between 1 and 604800 seconds"],
+    );
+  }
+
+  const args = ["s3", "presign", options.uri, "--expires-in", String(expiresIn)];
+  if (options.passthrough !== undefined) {
+    args.push(...options.passthrough);
+  }
+  const url = (await awsExec(
+    args,
+    { binary: options.binary, context: options.context },
+  )).trim();
+  if (url.length === 0) {
+    throw new AxiError("Unexpected empty URL from aws s3 presign", "UNKNOWN");
+  }
+  return { url };
+}
+
+// ---------------------------------------------------------------------------
 // s3Command — AxiCliCommand adapter
 // ---------------------------------------------------------------------------
 
@@ -756,13 +848,14 @@ Any flag accepted by the underlying \`aws s3\` or \`aws s3api\` operation is
 forwarded verbatim — overlays never restrict the input contract, only enrich
 the output.
 
-operations[5] (enriched overlays):
-  ls, cp, rm, head-object, create-bucket
+operations[6] (enriched overlays):
+  ls, cp, rm, presign, head-object, create-bucket
   (any other s3 operation falls through to the generic engine — run \`aws s3 help\` to list all)
 
 flags (overlay-specific):
   --profile <name>        AWS profile (inherited from global --profile)
   --region <region>       AWS region  (inherited from global --region)
+  --expires-in <seconds> Presigned GET URL lifetime (1-604800; default: 3600)
   --dryrun                Preview without mutating (cp/rm); see boolean semantics below
   --starting-token <tok>  Resume a paginated ls call (both paths: list-buckets and list-objects-v2).
                           ls is capped at 20 items per page; when more are available, truncated: true
@@ -901,6 +994,7 @@ export async function s3Command(
           "--bucket-name-prefix filters bucket names and is only valid when listing all buckets (no s3:// URI)",
           "USAGE_ERROR",
           [
+
             "To filter by key prefix, include it in the URI: aws-axi s3 ls s3://bucket/prefix/",
             "To filter buckets by name: aws-axi s3 ls --bucket-name-prefix foo",
           ],
@@ -926,6 +1020,44 @@ export async function s3Command(
       const rawPassthrough = collectPassthroughFlags(argsForPassthrough, ["--starting-token"], ["--recursive"]);
       const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
       const result = await s3LsRun({ prefix, startingToken, recursive, passthrough, hasQuery, context, binary });
+      return result as unknown as Record<string, unknown>;
+    }
+    case "presign": {
+      const uri = rest.find((arg) => arg.startsWith("s3://"));
+      if (uri === undefined) {
+        throw new AxiError(
+          "s3 presign requires an s3:// URI with a bucket and object key",
+          "USAGE_ERROR",
+          ["Usage: aws-axi s3 presign s3://my-bucket/path/to/object --expires-in 3600"],
+        );
+      }
+      if (extractPositionals(rest).length !== 1) {
+        throw new AxiError(
+          "s3 presign does not accept extra positional arguments",
+          "USAGE_ERROR",
+          ["Usage: aws-axi s3 presign s3://my-bucket/path/to/object --expires-in 3600"],
+        );
+      }
+      parseS3ObjectUri(uri);
+      const rawExpiry = extractFlag(rest, "--expires-in");
+      if (hasFlag(rest, "--expires-in") && rawExpiry === undefined) {
+        throw new AxiError(
+          "--expires-in must be a positive whole number of seconds no greater than 604800",
+          "USAGE_ERROR",
+          ["Example: aws-axi s3 presign s3://my-bucket/object --expires-in 3600"],
+        );
+      }
+      const argsForPassthrough = stripPositionals(rest, uri);
+      const rawPassthrough = collectPassthroughFlags(argsForPassthrough, ["--expires-in"]);
+      const { passthrough, hasQuery } = buildPassthrough(rawPassthrough);
+      void hasQuery;
+      const result = await s3PresignRun({
+        uri,
+        expiresIn: parsePresignExpiry(rawExpiry),
+        passthrough,
+        context,
+        binary,
+      });
       return result as unknown as Record<string, unknown>;
     }
 
