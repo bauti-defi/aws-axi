@@ -97,6 +97,24 @@ describe("nested ECS waiter syntax", () => {
     ]);
   });
 
+  it("rejects flags before the nested waiter name without invoking AWS", async () => {
+    const { binary, readArgv } = createArgvStub();
+
+    const { output, exitCode } = await captureMain(
+      ["ecs", "wait", "--tasks", "tasks-stopped", "--cluster", "app"],
+      {
+        AWS_DATA_PATH: FIXTURES_DIR,
+        PATH: `${stubDir(binary)}:${process.env.PATH ?? ""}`,
+      },
+    );
+
+    expect(exitCode).toBe(252);
+    expect(output).toContain(
+      "aws-axi ecs wait requires <waiter-name> before flags",
+    );
+    expect(readArgv()).toEqual([]);
+  });
+
   it("preserves explicit wait ecs tasks-stopped syntax", async () => {
     const { binary, readArgv } = createArgvStub();
 

@@ -167,6 +167,15 @@ function makeEngineHandler(service: string): AxiCliCommand<AwsContext> {
       );
     }
     if (operation === "wait") {
+      const waiterName = args[1];
+      if (waiterName === undefined || waiterName.startsWith("-")) {
+        throw new AxiError(
+          `aws-axi ${service} wait requires <waiter-name> before flags\n` +
+            `Usage: aws-axi ${service} wait <waiter-name> [--flags]`,
+          "USAGE_ERROR",
+          [`Example: aws-axi ${service} wait <waiter-name> [--flags]`],
+        );
+      }
       const modelService = Object.hasOwn(SERVICE_ALIASES, service)
         ? (SERVICE_ALIASES[service] as string)
         : service;
