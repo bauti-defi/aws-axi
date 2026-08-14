@@ -13,6 +13,7 @@
 import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import { awsJson, awsRaw } from "../aws.js";
+import { extractPositionals } from "../overlay-args.js";
 
 interface StsCallerIdentity {
   readonly Account: string;
@@ -180,7 +181,7 @@ export async function whoamiCommand(
   context: AwsContext | undefined,
 ): Promise<Record<string, unknown>> {
   // Guard: reject unrecognized positional args (flags already stripped by wrapper).
-  const positional = args.filter((a) => a !== "" && !a.startsWith("-"));
+  const positional = extractPositionals(args);
   if (positional.length > 0) {
     throw new AxiError(
       `Unknown argument: ${positional[0] ?? ""}`,

@@ -85,8 +85,9 @@ export interface ModelContext {
 // so that collectPassthroughFlags does not misclassify them.
 
 /**
- * Global aws CLI flags that take NO value — boolean in nature.
- * Kept in passthrough verbatim; the next token is NOT consumed as a value.
+ * Global aws CLI flags that take no ordinary value. During positional extraction,
+ * a recognised boolean literal immediately following one is consumed so it is not
+ * mistaken for a positional argument.
  */
 const GLOBAL_BOOL_FLAGS = new Set([
   "--debug",
@@ -418,7 +419,8 @@ const BOOL_LITERALS = new Set(["true", "false", "1", "0", "yes", "no"]);
  *       next token is a recognised boolean literal → consume both (skip flag + value)
  *       next token is absent or not a bool literal → skip flag only
  *   --flag in GLOBAL_BOOL_FLAGS (e.g. --no-cli-pager, --debug, --no-paginate,
- *       --no-verify-ssl) → boolean: skip flag only, next token is NOT a value.
+ *       --no-verify-ssl) → boolean: consume a following recognised boolean literal;
+ *       otherwise skip flag only.
  *       Keeping this consistent with collectPassthroughFlags (which already checks
  *       GLOBAL_BOOL_FLAGS) prevents global flags from eating the next positional.
  *   any other --flag   → value flag: skip it AND the following token
@@ -467,14 +469,17 @@ export function extractPositionals(
         // The flag itself is not a positional; continue regardless.
         continue;
       }
-      // Global aws CLI boolean flags (e.g. --no-cli-pager, --debug,
-      // --no-paginate, --no-verify-ssl) take no value token.
-      // They are not in the caller-supplied booleanFlags set because the
-      // caller only lists its own overlay-specific boolean flags; but they
-      // must not eat the next positional.  GLOBAL_BOOL_FLAGS is already
-      // maintained for collectPassthroughFlags — reusing it here keeps the
-      // two functions consistent.
+      // Global aws CLI boolean flags may also carry a recognised two-arg literal.
+      // Consume it so commands with no positionals (e.g. whoami) do not reject it.
       if (GLOBAL_BOOL_FLAGS.has(arg)) {
+        const next = args[i + 1];
+        if (
+          next !== undefined &&
+          !next.startsWith("--") &&
+          BOOL_LITERALS.has(next.toLowerCase())
+        ) {
+          i++;
+        }
         continue;
       }
       // POSIX end-of-options separator: forward to child (collectPassthroughFlags

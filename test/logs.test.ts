@@ -212,6 +212,14 @@ describe("_extractTailArgs — position-independent parsing", () => {
     expect(result.since).toBe("15m");
   });
 
+  it("keeps a tail log group after each filter-log-events boolean flag", () => {
+    for (const flag of ["--unmask", "--interleaved", "--start-from-head"]) {
+      expect(_extractTailArgs([flag, "/aws/lambda/fn"]).logGroupName).toBe(
+        "/aws/lambda/fn",
+      );
+    }
+  });
+
   it("throws USAGE_ERROR when no positional group name is provided", () => {
     expect(() => _extractTailArgs(["--since", "1h"])).toThrow();
     try {
@@ -246,6 +254,15 @@ describe("_extractFilterArgs — position-independent parsing", () => {
     expect(result.logGroupName).toBe("/aws/lambda/fn");
     expect(result.pattern).toBe("ERROR");
     expect(result.since).toBe("15m");
+  });
+
+  it("keeps filter positionals after each filter-log-events boolean flag", () => {
+    for (const flag of ["--unmask", "--interleaved", "--start-from-head"]) {
+      expect(_extractFilterArgs([flag, "/aws/lambda/fn", "ERROR"])).toMatchObject({
+        logGroupName: "/aws/lambda/fn",
+        pattern: "ERROR",
+      });
+    }
   });
 
   it("throws USAGE_ERROR when pattern is missing", () => {
