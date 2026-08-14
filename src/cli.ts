@@ -158,6 +158,17 @@ function withContextStrip(
  */
 function makeEngineHandler(service: string): AxiCliCommand<AwsContext> {
   return (args: string[], context: AwsContext | undefined) => {
+    if (service === "ddb") {
+      throw new AxiError(
+        "aws-axi ddb is not supported: it is AWS CLI's high-level DynamoDB interface with its own put/select argument grammar.",
+        "USAGE_ERROR",
+        [
+          "Use `aws-axi dynamodb <operation>` for raw DynamoDB API operations.",
+          "Use `aws ddb put` or `aws ddb select` for the high-level interface.",
+        ],
+      );
+    }
+
     const operation = args[0];
     if (operation === undefined || operation.startsWith("-")) {
       throw new AxiError(
