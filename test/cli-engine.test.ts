@@ -240,6 +240,26 @@ describe("CLI engine fallback — generic service dispatch", () => {
     expect(exitCode).toBe(252);
   });
 
+  it.each([
+    ["ddb", undefined],
+    ["ddb", "put"],
+    ["ddb", "select"],
+  ])(
+    "rejects aws ddb's %s interface with aws-axi alternatives before model lookup",
+    async (service: string, operation: string | undefined) => {
+      const argv = operation === undefined ? [service] : [service, operation];
+      const { output, exitCode } = await captureMain(argv, {
+        AWS_DATA_PATH: FIXTURES_DIR,
+      });
+
+      expect(exitCode).toBe(252);
+      expect(output).toContain("aws-axi ddb is not supported");
+      expect(output).toContain("aws-axi dynamodb");
+      expect(output).toContain("aws ddb");
+      expect(output).not.toMatch(/Unknown service ['"]ddb['"]/);
+    },
+  );
+
   it("returns paginated output with count + nextToken hint", async () => {
     const paginatedResponse = JSON.stringify({
       Items: ["a", "b", "c"],
