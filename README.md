@@ -23,8 +23,9 @@ aws-axi <service> <operation> [--flags]   # mirrors: aws <service> <operation> [
 > **aws-axi is young.** Hand-polished overlays cover only the hot-path services; everything else runs
 > through a generic engine that works but is less polished and may have bugs. Secret values are redacted
 > by default on the `ssm`/`secretsmanager` overlays **and** on the Secrets Manager engine path, but
-> **secret-bearing fields of any other service are not redacted on the engine path**. Use it carefully,
-> and if it ever blocks you, fall back to raw `aws` for that call. **Found a bug or a gap? Please
+> **every other engine-path response is unredacted** — including SSM operations the `ssm` overlay does not
+> cover, which fall through to the engine. Use it carefully, and if it ever blocks you, fall back to raw
+> `aws` for that call. **Found a bug or a gap? Please
 > [file an issue](https://github.com/bauti-defi/aws-axi/issues/new)** — see [Reporting issues](#reporting-issues).
 
 ## Why
@@ -197,8 +198,10 @@ Secrets Manager — **no secret redaction**).
 **Not implemented yet / known limitations:**
 
 - **Engine-path redaction is Secrets Manager-only.** The `ssm` and `secretsmanager` overlays redact, and
-  the engine recursively redacts `SecretString` / `SecretBinary` on `secretsmanager` responses. Any *other*
-  service's secret-bearing field (e.g. an RDS or Cognito response) still prints in the clear on the engine path.
+  the engine recursively redacts `SecretString` / `SecretBinary` on `secretsmanager` responses. Everything else
+  on the engine path still prints in the clear — another service's secret-bearing field (e.g. an RDS or Cognito
+  response), and also SSM parameter operations outside the overlay's curated set (e.g. `ssm get-parameter-history`),
+  which fall through to the engine.
 - **Mutations are mostly raw.** Idempotency / `--dryrun` niceties exist only for the S3 overlay
   (`cp`, `rm`, `create-bucket`); other writes go through the engine unguarded.
 - **`logs tail` is a snapshot, not a live follow** (`aws logs tail --follow` has no equivalent).
@@ -288,8 +291,12 @@ Where the ergonomics differ, here is the map both ways:
 - **Two-arg flag form** — `--flag <value>` is the normal form. If the value token starts with `--`,
   aws-axi throws `USAGE_ERROR` immediately rather than silently treating another flag as a value. Fix:
   use the equals form (`--flag=<value>`) or reorder so the value precedes the next flag.
-- **Duplicate owned flags** — if the same flag appears more than once (e.g. `--role-name old
-  --role-name new`), the last value wins — matching real `aws` CLI behaviour.
+- **Duplicate owned flags** — if the same value-taking flag appears more than once (e.g. `--role-name old
+  --role-name new`), the last value wins — matching real `aws` CLI behaviour. Every occurrence is still
+  validated, so a malformed one anywhere in the argv is a `USAGE_ERROR` even if a later occurrence would
+  have won. Exception: repeated boolean toggles (`--dryrun`, `--recursive`, `--reveal`) resolve on their
+  **first** occurrence so a trailing duplicate cannot undo the fail-safe direction — `--dryrun --dryrun=false`
+  stays a dry run, `--reveal=false --reveal` stays redacted.
 
 ## Reporting issues
 
