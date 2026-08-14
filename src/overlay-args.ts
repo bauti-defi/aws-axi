@@ -149,17 +149,23 @@ function isModelBooleanFlag(
   return param.type === "boolean";
 }
 
-// ── locateFlag ───────────────────────────────────────────────────────────────
+// ── value-flag scanning ─────────────────────────────────────────────────────
+
+type FlagLocation = {
+  readonly value: string;
+  readonly start: number;
+  readonly span: 1 | 2;
+};
+
+type FlagOccurrence = "first" | "last";
 
 /**
- * Locate the first occurrence of a named flag in argv, returning its value and
- * the range of tokens it occupies.
+ * Locate a named value flag with first- or last-occurrence selection.
  *
  * Accepts both forms agents commonly use:
  *   --flag value   → span 2 (flag token + separate value token)
  *   --flag=value   → span 1 (single combined token)
  *
- * Returns the first match (first-wins on repeated flags).
  * Returns `undefined` when the flag is absent OR when it is the final token
  * with no following value in two-arg form.
  *
@@ -168,29 +174,28 @@ function isModelBooleanFlag(
  *   - Does NOT reject values that start with a single `-` (e.g. --limit=-1 is valid).
  *   - Throws USAGE_ERROR when the two-arg form's next token starts with `--`
  *     (e.g. `--flag --other-flag`): such tokens are unambiguously other flags,
- *     not values.  The error message names both the flag and the offending token.
- *     Use the equals form (`--flag=--value`) if a value genuinely starts with `--`.
+ *     not values. Use the equals form (`--flag=--value`) if a value genuinely
+ *     starts with `--`.
  *   - The `=` suffix in the prefix check (`${flag}=`) prevents false matches
  *     against flags that share a prefix (e.g. --limit vs --limit-type).
- *
- * This is the single-scan foundation used by both `extractFlag` (read-only)
- * and `pullFlag` in logs.ts (extract-and-remove), ensuring a single parsing
- * contract underlies all value-extraction needs.
  */
-export function locateFlag(
+function locateFlagOccurrence(
   args: readonly string[],
   flag: string,
-): { readonly value: string; readonly start: number; readonly span: 1 | 2 } | undefined {
+  occurrence: FlagOccurrence,
+): FlagLocation | undefined {
   const eqPrefix = `${flag}=`;
+  let selected: FlagLocation | undefined;
+
   for (let i = 0; i < args.length; i++) {
     const arg = args[i] ?? "";
-    // Two-arg form: --flag value
-    if (arg === flag && i + 1 < args.length) {
+    let location: FlagLocation | undefined;
+
+    if (arg === flag) {
+      if (i + 1 >= args.length) continue;
+
       const next = args[i + 1] as string;
       if (next.startsWith("--")) {
-        // The next token is another flag, not a value.  Consuming it would
-        // silently mis-assign it and produce a confusing downstream error.
-        // Throw immediately so the user sees the real problem.
         throw new AxiError(
           `${flag} requires a value but "${next}" looks like a flag, not a value`,
           "USAGE_ERROR",
@@ -200,14 +205,30 @@ export function locateFlag(
           ],
         );
       }
-      return { value: next, start: i, span: 2 };
+
+      location = { value: next, start: i, span: 2 };
+      i++;
+    } else if (arg.startsWith(eqPrefix)) {
+      location = { value: arg.slice(eqPrefix.length), start: i, span: 1 };
     }
-    // Equals form: --flag=value (or --flag= for empty value)
-    if (arg.startsWith(eqPrefix)) {
-      return { value: arg.slice(eqPrefix.length), start: i, span: 1 };
-    }
+
+    if (location === undefined) continue;
+    if (occurrence === "first") return location;
+    selected = location;
   }
-  return undefined;
+
+  return selected;
+}
+
+/**
+ * Locate the first occurrence of a named flag in argv, returning its value and
+ * the range of tokens it occupies.
+ */
+export function locateFlag(
+  args: readonly string[],
+  flag: string,
+): FlagLocation | undefined {
+  return locateFlagOccurrence(args, flag, "first");
 }
 
 // ── hasFlag ───────────────────────────────────────────────────────────────────
@@ -504,50 +525,6 @@ export function extractPositionals(
   return result;
 }
 
-// ── resolveKeyArg ────────────────────────────────────────────────────────────
-
-/**
- * Scan argv for the LAST occurrence of a named flag, returning its value.
- *
- * Semantics mirror `locateFlag` except that all occurrences are visited and
- * the last one wins — matching real `aws` CLI behaviour (ADR-0002).
- *
- * Returns `undefined` when the flag is absent or is the final token with no
- * following value in two-arg form.
- *
- * Still throws USAGE_ERROR for the `--flag --other-flag` ambiguity: the next
- * token starting with `--` unambiguously means the caller forgot the value,
- * regardless of whether this is the first or last occurrence.
- */
-function locateLastFlag(
-  args: readonly string[],
-  flag: string,
-): { readonly value: string } | undefined {
-  const eqPrefix = `${flag}=`;
-  let last: { readonly value: string } | undefined;
-  for (let i = 0; i < args.length; i++) {
-    const arg = args[i] ?? "";
-    if (arg === flag) {
-      if (i + 1 >= args.length) continue; // flag at end with no value
-      const next = args[i + 1] as string;
-      if (next.startsWith("--")) {
-        throw new AxiError(
-          `${flag} requires a value but "${next}" looks like a flag, not a value`,
-          "USAGE_ERROR",
-          [
-            `Use the equals form to avoid ambiguity: ${flag}=<value>`,
-            `Or provide the value before the next flag: ${flag} <value> ${next} …`,
-          ],
-        );
-      }
-      last = { value: next };
-      i++; // skip value token so the next iteration does not re-visit it
-    } else if (arg.startsWith(eqPrefix)) {
-      last = { value: arg.slice(eqPrefix.length) };
-    }
-  }
-  return last;
-}
 
 /**
  * Resolve a key argument that real `aws` accepts only as a named flag
@@ -597,7 +574,7 @@ export function resolveKeyArg({
   const positional = positionals[0] as string | undefined;
 
   // Flag form: --flag value  or  --flag=value (last-wins on duplicates per ADR-0002)
-  const flagLoc = locateLastFlag(args, flagName);
+  const flagLoc = locateFlagOccurrence(args, flagName, "last");
   const flagValue = flagLoc?.value;
 
   // Conflict: both forms in the same call — real aws cannot hit this (it does
