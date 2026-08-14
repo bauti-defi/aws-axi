@@ -140,38 +140,37 @@ async function run(
   const args = buildArgs(userArgs);
   const env = buildChildEnv(options.context);
 
-  const { promise, resolve } = Promise.withResolvers<ExecResult>();
-  const child = execFile(
-    binary,
-    args,
-    // encoding: "utf8" selects the string-returning overload of execFile.
-    { maxBuffer: MAX_BUFFER_BYTES, env, encoding: "utf8" as const },
-    (error, stdout, stderr) => {
-      if (error && (error as NodeJS.ErrnoException).code === "ENOENT") {
-        // Resolve with sentinel — callers check and throw AWS_NOT_INSTALLED.
-        resolve({ stdout: "", stderr: "ENOENT", exitCode: 127 });
-        return;
+  return new Promise((resolve) => {
+    const child = execFile(
+      binary,
+      args,
+      // encoding: "utf8" selects the string-returning overload of execFile.
+      { maxBuffer: MAX_BUFFER_BYTES, env, encoding: "utf8" as const },
+      (error, stdout, stderr) => {
+        if (error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+          // Resolve with sentinel — callers check and throw AWS_NOT_INSTALLED.
+          resolve({ stdout: "", stderr: "ENOENT", exitCode: 127 });
+          return;
+        }
+        const code = error
+          ? ((error as Error & { code?: string | number }).code ?? 1)
+          : 0;
+        resolve({
+          stdout: stdout ?? "",
+          stderr: stderr ?? "",
+          exitCode: typeof code === "number" ? code : 1,
+        });
+      },
+    );
+
+    if (userArgs.includes("file:///dev/stdin")) {
+      if (child.stdin === null) {
+        child.kill();
+        throw new Error("execFile must create a writable stdin pipe");
       }
-      const code = error
-        ? ((error as Error & { code?: string | number }).code ?? 1)
-        : 0;
-      resolve({
-        stdout: stdout ?? "",
-        stderr: stderr ?? "",
-        exitCode: typeof code === "number" ? code : 1,
-      });
-    },
-  );
-
-  if (userArgs.includes("file:///dev/stdin")) {
-    if (child.stdin === null) {
-      child.kill();
-      throw new Error("execFile must create a writable stdin pipe");
+      (options.stdin ?? process.stdin).pipe(child.stdin);
     }
-    (options.stdin ?? process.stdin).pipe(child.stdin);
-  }
-
-  return promise;
+  });
 }
 
 /**
