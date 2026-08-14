@@ -20,13 +20,15 @@ import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import { awsJson, type AwsRunOptions } from "../aws.js";
 import { fallThroughToEngine } from "../engine.js";
-import { collectPassthroughFlags, buildPassthrough, locateFlag } from "../overlay-args.js";
+import { collectPassthroughFlags, buildPassthrough, extractPositionals, locateFlag } from "../overlay-args.js";
 
 // ─── Defaults ─────────────────────────────────────────────────────────────────
 
 const DEFAULT_SINCE = "15m";
 const DEFAULT_EVENTS_LIMIT = 50;
 const DEFAULT_GROUPS_LIMIT = 20;
+
+const LOGS_BOOL_FLAGS: ReadonlySet<string> = new Set(["--follow"]);
 
 // ─── Internal AWS API shapes ──────────────────────────────────────────────────
 
@@ -573,7 +575,7 @@ export function _extractTailArgs(args: readonly string[]): TailArgs {
   const [nextToken, r5] = pullFlag(r4, "--next-token");
 
   // First remaining non-flag string is the log group name.
-  const logGroupName = r5.find((a) => !a.startsWith("-"));
+  const logGroupName = extractPositionals(r5, LOGS_BOOL_FLAGS)[0];
   if (logGroupName === undefined) {
     throw new AxiError("logs tail requires a log group name", "USAGE_ERROR", [
       "Usage: aws-axi logs tail <log-group-name> [--since 15m] [--limit 50]",
@@ -614,7 +616,7 @@ export function _extractFilterArgs(args: readonly string[]): FilterArgs {
   const [nextToken, r3] = pullFlag(r2, "--next-token");
 
   // Remaining non-flag positionals: [<log-group-name>, <pattern>]
-  const positionals = r3.filter((a) => !a.startsWith("-"));
+  const positionals = extractPositionals(r3, LOGS_BOOL_FLAGS);
   const logGroupName = positionals[0];
   const pattern = positionals[1];
 

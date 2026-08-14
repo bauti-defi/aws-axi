@@ -22,6 +22,7 @@ import type { AwsContext } from "../context.js";
 import { awsRaw } from "../aws.js";
 import { loadService, getWaiter, pascalToKebab, type ServiceModel } from "../model.js";
 import { SERVICE_ALIASES } from "../engine.js";
+import { extractPositionals } from "../overlay-args.js";
 
 /**
  * Inverse of SERVICE_ALIASES: maps botocore model names to their AWS CLI
@@ -49,6 +50,8 @@ import { SERVICE_ALIASES } from "../engine.js";
 const WAIT_SERVICE_REMAP: ReadonlyMap<string, string> = new Map(
   Object.entries(SERVICE_ALIASES).map(([cliName, modelName]) => [modelName, cliName] as const),
 );
+
+const WAIT_BOOL_FLAGS: ReadonlySet<string> = new Set(["--dry-run"]);
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -299,7 +302,7 @@ export async function waitCommand(
   testOptions?: WaitCommandTestOptions,
 ): Promise<Record<string, unknown>> {
   // Pick the first two non-flag tokens as <service> and <waiter-name>.
-  const positionals = args.filter((a) => !a.startsWith("-"));
+  const positionals = extractPositionals(args, WAIT_BOOL_FLAGS);
 
   if (positionals.length < 2) {
     throw new AxiError(

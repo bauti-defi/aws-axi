@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "waiters": {
+    "InstanceRunning": {
+      "delay": 15,
+      "operation": "DescribeInstances",
+      "maxAttempts": 40,
+      "acceptors": []
+    }
+  }
+}
