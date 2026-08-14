@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "waiters": {
+    "TasksStopped": {
+      "delay": 6,
+      "operation": "DescribeTasks",
+      "maxAttempts": 100,
+      "acceptors": [
+        {
+          "expected": "STOPPED",
+          "matcher": "pathAll",
+          "state": "success",
+          "argument": "tasks[].lastStatus"
+        }
+      ]
+    }
+  }
+}
