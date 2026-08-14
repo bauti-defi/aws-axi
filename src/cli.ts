@@ -27,7 +27,7 @@ import { iamCommand, IAM_HELP } from "./commands/iam.js";
 import { logsCommand, LOGS_HELP } from "./commands/logs.js";
 import { setupCommand, SETUP_HELP } from "./commands/setup.js";
 import { ssmCommand, SSM_HELP } from "./commands/ssm.js";
-import { secretsCommand, SECRETS_HELP } from "./commands/secrets.js";
+import { secretsCommand, SECRETS_HELP, isRawSecretValueRequest, rawSecretStringRun } from "./commands/secrets.js";
 import { waitCommand, WAIT_HELP } from "./commands/wait.js";
 import { lambdaCommand, LAMBDA_HELP } from "./commands/lambda.js";
 import { engineRun, SERVICE_ALIASES } from "./engine.js";
@@ -310,7 +310,34 @@ function buildCommandsProxy(): Record<string, AxiCliCommand<AwsContext>> {
 export async function main(options: {
   argv?: string[];
   stdout?: { write: (chunk: string) => unknown };
+  stderr?: { write: (chunk: string) => unknown };
 } = {}): Promise<void> {
+  const argv = options.argv ?? process.argv.slice(2);
+  const command = argv[0];
+  const commandArgs = argv.slice(1);
+  const { strippedArgs, context } = stripContextArgs(commandArgs);
+
+  if (
+    (command === "secretsmanager" || command === "secrets") &&
+    strippedArgs[0] === "get-secret-value" &&
+    !strippedArgs.includes("--help") &&
+    isRawSecretValueRequest(strippedArgs.slice(1))
+  ) {
+    try {
+      const secretString = await rawSecretStringRun({
+        subcommand: "get-secret-value",
+        args: strippedArgs.slice(1),
+        context,
+      });
+      (options.stdout ?? process.stdout).write(secretString);
+    } catch (error) {
+      const formatted = formatError(error);
+      (options.stderr ?? process.stderr).write(formatted.output);
+      process.exitCode = formatted.exitCode;
+    }
+    return;
+  }
+
   // Patch process.argv[1] so axi-sdk-js's homeHeaderOutput banner shows the
   // POSIX sh launcher (dist/bin/aws-axi) rather than the .js module path
   // (dist/bin/aws-axi.js) that Bun receives after `exec bun --no-env-file`.
@@ -323,7 +350,7 @@ export async function main(options: {
     process.argv[1] = _launcherBin;
   }
   await runAxiCli<AwsContext>({
-    ...(options.argv ? { argv: options.argv } : {}),
+    argv,
     ...(options.stdout ? { stdout: options.stdout } : {}),
     description: DESCRIPTION,
     version: VERSION,

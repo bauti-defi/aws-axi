@@ -53,6 +53,7 @@ import { useEnvGuard } from "./helpers/env-guard.js";
 // ── Constants ──────────────────────────────────────────────────────────────────
 
 const PLAINTEXT = "WIRE-HARNESS-PLAINTEXT-c3d9f2a1";
+const BINARY_SECRET_ID = "wire/harness/binary-secret";
 const SECRET_ID = "wire/harness/test-secret";
 const SECRET_ARN = `arn:aws:secretsmanager:us-east-1:123456789012:secret:${SECRET_ID}-WiReHa`;
 const VERSION_ID = "aaaabbbb-cccc-dddd-eeee-ffffgggghhhh";
@@ -67,15 +68,17 @@ const VERSION_ID = "aaaabbbb-cccc-dddd-eeee-ffffgggghhhh";
 function buildFakeSecretsServer(): Server<undefined> {
   return Bun.serve({
     port: 0, // OS assigns a free port
-    fetch(req) {
+    async fetch(req) {
       const target = req.headers.get("x-amz-target") ?? "";
 
       if (target === "secretsmanager.GetSecretValue") {
+        const request = (await req.json()) as { SecretId?: string };
+        const isBinarySecret = request.SecretId === BINARY_SECRET_ID;
         const body = {
           ARN: SECRET_ARN,
           Name: SECRET_ID,
           VersionId: VERSION_ID,
-          SecretString: PLAINTEXT,
+          ...(isBinarySecret ? { SecretBinary: "c2VjcmV0" } : { SecretString: PLAINTEXT }),
           VersionStages: ["AWSCURRENT"],
           CreatedDate: 1704067200,
           LastChangedDate: 1704067200,
@@ -116,11 +119,18 @@ function buildFakeSecretsServer(): Server<undefined> {
 async function captureMain(
   argv: string[],
   env: Record<string, string> = {},
-): Promise<{ output: string; exitCode: number | undefined }> {
+): Promise<{ output: string; diagnostics: string; exitCode: number | undefined }> {
   const chunks: string[] = [];
   const stdout = {
     write(chunk: string): true {
       chunks.push(chunk);
+      return true;
+    },
+  };
+  const diagnostics: string[] = [];
+  const stderr = {
+    write(chunk: string): true {
+      diagnostics.push(chunk);
       return true;
     },
   };
@@ -135,7 +145,7 @@ async function captureMain(
   process.exitCode = 0;
 
   try {
-    await main({ argv, stdout });
+    await main({ argv, stdout, stderr });
   } finally {
     for (const [k, v] of Object.entries(saved)) {
       if (v === undefined) {
@@ -150,7 +160,7 @@ async function captureMain(
   const exitCode: number | undefined = rawExitCode === 0 ? undefined : rawExitCode;
   process.exitCode = prevExitCode;
 
-  return { output: chunks.join(""), exitCode };
+  return { output: chunks.join(""), diagnostics: diagnostics.join(""), exitCode };
 }
 
 // ── Server lifecycle ──────────────────────────────────────────────────────────
@@ -196,6 +206,38 @@ describe("wire-harness: real aws binary + fake SecretsManager endpoint", () => {
     );
     // The overlay reveals when --reveal is bare
     expect(output).toContain(PLAINTEXT);
+  }, 20000);
+
+  it("--reveal --raw: stdout is only the byte-exact SecretString", async () => {
+    const { output } = await captureMain(
+      ["secrets", "get-secret-value", SECRET_ID, "--reveal", "--raw"],
+      { ...FAKE_ENV, AWS_ENDPOINT_URL: endpointUrl },
+    );
+
+    expect(output).toBe(PLAINTEXT);
+  }, 20000);
+
+  it("--raw without --reveal: rejects on stderr without writing plaintext", async () => {
+    const { output, diagnostics, exitCode } = await captureMain(
+      ["secrets", "get-secret-value", SECRET_ID, "--raw"],
+      { ...FAKE_ENV, AWS_ENDPOINT_URL: endpointUrl },
+    );
+
+    expect(output).toBe("");
+    expect(diagnostics).toContain("--raw requires --reveal");
+    expect(diagnostics).not.toContain(PLAINTEXT);
+    expect(exitCode).toBe(252);
+  }, 20000);
+
+  it("--reveal --raw: rejects SecretBinary without writing stdout", async () => {
+    const { output, diagnostics, exitCode } = await captureMain(
+      ["secrets", "get-secret-value", BINARY_SECRET_ID, "--reveal", "--raw"],
+      { ...FAKE_ENV, AWS_ENDPOINT_URL: endpointUrl },
+    );
+
+    expect(output).toBe("");
+    expect(diagnostics).toContain("SecretBinary is not supported by --raw");
+    expect(exitCode).toBe(252);
   }, 20000);
 
   /**
