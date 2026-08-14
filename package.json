@@ -7,10 +7,10 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/bauti-defi/aws-axi.git"
+    "url": "git+https://github.com/bauti-defi/aws-axi.git"
   },
   "bin": {
-    "aws-axi": "./dist/bin/aws-axi"
+    "aws-axi": "dist/bin/aws-axi"
   },
   "files": [
     "dist",
