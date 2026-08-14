@@ -9,7 +9,8 @@ import { describe, it, expect, afterEach } from "bun:test";
 import { rmSync, writeFileSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { awsRaw, awsJson, awsExec } from "../src/aws.js";
+import { Readable } from "node:stream";
+import { awsRaw, awsJson, awsExec, type AwsRunOptions } from "../src/aws.js";
 import { AxiError } from "axi-sdk-js";
 import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
 
@@ -128,6 +129,25 @@ describe("awsRaw", () => {
     });
     expect(result.stdout).toContain("--output");
     expect(result.stdout).toContain("json");
+  });
+
+  it("forwards stdin when the AWS CLI reads file:///dev/stdin", async () => {
+    const scriptPath = stubBin(`#!/bin/sh\ncat\nexit 0`);
+    const options = {
+      binary: scriptPath,
+      stdin: Readable.from(["secret-payload"]),
+    } as unknown as AwsRunOptions;
+
+    const result = await awsRaw(
+      [
+        "secretsmanager",
+        "put-secret-value",
+        "--secret-string",
+        "file:///dev/stdin",
+      ],
+      options,
+    );
+    expect(result.stdout).toBe("secret-payload");
   });
 
   it("sets AWS_PROFILE env var when context has profile", async () => {

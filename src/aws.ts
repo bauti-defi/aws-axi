@@ -62,6 +62,11 @@ export interface AwsRunOptions {
    * read the developer's actual config file.
    */
   readonly configPath?: string;
+  /**
+   * Input stream forwarded only when an AWS argument explicitly references
+   * file:///dev/stdin. Defaults to process.stdin; injectable for subprocess tests.
+   */
+  readonly stdin?: NodeJS.ReadableStream;
 }
 
 const MAX_BUFFER_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -135,29 +140,38 @@ async function run(
   const args = buildArgs(userArgs);
   const env = buildChildEnv(options.context);
 
-  return new Promise((resolve) => {
-    execFile(
-      binary,
-      args,
-      // encoding: "utf8" selects the string-returning overload of execFile.
-      { maxBuffer: MAX_BUFFER_BYTES, env, encoding: "utf8" as const },
-      (error, stdout, stderr) => {
-        if (error && (error as NodeJS.ErrnoException).code === "ENOENT") {
-          // Resolve with sentinel — callers check and throw AWS_NOT_INSTALLED.
-          resolve({ stdout: "", stderr: "ENOENT", exitCode: 127 });
-          return;
-        }
-        const code = error
-          ? ((error as Error & { code?: string | number }).code ?? 1)
-          : 0;
-        resolve({
-          stdout: stdout ?? "",
-          stderr: stderr ?? "",
-          exitCode: typeof code === "number" ? code : 1,
-        });
-      },
-    );
-  });
+  const { promise, resolve } = Promise.withResolvers<ExecResult>();
+  const child = execFile(
+    binary,
+    args,
+    // encoding: "utf8" selects the string-returning overload of execFile.
+    { maxBuffer: MAX_BUFFER_BYTES, env, encoding: "utf8" as const },
+    (error, stdout, stderr) => {
+      if (error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+        // Resolve with sentinel — callers check and throw AWS_NOT_INSTALLED.
+        resolve({ stdout: "", stderr: "ENOENT", exitCode: 127 });
+        return;
+      }
+      const code = error
+        ? ((error as Error & { code?: string | number }).code ?? 1)
+        : 0;
+      resolve({
+        stdout: stdout ?? "",
+        stderr: stderr ?? "",
+        exitCode: typeof code === "number" ? code : 1,
+      });
+    },
+  );
+
+  if (userArgs.includes("file:///dev/stdin")) {
+    if (child.stdin === null) {
+      child.kill();
+      throw new Error("execFile must create a writable stdin pipe");
+    }
+    (options.stdin ?? process.stdin).pipe(child.stdin);
+  }
+
+  return promise;
 }
 
 /**
