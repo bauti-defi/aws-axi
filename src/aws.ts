@@ -62,6 +62,11 @@ export interface AwsRunOptions {
    * read the developer's actual config file.
    */
   readonly configPath?: string;
+  /**
+   * Input stream forwarded only when an AWS argument explicitly references
+   * file:///dev/stdin. Defaults to process.stdin; injectable for subprocess tests.
+   */
+  readonly stdin?: NodeJS.ReadableStream;
 }
 
 const MAX_BUFFER_BYTES = 10 * 1024 * 1024; // 10 MB
@@ -136,7 +141,7 @@ async function run(
   const env = buildChildEnv(options.context);
 
   return new Promise((resolve) => {
-    execFile(
+    const child = execFile(
       binary,
       args,
       // encoding: "utf8" selects the string-returning overload of execFile.
@@ -157,6 +162,14 @@ async function run(
         });
       },
     );
+
+    if (userArgs.includes("file:///dev/stdin")) {
+      if (child.stdin === null) {
+        child.kill();
+        throw new Error("execFile must create a writable stdin pipe");
+      }
+      (options.stdin ?? process.stdin).pipe(child.stdin);
+    }
   });
 }
 
