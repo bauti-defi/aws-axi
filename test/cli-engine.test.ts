@@ -13,6 +13,7 @@ import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main } from "../src/cli.js";
+import { SERVICE_ALIASES } from "../src/engine.js";
 import { stubBin, stubDir, releaseStubBins } from "./helpers/stub-bin.js";
 import { useEnvGuard } from "./helpers/env-guard.js";
 
@@ -259,6 +260,10 @@ describe("CLI engine fallback — generic service dispatch", () => {
       expect(output).not.toMatch(/Unknown service ['"]ddb['"]/);
     },
   );
+
+  it("does not alias ddb to dynamodb", () => {
+    expect(Object.hasOwn(SERVICE_ALIASES, "ddb")).toBe(false);
+  });
 
   it("returns paginated output with count + nextToken hint", async () => {
     const paginatedResponse = JSON.stringify({
