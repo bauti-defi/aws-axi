@@ -1,0 +1,9 @@
+{
+  "version": "2.0",
+  "metadata": {
+    "apiVersion": "2014-11-13",
+    "serviceId": "ECS"
+  },
+  "operations": {},
+  "shapes": {}
+}
