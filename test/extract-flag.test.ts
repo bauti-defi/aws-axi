@@ -94,7 +94,7 @@
  */
 
 import { describe, it, expect, afterEach } from "bun:test";
-import { extractFlag, locateFlag, hasFlag, flagIsTrue, flagIsTrueStrict } from "../src/overlay-args.js";
+import { extractFlag, locateFlag, resolveKeyArg, hasFlag, flagIsTrue, flagIsTrueStrict } from "../src/overlay-args.js";
 import { _extractTailArgs, _extractFilterArgs } from "../src/commands/logs.js";
 import { s3Command } from "../src/commands/s3.js";
 import { stubBin, releaseStubBins } from "./helpers/stub-bin.js";
@@ -345,6 +345,25 @@ describe("locateFlag — two-arg form", () => {
     const m = locateFlag(["--flag", "a", "--flag", "b"], "--flag");
     expect(m?.value).toBe("a");
     expect(m?.start).toBe(0);
+  });
+});
+
+describe("value-flag occurrence modes", () => {
+  const args = ["--key=first", "--key", "last"];
+
+  it("keeps the first value for locateFlag", () => {
+    expect(locateFlag(args, "--key")).toStrictEqual({ value: "first", start: 0, span: 1 });
+  });
+
+  it("keeps the last value for resolveKeyArg", () => {
+    expect(
+      resolveKeyArg({
+        args,
+        flagName: "--key",
+        label: "key",
+        examples: [],
+      }),
+    ).toBe("last");
   });
 });
 
