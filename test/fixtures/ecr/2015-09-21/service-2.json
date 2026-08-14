@@ -1,0 +1,43 @@
+{
+  "version": "2.0",
+  "metadata": {
+    "apiVersion": "2015-09-21",
+    "serviceId": "ECR"
+  },
+  "operations": {
+    "DescribeImages": {
+      "name": "DescribeImages",
+      "http": { "method": "POST", "requestUri": "/" },
+      "input": { "shape": "DescribeImagesRequest" },
+      "output": { "shape": "DescribeImagesResponse" }
+    }
+  },
+  "shapes": {
+    "DescribeImagesRequest": {
+      "type": "structure",
+      "required": ["repositoryName"],
+      "members": {
+        "repositoryName": { "shape": "String" },
+        "maxResults": { "shape": "Integer" },
+        "nextToken": { "shape": "String" }
+      }
+    },
+    "DescribeImagesResponse": {
+      "type": "structure",
+      "members": {
+        "imageDetails": { "shape": "ImageDetailList" },
+        "nextToken": { "shape": "String" }
+      }
+    },
+    "ImageDetailList": {
+      "type": "list",
+      "member": { "shape": "ImageDetail" }
+    },
+    "ImageDetail": {
+      "type": "structure",
+      "members": {}
+    },
+    "String": { "type": "string" },
+    "Integer": { "type": "integer" }
+  }
+}

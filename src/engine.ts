@@ -136,6 +136,37 @@ function hasMaxItemsFlag(args: readonly string[]): boolean {
 }
 
 /**
+ * Convert a paginator's service-level page-size flag to the AWS CLI's
+ * client-level cap. The CLI rejects both flags together; the conversion keeps
+ * the caller's requested output bound and preserves its synthesized NextToken
+ * continuation contract.
+ */
+function translateServiceLimitToMaxItems(
+  args: readonly string[],
+  paginator: PaginatorConfig,
+): readonly string[] {
+  if (paginator.limitKey === undefined) {
+    return args;
+  }
+
+  const serviceLimitFlag = toCliFlag(paginator.limitKey);
+  let translated = false;
+  const normalizedArgs = args.map((arg) => {
+    if (arg === serviceLimitFlag) {
+      translated = true;
+      return "--max-items";
+    }
+    if (arg.startsWith(`${serviceLimitFlag}=`)) {
+      translated = true;
+      return `--max-items=${arg.slice(serviceLimitFlag.length + 1)}`;
+    }
+    return arg;
+  });
+
+  return translated ? normalizedArgs : args;
+}
+
+/**
  * Return true if --query is present in args.
  *
  * --query contract (ADR-0002): JMESPath is applied by the aws CLI before the
@@ -347,7 +378,6 @@ export async function engineRun(
 
   // ── 4. Pagination setup ────────────────────────────────────────────────────
   const paginator = getPaginator(model, pascalKey);
-  const awsArgs: string[] = [service, operation, ...cleanedArgs];
 
   // --query bypass (ADR-0002): when --query is active, JMESPath is applied by
   // the aws CLI before the response reaches us. The result shape is unknown
@@ -357,6 +387,11 @@ export async function engineRun(
   // hasMaxItemsFlag gates on the user-supplied value already present in
   // cleanedArgs, so an explicit --max-items + --query combination is honored.
   const queryActive = hasQueryFlag(cleanedArgs);
+  const paginationArgs =
+    paginator !== undefined && !hasMaxItemsFlag(cleanedArgs) && !queryActive
+      ? translateServiceLimitToMaxItems(cleanedArgs, paginator)
+      : cleanedArgs;
+  const awsArgs: string[] = [service, operation, ...paginationArgs];
   if (
     service === "secretsmanager" &&
     Object.hasOwn(SECRET_BEARING_SECRETS_MANAGER_OPERATIONS, operation) &&
@@ -369,7 +404,11 @@ export async function engineRun(
       ["Pass --reveal to confirm you want the plaintext, or drop --query."],
     );
   }
-  if (paginator !== undefined && !hasMaxItemsFlag(cleanedArgs) && !queryActive) {
+  if (
+    paginator !== undefined &&
+    !hasMaxItemsFlag(paginationArgs) &&
+    !queryActive
+  ) {
     awsArgs.push("--max-items", String(maxItemsCap));
   }
 
