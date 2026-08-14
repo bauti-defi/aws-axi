@@ -28,7 +28,12 @@ const DEFAULT_SINCE = "15m";
 const DEFAULT_EVENTS_LIMIT = 50;
 const DEFAULT_GROUPS_LIMIT = 20;
 
-const LOGS_BOOL_FLAGS: ReadonlySet<string> = new Set(["--follow"]);
+const LOGS_BOOL_FLAGS: ReadonlySet<string> = new Set([
+  "--follow",
+  "--unmask",
+  "--interleaved",
+  "--start-from-head",
+]);
 
 // ─── Internal AWS API shapes ──────────────────────────────────────────────────
 
