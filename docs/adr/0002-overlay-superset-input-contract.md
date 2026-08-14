@@ -263,3 +263,43 @@ pair verbatim and does NOT throw. Mutation-tested: adding `"--exclude"` to
 `ownedBoolFlags` strips it → stub fails → test RED. Any future change that routes
 `--exclude` through `locateFlag` or adds it to an owned set will break this test —
 that is the intended signal.
+
+## Owned-flag duplicate resolution (0.7.1)
+
+The **Accepted tradeoffs** bullet above covers *passthrough* duplicates: the
+overlay injects a flag the caller also supplied, both tokens reach the child
+`aws` invocation, and the `aws` CLI resolves them by using the last occurrence.
+That rule is unchanged. This section covers the distinct case of duplicates in
+flags an overlay **owns** and parses itself (`--secret-id`, `--role-name`,
+`--expires-in`, `--max-items`, `--since`, …), which aws-axi resolves before the
+`aws` CLI ever sees them.
+
+**Value-taking owned flags: last-wins.** `locateFlag` — and everything built on
+it (`extractFlag`, `pullFlag`, `resolveKeyArg`) — scans the whole argv and
+returns the final occurrence, so owned flags land on the same answer real `aws`
+would give for the passthrough case. Reading the first value instead would make
+aws-axi silently act on a different secret / key / expiry than the one the
+caller's last argument named. Both spellings share one ordering, so
+`--secret-id=a --secret-id b` resolves to `b`. The returned `start`/`span`
+describe the *selected* occurrence, so splicing callers (e.g. `pullFlag` in
+`logs.ts`) remove the right tokens.
+
+**Every occurrence is still validated.** Because the scan visits all of them, a
+malformed occurrence anywhere in argv raises the PR #54 `USAGE_ERROR` even when a
+later well-formed occurrence would have won. `--flag --other-flag` is ambiguous
+regardless of which occurrence ultimately wins, so position does not excuse it.
+
+**Safety-sensitive boolean toggles: first-wins.** `flagIsTrue` (`--dryrun`,
+`--recursive`) and `flagIsTrueStrict` (`--reveal`) deliberately return on their
+first match. These flags name no target, so the "acted on the wrong object"
+argument for last-wins does not apply; what does apply is that a trailing
+duplicate must not be able to undo an explicit guard the caller already stated.
+`--dryrun --dryrun=false` stays a dry run and `--reveal=false --reveal` stays
+redacted.
+
+**Invariant guard:** `test/extract-flag.test.ts` pins the value-flag rule —
+`"value-flag occurrence modes"`, the mixed-form cases, the
+`refExtractFlag`-divergence test, and
+`"throws when an earlier occurrence is malformed, even if a valid one follows"`.
+Mutation M2 (documented in that file's header): reverting `locateFlag` to return
+its first match turns 15 tests RED.

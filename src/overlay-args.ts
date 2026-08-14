@@ -169,9 +169,9 @@ type FlagLocation = {
  *
  * Contract notes:
  *   - Duplicate flags resolve to the LAST occurrence, matching real `aws`
- *     (ADR-0002: "the `aws` CLI resolves them by using the last occurrence").
- *     Reading the first value would silently act on a different secret / key /
- *     expiry than the one the caller's final argument named.
+ *     (ADR-0002 § "Owned-flag duplicate resolution"). Reading the first value
+ *     would silently act on a different secret / key / expiry than the one the
+ *     caller's final argument named.
  *   - Because the scan visits every occurrence, a malformed occurrence anywhere
  *     in argv throws (see the USAGE_ERROR note below) rather than being skipped.
  *   - Does NOT mutate the input array.
@@ -281,9 +281,12 @@ export function hasFlag(args: readonly string[], flag: string): boolean {
  * regardless of the flag value (e.g. --bucket-name-prefix on the object
  * listing path), `hasFlag` is correct — presence is all that matters there.
  *
- * First-wins on repeated flags (consistent with every other parser in this
- * file).  The `=` prefix guard prevents false matches against flags sharing
- * a name prefix (e.g. --dryrun vs --dryrun-mode).
+ * First-wins on repeated flags — deliberately NOT the last-wins rule that
+ * `locateFlag` applies to value flags, so a trailing duplicate cannot undo a
+ * guard the caller already stated (`--dryrun --dryrun=false` stays a dry run).
+ * See ADR-0002 § "Owned-flag duplicate resolution".  The `=` prefix guard
+ * prevents false matches against flags sharing a name prefix (e.g. --dryrun vs
+ * --dryrun-mode).
  */
 /**
  * Recognised boolean literals for the `=`-form value in `flagIsTrue`.
@@ -382,7 +385,9 @@ export function flagIsTrue(args: readonly string[], flag: string): boolean {
  * deferred until `--reveal` callers are also updated to prefer USAGE_ERROR
  * over silent redaction on unrecognised input.
  *
- * First-wins on repeated flags.  Same `=`-prefix guard as `flagIsTrue`.
+ * First-wins on repeated flags, for the same fail-safe reason as `flagIsTrue`
+ * (`--reveal=false --reveal` stays redacted).  See ADR-0002 § "Owned-flag
+ * duplicate resolution".  Same `=`-prefix guard as `flagIsTrue`.
  */
 export function flagIsTrueStrict(args: readonly string[], flag: string): boolean {
   const eqPrefix = `${flag}=`;
@@ -527,10 +532,10 @@ export function extractPositionals(
  *   --<flag> <value>     flag form       — real aws's only accepted form
  *   --<flag>=<value>     equals form     — real aws's equals variant
  *
- * Duplicate flags: real `aws` resolves duplicates by using the LAST occurrence
- * (ADR-0002, lines 190-193). `resolveKeyArg` matches this: when the same owned
- * flag appears more than once the last value wins, silently — identical to real
- * `aws` behaviour.
+ * Duplicate flags: real `aws` resolves duplicates by using the LAST occurrence.
+ * `resolveKeyArg` matches this: when the same owned flag appears more than once
+ * the last value wins, silently — identical to real `aws` behaviour. See
+ * ADR-0002 § "Owned-flag duplicate resolution".
  *
  * Error cases (all → USAGE_ERROR):
  *   conflict   — both positional AND flag supplied in the same call; message
