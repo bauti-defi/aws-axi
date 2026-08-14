@@ -243,6 +243,7 @@ Where the ergonomics differ, here is the map both ways:
 | `aws ssm get-parameter --name <n> --with-decryption`   | `aws-axi ssm get-parameter <n> --reveal`              | Redacted by default; `--reveal` opts in (adds `--with-decryption`)         |
 | `aws secretsmanager get-secret-value --secret-id <id>` | `aws-axi secretsmanager get-secret-value <id> --reveal` | Redacted by default; `--reveal` opts in                                   |
 | `aws secretsmanager get-secret-value --secret-id <id> --query SecretString --output text` | `aws-axi secretsmanager get-secret-value <id> --reveal --raw` | `--raw` writes the byte-exact `SecretString` to stdout with no wrapper and no trailing newline (for command substitution). Requires `--reveal`; rejects `--query`; `SecretBinary` is a `USAGE_ERROR` |
+| `printf '{}' \| aws secretsmanager put-secret-value --secret-id id --secret-string file:///dev/stdin` | `printf '{}' \| aws-axi secretsmanager put-secret-value --secret-id id --secret-string file:///dev/stdin` | An explicit `file:///dev/stdin` parameter receives the closed pipe; ordinary commands do not consume stdin |
 | `aws kms describe-key --key-id alias/foo`              | `aws-axi kms describe-key alias/foo`                   | Positional id; accepts id, ARN, or alias                                    |
 | `aws lambda invoke --function-name f --payload '<json>' --cli-binary-format raw-in-base64-out out.json` | `aws-axi lambda invoke --function-name f --payload '<json>'` | `--cli-binary-format` handled automatically; result returned inline |
 | `aws ec2 wait instance-running --instance-ids i-…`     | `aws-axi wait ec2 instance-running --instance-ids i-…`| `wait` is a top-level verb; waiter names stay kebab-case; adds a polling budget |
@@ -297,6 +298,10 @@ Where the ergonomics differ, here is the map both ways:
   have won. Exception: repeated boolean toggles (`--dryrun`, `--recursive`, `--reveal`) resolve on their
   **first** occurrence so a trailing duplicate cannot undo the fail-safe direction — `--dryrun --dryrun=false`
   stays a dry run, `--reveal=false --reveal` stays redacted.
+- **Standard-input file references** — when an AWS argument explicitly uses `file:///dev/stdin`, aws-axi
+  pipes its stdin to the underlying AWS CLI. This supports streamed values such as `printf '{}' | aws-axi
+  secretsmanager put-secret-value --secret-id id --secret-string file:///dev/stdin`; ordinary commands do
+  not read or drain stdin.
 
 ## Reporting issues
 
