@@ -232,6 +232,7 @@ describe("toCliFlag", () => {
     expect(toCliFlag("QueueUrl")).toBe("--queue-url");
     expect(toCliFlag("MaxResults")).toBe("--max-results");
     expect(toCliFlag("Key")).toBe("--key");
+    expect(toCliFlag("DBParameterGroupName")).toBe("--db-parameter-group-name");
   });
 });
 
@@ -334,6 +335,25 @@ describe("engineRun — required param validation", () => {
       }),
     );
     expect(result).toMatchObject({ Result: "ok" });
+  });
+});
+
+describe("engineRun — RDS DB acronym parameter validation", () => {
+  it("accepts and forwards --db-parameter-group-name for describe-db-parameters", async () => {
+    const stub = createArgGuardStub({
+      requiredArg: "--db-parameter-group-name",
+      validStdout: '{"Parameters":[]}',
+    });
+
+    const result = await engineRun({
+      service: "rds",
+      operation: "describe-db-parameters",
+      args: ["--db-parameter-group-name", "validation-sentinel"],
+      dataDir: FIXTURES_DIR,
+      binary: stub,
+    });
+
+    expect(result).toMatchObject({ Parameters: [] });
   });
 });
 

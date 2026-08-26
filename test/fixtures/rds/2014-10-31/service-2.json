@@ -1,0 +1,35 @@
+{
+  "version": "2.0",
+  "metadata": {
+    "apiVersion": "2014-10-31",
+    "serviceId": "RDS"
+  },
+  "operations": {
+    "DescribeDBParameters": {
+      "name": "DescribeDBParameters",
+      "http": { "method": "GET", "requestUri": "/" },
+      "input": { "shape": "DescribeDBParametersMessage" },
+      "output": { "shape": "DescribeDBParametersResult" }
+    }
+  },
+  "shapes": {
+    "DescribeDBParametersMessage": {
+      "type": "structure",
+      "required": ["DBParameterGroupName"],
+      "members": {
+        "DBParameterGroupName": { "shape": "StringType" }
+      }
+    },
+    "DescribeDBParametersResult": {
+      "type": "structure",
+      "members": {
+        "Parameters": { "shape": "ParameterList" }
+      }
+    },
+    "ParameterList": {
+      "type": "list",
+      "member": { "shape": "StringType" }
+    },
+    "StringType": { "type": "string" }
+  }
+}

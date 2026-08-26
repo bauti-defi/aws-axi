@@ -90,10 +90,10 @@ export const SERVICE_ALIASES: Readonly<Record<string, string>> = Object.freeze(
  * "Bucket"    → "--bucket"
  * "QueueUrl"  → "--queue-url"
  * "MaxResults" → "--max-results"
+ * "DBParameterGroupName" → "--db-parameter-group-name"
  */
 export function toCliFlag(paramName: string): string {
-  // Insert a hyphen before each uppercase letter that follows a lowercase letter or digit
-  return "--" + paramName.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
+  return "--" + pascalToKebab(paramName);
 }
 
 // ── CLI flag / arg helpers — pure, exported for tests ────────────────────────
