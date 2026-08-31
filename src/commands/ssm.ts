@@ -282,6 +282,7 @@ subcommands (enriched overlays):
   get-parameter <name>               Get one parameter; value is redacted by default
   get-parameters <n1> [n2...]        Get multiple parameters by name
   get-parameters-by-path <path>      Get all parameters under a path prefix
+  start-session                      Native interactive AWS CLI session passthrough
   (any other ssm subcommand falls through to the generic engine — run \`aws ssm help\` to list all)
 
 flags (ssm run — required):
@@ -306,9 +307,11 @@ flags (get-command-invocation):
   --instance-id <id>     Target instance ID
   --wait                 Poll to terminal state before returning (default: single call)
 
-flags (overlay-specific, all subcommands):
+flags (all subcommands):
   --profile <name>       AWS profile (inherited from global --profile)
   --region <region>      AWS region  (inherited from global --region)
+
+flags (non-start-session overlays):
   --reveal               Show actual parameter values (default: redacted; alias for --with-decryption)
   --output               stripped (aws-axi always uses --output json internally)
   --query <expr>         JMESPath; bypasses overlay projection, returns raw result.
