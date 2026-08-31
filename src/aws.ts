@@ -2,15 +2,16 @@
  * Exec seam — the single choke point every aws command passes through.
  *
  * Shells out to the real `aws` binary (or a test stub passed as `binary`).
- * Always appends `--output json`; injects profile/region via child-process env
- * so global flags never conflict with operation-level flags.
+ * Buffered commands append `--output json`; interactive commands inherit the
+ * terminal streams and preserve the AWS CLI's native output and exit code.
  *
- * Three surface levels:
- *   awsRaw   — returns ExecResult (with error? field populated on non-zero exit);
- *              never throws except for ENOENT. Callers read result.error for the
- *              enriched ParsedAwsError rather than parsing stderr themselves.
- *   awsExec  — routes through awsRaw; returns raw stdout string; throws on failure
- *   awsJson  — routes through awsRaw; parses stdout as JSON; throws on failure
+ * Four surface levels:
+ *   awsRaw         — returns ExecResult (with error? field populated on non-zero exit);
+ *                    never throws except for ENOENT. Callers read result.error for the
+ *                    enriched ParsedAwsError rather than parsing stderr themselves.
+ *   awsExec        — routes through awsRaw; returns raw stdout string; throws on failure
+ *   awsJson        — routes through awsRaw; parses stdout as JSON; throws on failure
+ *   awsInteractive — inherits terminal streams and returns the native exit code
  *
  * Enrichment is single-site: awsRaw calls enrichNoCredsError (and any future
  * enrichment functions). awsExec and awsJson route through awsRaw, so they
@@ -25,7 +26,7 @@
  *      `return { ...result, error }`. awsExec and awsJson inherit it automatically.
  *   5. Add a cross-surface agreement test in test/aws.test.ts to pin the behavior.
  */
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import type { AwsContext } from "./context.js";
 import {
   mapAwsError,
@@ -130,6 +131,36 @@ function buildChildEnv(context: AwsContext | undefined): Record<string, string |
     env["AWS_REGION"] = context.region;
   }
   return env;
+}
+
+/**
+ * Execute an interactive AWS CLI command with the terminal streams inherited.
+ *
+ * Interactive commands own their stdout protocol and can stay open indefinitely,
+ * so they cannot use the buffered JSON execution seam. The returned exit code is
+ * the child process's native exit code; callers are responsible for assigning it
+ * to process.exitCode.
+ */
+export async function awsInteractive(
+  args: readonly string[],
+  options: AwsRunOptions = {},
+): Promise<number> {
+  const binary = options.binary ?? "aws";
+  const env = buildChildEnv(options.context);
+
+  const { promise, resolve, reject } = Promise.withResolvers<number>();
+  const child = spawn(binary, args, { env, stdio: "inherit" });
+
+  child.once("error", (error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") {
+      reject(mapAwsError("ENOENT", 127));
+      return;
+    }
+    reject(error);
+  });
+  child.once("close", (exitCode) => resolve(exitCode ?? 1));
+
+  return promise;
 }
 
 async function run(

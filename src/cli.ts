@@ -18,6 +18,7 @@ import { runAxiCli, AxiError, type AxiCliCommand } from "axi-sdk-js";
 import { encode } from "@toon-format/toon";
 import { resolveAwsContext, stripContextArgs, type AwsContext } from "./context.js";
 import { awsExitCode, type AwsErrorCode } from "./errors.js";
+import { awsInteractive } from "./aws.js";
 import { homeCommand } from "./commands/home.js";
 import { whoamiCommand, WHOAMI_HELP } from "./commands/whoami.js";
 import { ec2Command, EC2_HELP } from "./commands/ec2.js";
@@ -327,6 +328,20 @@ export async function main(options: {
   const command = argv[0];
   const commandArgs = argv.slice(1);
   const { strippedArgs, context } = stripContextArgs(commandArgs);
+
+  if (command === "ssm" && strippedArgs[0] === "start-session") {
+    try {
+      process.exitCode = await awsInteractive(
+        ["ssm", "start-session", ...strippedArgs.slice(1)],
+        { context },
+      );
+    } catch (error) {
+      const formatted = formatError(error);
+      (options.stderr ?? process.stderr).write(formatted.output);
+      process.exitCode = formatted.exitCode;
+    }
+    return;
+  }
 
   if (
     (command === "secretsmanager" || command === "secrets") &&

@@ -1086,6 +1086,47 @@ async function captureMain(
   return { output: chunks.join(""), exitCode };
 }
 
+// ─── ssm start-session — interactive passthrough ─────────────────────────────
+
+describe("ssm start-session — interactive passthrough", () => {
+  it("preserves session output and native exit code without requesting JSON", async () => {
+    const binary = stubBin(`#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--output" ] || [ "$arg" = "--output=json" ]; then
+    printf '%s\n' 'unexpected structured output request' >&2
+    exit 99
+  fi
+done
+printf '%s\n' 'Starting session with SessionId: test-session'
+exit 37
+`);
+
+    const child = Bun.spawn({
+      cmd: [
+        process.execPath,
+        "bin/aws-axi.ts",
+        "ssm",
+        "start-session",
+        "--target",
+        TEST_INSTANCE_ID,
+      ],
+      cwd: process.cwd(),
+      env: { ...process.env, PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [output, errorOutput, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+
+    expect(exitCode).toBe(37);
+    expect(output).toBe("Starting session with SessionId: test-session\n");
+    expect(errorOutput).toBe("");
+  });
+});
+
 // ─── ssm run fixtures ─────────────────────────────────────────────────────────
 
 const TEST_COMMAND_ID = "cmd-12345678-test-0001-abcdef";
