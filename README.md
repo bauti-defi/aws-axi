@@ -173,6 +173,13 @@ generic engine. Two deliberate named exceptions exist for `s3 ls` (see below).
 > prevents a different silent no-op: the user intended to disable dry-run but got a dry run.
 >
 > The same vocabulary applies to `--recursive` on `s3 ls s3://bucket/`.
+>
+> **Model boolean parameters (generic engine):** the same explicit values apply to
+> every botocore boolean, including `logs get-log-events --start-from-head`.
+> `--flag false` / `--flag=false` becomes `--no-flag` (parameter false) before the
+> AWS CLI call, so the literal `false` is not an unknown option. Bare `--flag` and
+> `--flag true` stay `--flag` (true). `--no-flag` is unchanged. Last occurrence wins.
+> An unrecognised `=` value is `USAGE_ERROR` and names the token.
 
 | Service          | Command            | Enriched overlay operations                                                                  | Everything else                    |
 | ---------------- | ------------------ | -------------------------------------------------------------------------------------------- | ---------------------------------- |
