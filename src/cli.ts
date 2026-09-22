@@ -387,21 +387,21 @@ export async function main(options: {
   // `ecr get-login-password` is an AWS CLI *custom* operation (like `s3 cp` or
   // `configure list-profiles`), not a botocore API operation. The engine would
   // look it up in the ECR service model, find no such operation, and exit 252.
-  // Delegate to the real aws CLI via awsExec (ADR-0003), forwarding
-  // region/profile through the context env. The stdout (an authorization token)
-  // is streamed straight through, exactly as `aws` does — never logged,
-  // captured for inspection, or transformed.
-  if (
-    command === "ecr" &&
-    strippedArgs[0] === "get-login-password" &&
-    !strippedArgs.includes("--help")
-  ) {
+  // Delegate to the real aws CLI via the awsInteractive spawn seam (the same
+  // path ssm start-session uses), forwarding region/profile through the context
+  // env. This is deliberate over the buffered awsExec seam: the child's stdout
+  // (an authorization token) is inherited straight to the terminal, so aws-axi
+  // never materializes the token in memory. awsInteractive also bypasses
+  // buildArgs, so no `--output json` is appended — the invocation is exactly
+  // `aws ecr get-login-password` (+ any passthrough args). `--help`/`-h` are
+  // delegated too, so the native help exits 0 rather than falling through to
+  // the engine's 252 (issue #143).
+  if (command === "ecr" && strippedArgs[0] === "get-login-password") {
     try {
-      const token = await awsExec(["ecr", "get-login-password", ...strippedArgs.slice(1)], {
-        context,
-      });
-      (options.stdout ?? process.stdout).write(token);
-      process.exitCode = 0;
+      process.exitCode = await awsInteractive(
+        ["ecr", "get-login-password", ...strippedArgs.slice(1)],
+        { context },
+      );
     } catch (error) {
       const formatted = formatError(error);
       (options.stderr ?? process.stderr).write(formatted.output);

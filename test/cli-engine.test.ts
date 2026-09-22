@@ -353,52 +353,118 @@ describe("configure list-profiles — meta-command, not a botocore service", () 
  * found no such operation, and exited 252 with "Unknown operation
  * 'get-login-password' for service 'ecr'".
  *
- * The fix routes it to the real `aws` CLI via awsExec, streaming stdout straight
- * through. The stub `aws` binary stands in for the registry call — the test
- * asserts delegation (no 252, no "Unknown operation", token forwarded verbatim),
- * never contacts a real registry, and uses only a placeholder token string.
+ * The fix routes it through the awsInteractive spawn seam (stdio: inherit),
+ * the same path ssm start-session uses. The authorization token is streamed
+ * child -> terminal; aws-axi NEVER buffers it in memory, and no `--output json`
+ * is appended. These tests spawn the real bin/aws-axi.ts against a stub `aws`
+ * on PATH — never a real registry, only a placeholder token string — so the
+ * inherited-stdio and exact-argv guarantees are observed end to end rather than
+ * asserted against a buffered string (which would encode the insecure capture).
  */
 describe("ecr get-login-password — custom op, not a botocore operation", () => {
-  it("delegates to the aws CLI and streams stdout through instead of exiting 252", async () => {
-    // Placeholder token — never a real ECR authorization token.
-    const placeholderToken = "AXI-PLACEHOLDER-TOKEN\n";
-    const stub = createStub({ stdout: placeholderToken, exitCode: 0 });
+  it("delegates via inherited stdio without appending --output json and preserves the native exit code", async () => {
+    // The stub fails loudly if aws-axi appends --output json (proving the
+    // buffered buildArgs seam is NOT used) and otherwise emits a placeholder
+    // token to its own stdout, which stdio:inherit must pass straight through.
+    const binary = stubBin(`#!/bin/sh
+for arg in "$@"; do
+  if [ "$arg" = "--output" ] || [ "$arg" = "--output=json" ]; then
+    printf '%s\\n' 'unexpected structured output request' >&2
+    exit 99
+  fi
+done
+printf '%s' 'AXI-PLACEHOLDER-TOKEN'
+exit 0
+`);
 
-    const { output, exitCode } = await captureMain(
-      ["ecr", "get-login-password", "--region", "us-east-1"],
-      {
-        PATH: `${stubDir(stub)}:${process.env["PATH"] ?? ""}`,
-        AWS_DATA_PATH: FIXTURES_DIR,
-      },
-    );
+    const child = Bun.spawn({
+      cmd: [
+        process.execPath,
+        "bin/aws-axi.ts",
+        "ecr",
+        "get-login-password",
+        "--region",
+        "us-east-1",
+      ],
+      cwd: process.cwd(),
+      env: { ...process.env, PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [output, errorOutput, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
 
-    // Delegated, not rejected: no USAGE_ERROR, no unknown-operation message.
+    // Delegated, not rejected: no USAGE_ERROR (252), no unknown-operation message.
     expect(exitCode).not.toBe(252);
-    expect(exitCode).toBeUndefined(); // success (exit 0)
-    expect(output).not.toMatch(/Unknown operation/);
-    // Stdout streamed straight through, verbatim.
-    expect(output).toBe(placeholderToken);
+    expect(errorOutput).not.toMatch(/Unknown operation/);
+    // Token inherited straight through the child's stdout; exit 0 preserved.
+    expect(exitCode).toBe(0);
+    expect(output).toBe("AXI-PLACEHOLDER-TOKEN");
   });
 
-  it("forwards the ecr get-login-password argv to the aws CLI, region via env", async () => {
-    // Echo argv on stdout and the forwarded region env so we can assert the
-    // delegated command shape without depending on a real registry.
-    const stub = stubBin(
-      ["#!/bin/sh", 'printf "%s " "$@"', 'printf "region=%s" "$AWS_REGION"', "exit 0"].join("\n"),
-    );
+  it("invokes exactly `aws ecr get-login-password` with region forwarded via env, no --output json", async () => {
+    // Echo the full child argv and the forwarded region so we can assert the
+    // exact delegated command shape.
+    const binary = stubBin(`#!/bin/sh
+printf 'argv:'
+for arg in "$@"; do printf ' %s' "$arg"; done
+printf '\\n'
+printf 'region=%s\\n' "$AWS_REGION"
+exit 0
+`);
 
-    const { output, exitCode } = await captureMain(
-      ["ecr", "get-login-password", "--region", "us-east-1"],
-      {
-        PATH: `${stubDir(stub)}:${process.env["PATH"] ?? ""}`,
-        AWS_DATA_PATH: FIXTURES_DIR,
-      },
-    );
+    const child = Bun.spawn({
+      cmd: [
+        process.execPath,
+        "bin/aws-axi.ts",
+        "ecr",
+        "get-login-password",
+        "--region",
+        "us-east-1",
+      ],
+      cwd: process.cwd(),
+      env: { ...process.env, PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [output, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      child.exited,
+    ]);
 
-    expect(exitCode).toBeUndefined();
-    // The custom op is delegated verbatim; --region is lifted into context and
-    // forwarded to the child as AWS_REGION rather than an argv flag.
-    expect(output).toContain("ecr get-login-password");
+    expect(exitCode).toBe(0);
+    // Exact argv: the custom op verbatim, no --output json appended.
+    expect(output).toContain("argv: ecr get-login-password\n");
+    expect(output).not.toContain("--output");
+    // --region is lifted into context and forwarded to the child as AWS_REGION,
+    // not passed as an argv flag.
     expect(output).toContain("region=us-east-1");
+  });
+
+  it("delegates --help to the aws CLI (native help, exit 0) instead of the engine's 252", async () => {
+    const binary = stubBin(`#!/bin/sh
+printf '%s\\n' 'Retrieve a token to authenticate to a registry'
+exit 0
+`);
+
+    const child = Bun.spawn({
+      cmd: [process.execPath, "bin/aws-axi.ts", "ecr", "get-login-password", "--help"],
+      cwd: process.cwd(),
+      env: { ...process.env, PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}` },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [output, errorOutput, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+
+    expect(exitCode).toBe(0);
+    expect(errorOutput).not.toMatch(/Unknown operation/);
+    expect(output).toContain("Retrieve a token");
   });
 });
