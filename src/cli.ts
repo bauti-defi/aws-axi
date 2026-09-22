@@ -332,6 +332,56 @@ const DELEGATED_CUSTOM_OPS: Readonly<Record<string, Readonly<Record<string, true
 };
 
 /**
+ * aws-axi flags that are not in the botocore model. Operation `--help` must
+ * document them or callers cannot discover the confidentiality opt-in.
+ * `--reveal` is never forwarded to `aws`. `--raw` is get-secret-value only.
+ */
+const OVERLAY_INVENTED_FLAGS: Readonly<
+  Record<string, Readonly<Record<string, readonly string[]>>>
+> = Object.freeze(
+  Object.assign(Object.create(null) as Record<string, Readonly<Record<string, readonly string[]>>>, {
+    secretsmanager: Object.freeze(
+      Object.assign(Object.create(null) as Record<string, readonly string[]>, {
+        "get-secret-value": Object.freeze([
+          "--reveal    Show the secret value (default: redacted). Not forwarded to aws.",
+          "--raw       Write only SecretString to stdout. Requires --reveal.",
+        ]),
+        "batch-get-secret-value": Object.freeze([
+          "--reveal    Show secret values (default: redacted). Not forwarded to aws.",
+        ]),
+      }),
+    ),
+    ssm: Object.freeze(
+      Object.assign(Object.create(null) as Record<string, readonly string[]>, {
+        "get-parameter": Object.freeze([
+          "--reveal    Show the parameter value (default: redacted; alias for --with-decryption).",
+        ]),
+        "get-parameters": Object.freeze([
+          "--reveal    Show parameter values (default: redacted; alias for --with-decryption).",
+        ]),
+        "get-parameters-by-path": Object.freeze([
+          "--reveal    Show parameter values (default: redacted; alias for --with-decryption).",
+        ]),
+      }),
+    ),
+  }),
+);
+
+function withInventedFlags(
+  service: string,
+  operation: string,
+  signature: string,
+): string {
+  const byOperation = OVERLAY_INVENTED_FLAGS[service];
+  if (byOperation === undefined || !Object.hasOwn(byOperation, operation)) {
+    return signature;
+  }
+  const flags = byOperation[operation];
+  if (flags === undefined || flags.length === 0) return signature;
+  return `${signature}\n\naws-axi flags:\n  ${flags.join("\n  ")}`;
+}
+
+/**
  * Detect `<service> <operation> --help|-h` after global --profile/--region
  * have been stripped. Service-level `--help` (no operation token) stays with
  * runAxiCli so overlay command help and `update --help` are unchanged.
@@ -361,17 +411,22 @@ export async function main(options: {
   const { strippedArgs, context } = stripContextArgs(commandArgs);
 
   // `--help` / `-h` on a normal botocore `<service> <operation>` is an aws-axi
-  // flag, not an API argument. Render the signature here. Delegated custom ops
-  // (configure list-profiles, ecr get-login-password, ssm start-session) are
-  // excluded so their own branch handles help.
+  // flag, not an API argument. Render the signature here, then append any
+  // aws-axi-invented flags (`--reveal`, `--raw`) the operation honors.
+  // Delegated custom ops (configure list-profiles, ecr get-login-password,
+  // ssm start-session) are excluded so their own branch handles help.
   const helpRequest = operationHelpRequest(command, strippedArgs);
   if (helpRequest !== undefined) {
     const stdout = options.stdout ?? process.stdout;
     try {
-      const help = renderOperationHelp({
-        service: helpRequest.service,
-        operation: helpRequest.operation,
-      });
+      const help = withInventedFlags(
+        helpRequest.service,
+        helpRequest.operation,
+        renderOperationHelp({
+          service: helpRequest.service,
+          operation: helpRequest.operation,
+        }),
+      );
       stdout.write(help.endsWith("\n") ? help : `${help}\n`);
       process.exitCode = 0;
     } catch (error) {

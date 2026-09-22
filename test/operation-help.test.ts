@@ -319,3 +319,116 @@ describe("operation help — custom ops keep their own --help branch", () => {
   });
 });
 
+describe("operation help — invented confidentiality flags stay visible", () => {
+  function writeOpModel(
+    root: string,
+    service: string,
+    operations: Readonly<Record<string, { readonly members: Readonly<Record<string, string>> }>>,
+  ): void {
+    const versionDir = join(root, service, "2017-10-17");
+    mkdirSync(versionDir, { recursive: true });
+    const shapes: Record<string, unknown> = { StringType: { type: "string" } };
+    const ops: Record<string, unknown> = {};
+    for (const [name, spec] of Object.entries(operations)) {
+      const request = `${name}Request`;
+      shapes[request] = {
+        type: "structure",
+        members: Object.fromEntries(
+          Object.keys(spec.members).map((member) => [member, { shape: "StringType" }]),
+        ),
+      };
+      ops[name] = {
+        name,
+        input: { shape: request },
+        output: { shape: "StringType" },
+      };
+    }
+    writeFileSync(
+      join(versionDir, "service-2.json"),
+      JSON.stringify({
+        version: "2.0",
+        metadata: { apiVersion: "2017-10-17", serviceId: service },
+        operations: ops,
+        shapes,
+      }),
+      "utf8",
+    );
+  }
+
+  async function helpFor(argv: string[], model: (root: string) => void): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-op-help-"));
+    tempDirs.push(dir);
+    model(dir);
+    const marker = join(dir, "aws-invoked");
+    const binary = bannerStub(marker);
+    const { output, exitCode } = await captureMain(argv, {
+      PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}`,
+      AWS_DATA_PATH: dir,
+    });
+    expect(exitCode).toBeUndefined();
+    expect(existsSync(marker)).toBe(false);
+    return output;
+  }
+
+  it("secretsmanager get-secret-value --help documents --reveal and --raw", async () => {
+    const output = await helpFor(
+      ["secretsmanager", "get-secret-value", "--help"],
+      (root) =>
+        writeOpModel(root, "secretsmanager", {
+          GetSecretValue: { members: { SecretId: "string" } },
+        }),
+    );
+
+    expect(output).toContain("--secret-id");
+    expect(output).toContain("--reveal");
+    expect(output).toContain("--raw");
+    expect(output).toContain("Requires --reveal");
+  });
+
+  it("batch-get-secret-value --help documents --reveal but not --raw", async () => {
+    const output = await helpFor(
+      ["secretsmanager", "batch-get-secret-value", "--help"],
+      (root) =>
+        writeOpModel(root, "secretsmanager", {
+          BatchGetSecretValue: { members: { SecretIdList: "string" } },
+        }),
+    );
+
+    expect(output).toContain("--reveal");
+    expect(output).not.toContain("--raw");
+  });
+
+  it("ssm get-parameter --help documents --reveal and keeps the botocore param", async () => {
+    const output = await helpFor(
+      ["ssm", "get-parameter", "--help"],
+      (root) =>
+        writeOpModel(root, "ssm", {
+          GetParameter: { members: { Name: "string", WithDecryption: "string" } },
+        }),
+    );
+
+    expect(output).toContain("--name");
+    expect(output).toContain("--with-decryption");
+    expect(output).toContain("--reveal");
+    expect(output).not.toContain("--raw");
+  });
+
+  it("does not invent --reveal on an operation that does not honor it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-op-help-"));
+    tempDirs.push(dir);
+    writeEcsModel(dir);
+    const marker = join(dir, "aws-invoked");
+    const binary = bannerStub(marker);
+    const { output, exitCode } = await captureMain(["ecs", "list-tasks", "--help"], {
+      PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}`,
+      AWS_DATA_PATH: dir,
+    });
+
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain("--cluster");
+    expect(output).not.toContain("--reveal");
+    expect(output).not.toContain("aws-axi flags:");
+    expect(existsSync(marker)).toBe(false);
+  });
+});
+
