@@ -23,7 +23,7 @@
 import { AxiError } from "axi-sdk-js";
 import type { AwsContext } from "../context.js";
 import type { AwsRunOptions } from "../aws.js";
-import { awsJson } from "../aws.js";
+import { awsExec, awsJson } from "../aws.js";
 import { resolveKey } from "../resolve/key.js";
 import { fallThroughToEngine } from "../engine.js";
 import { collectPassthroughFlags, buildPassthrough, extractFlag, flagIsTrue, flagIsTrueStrict, hasFlag, extractPositionals } from "../overlay-args.js";
@@ -1103,6 +1103,27 @@ export async function ssmCommand(
   context: AwsContext | undefined,
 ): Promise<Record<string, unknown>> {
   const firstArg = args[0] ?? "";
+
+  // `wait` is an AWS CLI waiter subcommand (`aws ssm wait <waiter-name>`), not a
+  // botocore API operation — the engine's operation lookup would (correctly)
+  // reject it as "Unknown operation 'wait'". aws-axi has no waiter logic of its
+  // own for the service-scoped form; delegate verbatim to the real `aws` CLI so
+  // that waiter-name and parameter validation happen at the AWS layer (#139).
+  // awsExec forwards profile/region via the exec-seam env and appends
+  // --output json (harmless for waiters, which emit no output).
+  if (firstArg === "wait") {
+    const waiterName = args[1];
+    if (waiterName === undefined || waiterName.startsWith("-")) {
+      throw new AxiError(
+        "aws-axi ssm wait requires <waiter-name> before flags\n" +
+          "Usage: aws-axi ssm wait <waiter-name> [--flags]",
+        "USAGE_ERROR",
+        ["Example: aws-axi ssm wait command-executed --command-id <id> --instance-id <id>"],
+      );
+    }
+    await awsExec(["ssm", "wait", waiterName, ...args.slice(2)], { context });
+    return { ssm: { waited: true, service: "ssm", waiter: waiterName } };
+  }
 
   let subcommand: string;
   let remainingArgs: string[];
