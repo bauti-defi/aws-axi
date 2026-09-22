@@ -31,7 +31,7 @@ import { ssmCommand, SSM_HELP } from "./commands/ssm.js";
 import { secretsCommand, SECRETS_HELP, isRawSecretValueRequest, rawSecretStringRun } from "./commands/secrets.js";
 import { waitCommand, WAIT_HELP } from "./commands/wait.js";
 import { lambdaCommand, LAMBDA_HELP } from "./commands/lambda.js";
-import { engineRun, SERVICE_ALIASES } from "./engine.js";
+import { engineRun, renderOperationHelp, SERVICE_ALIASES } from "./engine.js";
 
 export const DESCRIPTION =
   "Agent-ergonomic wrapper around the AWS CLI. Prefer this over `aws` for AWS operations.";
@@ -319,6 +319,87 @@ function buildCommandsProxy(): Record<string, AxiCliCommand<AwsContext>> {
   }) as Record<string, AxiCliCommand<AwsContext>>;
 }
 
+/**
+ * Custom operations owned by a dedicated awsExec / awsInteractive branch in
+ * main(). `--help` / `-h` for these must fall through so that branch can show
+ * native help. `ecr get-login-password` is listed even though its branch lands
+ * in a separate PR — this intercept must not swallow it at merge.
+ */
+const DELEGATED_CUSTOM_OPS: Readonly<Record<string, Readonly<Record<string, true>>>> = {
+  configure: { "list-profiles": true },
+  ecr: { "get-login-password": true },
+  ssm: { "start-session": true },
+};
+
+/**
+ * aws-axi flags that are not in the botocore model. Operation `--help` must
+ * document them or callers cannot discover the confidentiality opt-in.
+ * `--reveal` is never forwarded to `aws`. `--raw` is get-secret-value only.
+ */
+const OVERLAY_INVENTED_FLAGS: Readonly<
+  Record<string, Readonly<Record<string, readonly string[]>>>
+> = Object.freeze(
+  Object.assign(Object.create(null) as Record<string, Readonly<Record<string, readonly string[]>>>, {
+    secretsmanager: Object.freeze(
+      Object.assign(Object.create(null) as Record<string, readonly string[]>, {
+        "get-secret-value": Object.freeze([
+          "--reveal    Show the secret value (default: redacted). Not forwarded to aws.",
+          "--raw       Write only SecretString to stdout. Requires --reveal.",
+        ]),
+        "batch-get-secret-value": Object.freeze([
+          "--reveal    Show secret values (default: redacted). Not forwarded to aws.",
+        ]),
+      }),
+    ),
+    ssm: Object.freeze(
+      Object.assign(Object.create(null) as Record<string, readonly string[]>, {
+        "get-parameter": Object.freeze([
+          "--reveal    Show the parameter value (default: redacted; alias for --with-decryption).",
+        ]),
+        "get-parameters": Object.freeze([
+          "--reveal    Show parameter values (default: redacted; alias for --with-decryption).",
+        ]),
+        "get-parameters-by-path": Object.freeze([
+          "--reveal    Show parameter values (default: redacted; alias for --with-decryption).",
+        ]),
+      }),
+    ),
+  }),
+);
+
+function withInventedFlags(
+  service: string,
+  operation: string,
+  signature: string,
+): string {
+  const byOperation = OVERLAY_INVENTED_FLAGS[service];
+  if (byOperation === undefined || !Object.hasOwn(byOperation, operation)) {
+    return signature;
+  }
+  const flags = byOperation[operation];
+  if (flags === undefined || flags.length === 0) return signature;
+  return `${signature}\n\naws-axi flags:\n  ${flags.join("\n  ")}`;
+}
+
+/**
+ * Detect `<service> <operation> --help|-h` after global --profile/--region
+ * have been stripped. Service-level `--help` (no operation token) stays with
+ * runAxiCli so overlay command help and `update --help` are unchanged.
+ * Delegated custom ops are excluded so their own branch owns help.
+ */
+function operationHelpRequest(
+  command: string | undefined,
+  strippedArgs: readonly string[],
+): { readonly service: string; readonly operation: string } | undefined {
+  if (command === undefined || command.startsWith("-")) return undefined;
+  if (!strippedArgs.some((arg) => arg === "--help" || arg === "-h")) return undefined;
+  const operation = strippedArgs.find((arg) => !arg.startsWith("-"));
+  if (operation === undefined) return undefined;
+  const delegated = DELEGATED_CUSTOM_OPS[command];
+  if (delegated !== undefined && Object.hasOwn(delegated, operation)) return undefined;
+  return { service: command, operation };
+}
+
 export async function main(options: {
   argv?: string[];
   stdout?: { write: (chunk: string) => unknown };
@@ -328,6 +409,42 @@ export async function main(options: {
   const command = argv[0];
   const commandArgs = argv.slice(1);
   const { strippedArgs, context } = stripContextArgs(commandArgs);
+
+  // `--help` / `-h` on a normal botocore `<service> <operation>` is an aws-axi
+  // flag, not an API argument. Render the signature here, then append any
+  // aws-axi-invented flags (`--reveal`, `--raw`) the operation honors.
+  // Delegated custom ops (configure list-profiles, ecr get-login-password,
+  // ssm start-session) are excluded so their own branch handles help.
+  const helpRequest = operationHelpRequest(command, strippedArgs);
+  if (helpRequest !== undefined) {
+    const stdout = options.stdout ?? process.stdout;
+    try {
+      const help = withInventedFlags(
+        helpRequest.service,
+        helpRequest.operation,
+        renderOperationHelp({
+          service: helpRequest.service,
+          operation: helpRequest.operation,
+        }),
+      );
+      stdout.write(help.endsWith("\n") ? help : `${help}\n`);
+      process.exitCode = 0;
+    } catch (error) {
+      // The operation is not in the loaded botocore model (high-level overlay
+      // ops such as `s3 ls`, or a service model this install does not have).
+      // Reuse the existing command help instead of forwarding --help.
+      const overlayHelp = COMMAND_HELP[helpRequest.service];
+      if (overlayHelp !== undefined && overlayHelp.length > 0) {
+        stdout.write(overlayHelp.endsWith("\n") ? overlayHelp : `${overlayHelp}\n`);
+        process.exitCode = 0;
+      } else {
+        const formatted = formatError(error);
+        stdout.write(formatted.output);
+        process.exitCode = formatted.exitCode;
+      }
+    }
+    return;
+  }
 
   if (command === "ssm" && strippedArgs[0] === "start-session") {
     try {
