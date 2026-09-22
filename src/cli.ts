@@ -31,7 +31,7 @@ import { ssmCommand, SSM_HELP } from "./commands/ssm.js";
 import { secretsCommand, SECRETS_HELP, isRawSecretValueRequest, rawSecretStringRun } from "./commands/secrets.js";
 import { waitCommand, WAIT_HELP } from "./commands/wait.js";
 import { lambdaCommand, LAMBDA_HELP } from "./commands/lambda.js";
-import { engineRun, SERVICE_ALIASES } from "./engine.js";
+import { engineRun, renderOperationHelp, SERVICE_ALIASES } from "./engine.js";
 
 export const DESCRIPTION =
   "Agent-ergonomic wrapper around the AWS CLI. Prefer this over `aws` for AWS operations.";
@@ -319,6 +319,22 @@ function buildCommandsProxy(): Record<string, AxiCliCommand<AwsContext>> {
   }) as Record<string, AxiCliCommand<AwsContext>>;
 }
 
+/**
+ * Detect `<service> <operation> --help|-h` after global --profile/--region
+ * have been stripped. Service-level `--help` (no operation token) stays with
+ * runAxiCli so overlay command help and `update --help` are unchanged.
+ */
+function operationHelpRequest(
+  command: string | undefined,
+  strippedArgs: readonly string[],
+): { readonly service: string; readonly operation: string } | undefined {
+  if (command === undefined || command.startsWith("-")) return undefined;
+  if (!strippedArgs.some((arg) => arg === "--help" || arg === "-h")) return undefined;
+  const operation = strippedArgs.find((arg) => !arg.startsWith("-"));
+  if (operation === undefined) return undefined;
+  return { service: command, operation };
+}
+
 export async function main(options: {
   argv?: string[];
   stdout?: { write: (chunk: string) => unknown };
@@ -328,6 +344,37 @@ export async function main(options: {
   const command = argv[0];
   const commandArgs = argv.slice(1);
   const { strippedArgs, context } = stripContextArgs(commandArgs);
+
+  // `--help` / `-h` on `<service> <operation>` is an aws-axi flag, not an API
+  // argument. Intercept before any awsExec / awsInteractive delegation so help
+  // is never forwarded to the AWS CLI (which rejects `--help` with a generic
+  // usage banner and exit 252).
+  const helpRequest = operationHelpRequest(command, strippedArgs);
+  if (helpRequest !== undefined) {
+    const stdout = options.stdout ?? process.stdout;
+    try {
+      const help = renderOperationHelp({
+        service: helpRequest.service,
+        operation: helpRequest.operation,
+      });
+      stdout.write(help.endsWith("\n") ? help : `${help}\n`);
+      process.exitCode = 0;
+    } catch (error) {
+      // The operation is not in the loaded botocore model (high-level overlay
+      // ops such as `s3 ls`, or a service model this install does not have).
+      // Reuse the existing command help instead of forwarding --help.
+      const overlayHelp = COMMAND_HELP[helpRequest.service];
+      if (overlayHelp !== undefined && overlayHelp.length > 0) {
+        stdout.write(overlayHelp.endsWith("\n") ? overlayHelp : `${overlayHelp}\n`);
+        process.exitCode = 0;
+      } else {
+        const formatted = formatError(error);
+        stdout.write(formatted.output);
+        process.exitCode = formatted.exitCode;
+      }
+    }
+    return;
+  }
 
   if (command === "ssm" && strippedArgs[0] === "start-session") {
     try {

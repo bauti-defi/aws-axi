@@ -283,6 +283,68 @@ function formatSignature(
 }
 
 /**
+ * Render `<service> <operation>` help from the botocore model.
+ *
+ * Reuses the distilled signature already shown on missing-parameter errors:
+ * the CLI operation name plus each input parameter. Does not exec `aws` —
+ * `--help` is an aws-axi flag, not an API argument.
+ *
+ * @throws AxiError when the service or operation is not in the model.
+ */
+export function renderOperationHelp(options: {
+  service: string;
+  operation: string;
+  dataDir?: string;
+}): string {
+  const { service, operation, dataDir } = options;
+  const modelService = Object.hasOwn(SERVICE_ALIASES, service)
+    ? (SERVICE_ALIASES[service] as string)
+    : service;
+
+  let model: ServiceModel;
+  try {
+    model = loadService(
+      modelService,
+      dataDir === undefined ? undefined : { dataDir },
+    );
+  } catch (err) {
+    throw new AxiError(
+      `Unknown service '${service}': ${err instanceof Error ? err.message : String(err)}`,
+      "USAGE_ERROR",
+      [
+        "Check the service name matches the AWS CLI (e.g. sqs, ec2, s3).",
+        "Run `aws help` to list available services.",
+      ],
+    );
+  }
+
+  const pascalKey = resolveOperationName(model, operation);
+  if (pascalKey === undefined) {
+    const available = [...model.operations.keys()]
+      .slice(0, 10)
+      .map(pascalToKebab);
+    throw new AxiError(
+      `Unknown operation '${operation}' for service '${service}'.`,
+      "USAGE_ERROR",
+      [
+        "Check the operation name matches the AWS CLI.",
+        `Available operations (first 10): ${available.join(", ")}`,
+      ],
+    );
+  }
+
+  const opInfo = model.operations.get(pascalKey);
+  if (opInfo === undefined) {
+    throw new AxiError(
+      `Unknown operation '${operation}' for service '${service}'.`,
+      "USAGE_ERROR",
+    );
+  }
+
+  return formatSignature(service, pascalToKebab(pascalKey), opInfo);
+}
+
+/**
  * Extract the botocore error code from an AxiError message.
  * Message format: "<Code> calling <Op>: <detail>"
  */
