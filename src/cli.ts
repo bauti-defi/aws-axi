@@ -320,9 +320,22 @@ function buildCommandsProxy(): Record<string, AxiCliCommand<AwsContext>> {
 }
 
 /**
+ * Custom operations owned by a dedicated awsExec / awsInteractive branch in
+ * main(). `--help` / `-h` for these must fall through so that branch can show
+ * native help. `ecr get-login-password` is listed even though its branch lands
+ * in a separate PR — this intercept must not swallow it at merge.
+ */
+const DELEGATED_CUSTOM_OPS: Readonly<Record<string, Readonly<Record<string, true>>>> = {
+  configure: { "list-profiles": true },
+  ecr: { "get-login-password": true },
+  ssm: { "start-session": true },
+};
+
+/**
  * Detect `<service> <operation> --help|-h` after global --profile/--region
  * have been stripped. Service-level `--help` (no operation token) stays with
  * runAxiCli so overlay command help and `update --help` are unchanged.
+ * Delegated custom ops are excluded so their own branch owns help.
  */
 function operationHelpRequest(
   command: string | undefined,
@@ -332,6 +345,8 @@ function operationHelpRequest(
   if (!strippedArgs.some((arg) => arg === "--help" || arg === "-h")) return undefined;
   const operation = strippedArgs.find((arg) => !arg.startsWith("-"));
   if (operation === undefined) return undefined;
+  const delegated = DELEGATED_CUSTOM_OPS[command];
+  if (delegated !== undefined && Object.hasOwn(delegated, operation)) return undefined;
   return { service: command, operation };
 }
 
@@ -345,10 +360,10 @@ export async function main(options: {
   const commandArgs = argv.slice(1);
   const { strippedArgs, context } = stripContextArgs(commandArgs);
 
-  // `--help` / `-h` on `<service> <operation>` is an aws-axi flag, not an API
-  // argument. Intercept before any awsExec / awsInteractive delegation so help
-  // is never forwarded to the AWS CLI (which rejects `--help` with a generic
-  // usage banner and exit 252).
+  // `--help` / `-h` on a normal botocore `<service> <operation>` is an aws-axi
+  // flag, not an API argument. Render the signature here. Delegated custom ops
+  // (configure list-profiles, ecr get-login-password, ssm start-session) are
+  // excluded so their own branch handles help.
   const helpRequest = operationHelpRequest(command, strippedArgs);
   if (helpRequest !== undefined) {
     const stdout = options.stdout ?? process.stdout;

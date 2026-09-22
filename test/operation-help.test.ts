@@ -222,14 +222,14 @@ describe("operation help — do not forward --help/-h to aws", () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  it("does not forward ssm start-session --help to aws", async () => {
+  it("does not swallow ssm start-session --help in the generic signature renderer", async () => {
     const dir = mkdtempSync(join(tmpdir(), "aws-axi-op-help-"));
     tempDirs.push(dir);
     writeEcsModel(dir);
     const marker = join(dir, "aws-invoked");
     const binary = bannerStub(marker);
 
-    const { output, exitCode } = await captureMain(
+    const { output } = await captureMain(
       ["ssm", "start-session", "--help"],
       {
         PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}`,
@@ -237,10 +237,85 @@ describe("operation help — do not forward --help/-h to aws", () => {
       },
     );
 
-    expect(exitCode).toBeUndefined();
-    expect(output).toContain("start-session");
-    expect(output).not.toContain(GENERIC_BANNER);
-    expect(existsSync(marker)).toBe(false);
+    expect(output).not.toContain("aws-axi ssm start-session");
+    expect(output).not.toContain("usage: aws-axi ssm");
+    expect(existsSync(marker)).toBe(true);
+  });
+});
+
+describe("operation help — custom ops keep their own --help branch", () => {
+  function writeLoginPasswordModel(root: string): void {
+    const versionDir = join(root, "ecr", "2015-09-21");
+    mkdirSync(versionDir, { recursive: true });
+    writeFileSync(
+      join(versionDir, "service-2.json"),
+      JSON.stringify({
+        version: "2.0",
+        metadata: { apiVersion: "2015-09-21", serviceId: "ECR" },
+        operations: {
+          GetLoginPassword: {
+            name: "GetLoginPassword",
+            input: { shape: "GetLoginPasswordRequest" },
+            output: { shape: "GetLoginPasswordResponse" },
+          },
+        },
+        shapes: {
+          GetLoginPasswordRequest: {
+            type: "structure",
+            members: { RegistryId: { shape: "StringType" } },
+          },
+          GetLoginPasswordResponse: {
+            type: "structure",
+            members: { Password: { shape: "StringType" } },
+          },
+          StringType: { type: "string" },
+        },
+      }),
+      "utf8",
+    );
+  }
+
+  it("does not render a botocore signature for ecr get-login-password --help", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-op-help-"));
+    tempDirs.push(dir);
+    writeLoginPasswordModel(dir);
+    const marker = join(dir, "aws-invoked");
+    const binary = bannerStub(marker);
+
+    const { output } = await captureMain(
+      ["ecr", "get-login-password", "--help"],
+      {
+        PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}`,
+        AWS_DATA_PATH: dir,
+      },
+    );
+
+    // The fixture operation exists, so the generic renderer would print this
+    // signature and exit without calling aws. Skipping the intercept lets the
+    // custom-op branch (or, until that branch is merged, the engine) run.
+    expect(output).not.toContain("aws-axi ecr get-login-password");
+    expect(output).not.toContain("--registry-id");
+    expect(existsSync(marker)).toBe(true);
+  });
+
+  it("does not render a botocore signature for ecr get-login-password -h", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-op-help-"));
+    tempDirs.push(dir);
+    writeLoginPasswordModel(dir);
+    const marker = join(dir, "aws-invoked");
+    const binary = bannerStub(marker);
+
+    const { output } = await captureMain(
+      ["ecr", "get-login-password", "-h"],
+      {
+        PATH: `${stubDir(binary)}:${process.env["PATH"] ?? ""}`,
+        AWS_DATA_PATH: dir,
+      },
+    );
+
+    expect(output).not.toContain("aws-axi ecr get-login-password");
+    expect(output).not.toContain("--registry-id");
+    expect(existsSync(marker)).toBe(true);
   });
 });
 
