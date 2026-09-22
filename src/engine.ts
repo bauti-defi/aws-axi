@@ -24,6 +24,7 @@ import {
   pascalToKebab,
   getPaginator,
   type OperationInfo,
+  type ParamDef,
   type PaginatorConfig,
   type ServiceModel,
 } from "./model.js";
@@ -119,6 +120,138 @@ export function stripOutputFlag(args: readonly string[]): string[] {
     }
   }
   return out;
+}
+
+/**
+ * Recognised explicit values for a model boolean parameter.
+ * Same vocabulary as overlay `flagIsTrue`: true/1/yes enable, false/0/no disable.
+ * Comparison is case-insensitive. Real `aws` rejects every explicit value.
+ */
+const BOOLEAN_TRUE_LITERALS: Readonly<Record<string, true>> = {
+  true: true,
+  "1": true,
+  yes: true,
+};
+const BOOLEAN_FALSE_LITERALS: Readonly<Record<string, true>> = {
+  false: true,
+  "0": true,
+  no: true,
+};
+
+function isBooleanLiteral(
+  table: Readonly<Record<string, true>>,
+  value: string,
+): boolean {
+  return Object.hasOwn(table, value);
+}
+
+export interface TranslatedBooleanFlags {
+  /** Args safe to forward to the AWS CLI. Explicit boolean values are consumed. */
+  readonly args: readonly string[];
+  /**
+   * Resolved boolean params, keyed by the botocore member name (`startFromHead`).
+   * Last occurrence wins, matching the AWS CLI. Absent params are omitted.
+   */
+  readonly values: Readonly<Record<string, boolean>>;
+}
+
+/**
+ * Translate explicit boolean values into AWS CLI flag form.
+ *
+ * The AWS CLI accepts only bare `--flag` (true) and `--no-flag` (false).
+ * Agents emit `--flag false` / `--flag=true`. Forwarding the literal makes the
+ * CLI exit 252 with an opaque usage banner before any API call.
+ *
+ *   --flag / --flag true / --flag=true   → --flag          (param true)
+ *   --flag false / --flag=false          → --no-flag       (param false)
+ *   --no-flag                            → --no-flag       (param false)
+ *   --flag=<other>                       → USAGE_ERROR naming the token
+ *   --flag <non-boolean>                 → bare --flag; the next token is left
+ *                                          alone so a positional is not eaten
+ */
+export function translateBooleanFlags(options: {
+  readonly args: readonly string[];
+  readonly params: readonly ParamDef[];
+}): TranslatedBooleanFlags {
+  const flagToParam: Record<string, string> = {};
+  for (const param of options.params) {
+    if (param.type === "boolean") {
+      flagToParam[toCliFlag(param.name)] = param.name;
+    }
+  }
+
+  const out: string[] = [];
+  const values: Record<string, boolean> = {};
+
+  for (let i = 0; i < options.args.length; i++) {
+    const arg = options.args[i] ?? "";
+    if (!arg.startsWith("--")) {
+      out.push(arg);
+      continue;
+    }
+
+    const eqIdx = arg.indexOf("=");
+    const flagName = eqIdx === -1 ? arg : arg.slice(0, eqIdx);
+    const paramName = flagToParam[flagName];
+
+    if (paramName === undefined) {
+      if (eqIdx === -1 && flagName.startsWith("--no-")) {
+        const positive = flagToParam[`--${flagName.slice("--no-".length)}`];
+        if (positive !== undefined) {
+          out.push(flagName);
+          values[positive] = false;
+          continue;
+        }
+      }
+      out.push(arg);
+      continue;
+    }
+
+    if (eqIdx !== -1) {
+      const raw = arg.slice(eqIdx + 1);
+      const literal = raw.toLowerCase();
+      if (isBooleanLiteral(BOOLEAN_TRUE_LITERALS, literal)) {
+        out.push(flagName);
+        values[paramName] = true;
+        continue;
+      }
+      if (isBooleanLiteral(BOOLEAN_FALSE_LITERALS, literal)) {
+        out.push(`--no-${flagName.slice(2)}`);
+        values[paramName] = false;
+        continue;
+      }
+      throw new AxiError(
+        `${flagName}=${raw} is not a recognised boolean value`,
+        "USAGE_ERROR",
+        [
+          `${flagName} accepts: true, 1, yes (enable) or false, 0, no (disable)`,
+          `Bare ${flagName} enables it; --no-${flagName.slice(2)} disables it`,
+        ],
+      );
+    }
+
+    const next = options.args[i + 1];
+    if (next !== undefined && !next.startsWith("-")) {
+      const literal = next.toLowerCase();
+      if (isBooleanLiteral(BOOLEAN_FALSE_LITERALS, literal)) {
+        out.push(`--no-${flagName.slice(2)}`);
+        values[paramName] = false;
+        i++;
+        continue;
+      }
+      if (isBooleanLiteral(BOOLEAN_TRUE_LITERALS, literal)) {
+        out.push(flagName);
+        values[paramName] = true;
+        i++;
+        continue;
+      }
+    }
+
+    out.push(flagName);
+    values[paramName] = true;
+  }
+
+  return { args: out, values };
 }
 
 // ── Private helpers ───────────────────────────────────────────────────────────
@@ -378,6 +511,13 @@ export async function engineRun(
     );
   }
 
+  // Explicit `--flag false` is not AWS CLI syntax. Translate model booleans to
+  // `--flag` / `--no-flag` before exec so the literal is not a stray token.
+  const booleanArgs = translateBooleanFlags({
+    args: cleanedArgs,
+    params: opInfo.signature.inputParams,
+  }).args;
+
   // ── 4. Pagination setup ────────────────────────────────────────────────────
   const paginator = getPaginator(model, pascalKey);
 
@@ -387,12 +527,12 @@ export async function engineRun(
   // projection. Without --max-items, botocore auto-pages the complete result.
   // The caller retains an explicit re-cap via --max-items N (last-wins):
   // hasMaxItemsFlag gates on the user-supplied value already present in
-  // cleanedArgs, so an explicit --max-items + --query combination is honored.
-  const queryActive = hasQueryFlag(cleanedArgs);
+  // booleanArgs, so an explicit --max-items + --query combination is honored.
+  const queryActive = hasQueryFlag(booleanArgs);
   const paginationArgs =
-    paginator !== undefined && !hasMaxItemsFlag(cleanedArgs) && !queryActive
-      ? translateServiceLimitToMaxItems(cleanedArgs, paginator)
-      : cleanedArgs;
+    paginator !== undefined && !hasMaxItemsFlag(booleanArgs) && !queryActive
+      ? translateServiceLimitToMaxItems(booleanArgs, paginator)
+      : booleanArgs;
   const awsArgs: string[] = [service, operation, ...paginationArgs];
   if (
     service === "secretsmanager" &&
