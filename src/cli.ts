@@ -18,7 +18,7 @@ import { runAxiCli, AxiError, type AxiCliCommand } from "axi-sdk-js";
 import { encode } from "@toon-format/toon";
 import { resolveAwsContext, stripContextArgs, type AwsContext } from "./context.js";
 import { awsExitCode, type AwsErrorCode } from "./errors.js";
-import { awsInteractive } from "./aws.js";
+import { awsExec, awsInteractive } from "./aws.js";
 import { homeCommand } from "./commands/home.js";
 import { whoamiCommand, WHOAMI_HELP } from "./commands/whoami.js";
 import { ec2Command, EC2_HELP } from "./commands/ec2.js";
@@ -356,6 +356,26 @@ export async function main(options: {
         context,
       });
       (options.stdout ?? process.stdout).write(secretString);
+    } catch (error) {
+      const formatted = formatError(error);
+      (options.stderr ?? process.stderr).write(formatted.output);
+      process.exitCode = formatted.exitCode;
+    }
+    return;
+  }
+
+  // `configure` is an AWS CLI meta-command, not a botocore service.
+  // `list-profiles` reports profile names as fact, so delegate to the aws CLI
+  // (ADR-0003) instead of letting the engine look up a service model.
+  if (
+    command === "configure" &&
+    strippedArgs[0] === "list-profiles" &&
+    !strippedArgs.includes("--help")
+  ) {
+    try {
+      const listed = await awsExec(["configure", "list-profiles"], { context });
+      (options.stdout ?? process.stdout).write(listed);
+      process.exitCode = 0;
     } catch (error) {
       const formatted = formatError(error);
       (options.stderr ?? process.stderr).write(formatted.output);

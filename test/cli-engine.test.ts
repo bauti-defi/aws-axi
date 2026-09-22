@@ -9,7 +9,9 @@
  * Uses the fake-svc fixture model via AWS_DATA_PATH injection.
  */
 import { describe, it, expect, afterEach } from "bun:test";
-import { rmSync } from "node:fs";
+import { execFile } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { main } from "../src/cli.js";
@@ -282,5 +284,65 @@ describe("CLI engine fallback — generic service dispatch", () => {
 
     expect(output).toContain("tok123");
     expect(exitCode).toBeUndefined(); // success
+  });
+});
+
+/**
+ * `configure` is an AWS CLI meta-command, not a botocore service.
+ * `list-profiles` must delegate to `aws configure list-profiles` and exit 0.
+ *
+ * The hermetic home contains only placeholder profile names. `example` lives
+ * in the config file; `sample` lives only in the credentials file. A local
+ * config-file parser would miss `sample` and diverge from the AWS CLI.
+ */
+function awsConfigureListProfiles(env: Record<string, string>): Promise<string> {
+  const { promise, resolve, reject } = Promise.withResolvers<string>();
+  execFile(
+    "aws",
+    ["configure", "list-profiles"],
+    {
+      env: {
+        PATH: process.env["PATH"] ?? "",
+        ...env,
+      },
+      encoding: "utf8",
+    },
+    (error, stdout, stderr) => {
+      if (error) {
+        reject(new Error(stderr || error.message));
+        return;
+      }
+      resolve(stdout);
+    },
+  );
+  return promise;
+}
+
+describe("configure list-profiles — meta-command, not a botocore service", () => {
+  it("lists hermetic placeholder profiles and exits 0, matching aws configure list-profiles", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "aws-axi-configure-"));
+    tempDirs.push(dir);
+    const configPath = join(dir, "config");
+    const credentialsPath = join(dir, "credentials");
+    writeFileSync(configPath, "[profile example]\nregion = us-east-1\n", "utf8");
+    writeFileSync(credentialsPath, "[sample]\n", "utf8");
+
+    const isolated = {
+      AWS_CONFIG_FILE: configPath,
+      AWS_SHARED_CREDENTIALS_FILE: credentialsPath,
+      HOME: dir,
+    };
+
+    const expected = await awsConfigureListProfiles(isolated);
+    expect(expected).toBe("example\nsample\n");
+
+    const { output, exitCode } = await captureMain(
+      ["configure", "list-profiles"],
+      isolated,
+    );
+
+    expect(exitCode).toBeUndefined();
+    expect(output).toBe(expected);
+    expect(output).not.toContain("Unknown service");
   });
 });

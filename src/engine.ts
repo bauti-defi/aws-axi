@@ -66,8 +66,10 @@ const DEFAULT_MAX_ITEMS = 50;
  *   - `ddb`: not a botocore alias. It is an `awscli` high-level command (only
  *     `put` / `select`) with its own argument grammar. Aliasing it to `dynamodb`
  *     would silently accept invalid input. Tracked in a follow-up issue.
- *   - CLI meta-commands (`configure`, `login`, `logout`, `history`, `cli-dev`)
- *     are not AWS services and correctly produce USAGE_ERROR if passed as service.
+ *   - CLI meta-commands (`login`, `logout`, `history`, `cli-dev`) are not AWS
+ *     services and correctly produce USAGE_ERROR if passed as service.
+ *     `configure` is also not a service. `configure list-profiles` is routed
+ *     before engine dispatch; other `configure` subcommands still land here.
  *
  * Exported so the inverse direction (`s3 → s3api` for waiters in #76) can be
  * derived from a single source of truth rather than a separate hand-maintained
