@@ -384,6 +384,32 @@ export async function main(options: {
     return;
   }
 
+  // `ecr get-login-password` is an AWS CLI *custom* operation (like `s3 cp` or
+  // `configure list-profiles`), not a botocore API operation. The engine would
+  // look it up in the ECR service model, find no such operation, and exit 252.
+  // Delegate to the real aws CLI via awsExec (ADR-0003), forwarding
+  // region/profile through the context env. The stdout (an authorization token)
+  // is streamed straight through, exactly as `aws` does — never logged,
+  // captured for inspection, or transformed.
+  if (
+    command === "ecr" &&
+    strippedArgs[0] === "get-login-password" &&
+    !strippedArgs.includes("--help")
+  ) {
+    try {
+      const token = await awsExec(["ecr", "get-login-password", ...strippedArgs.slice(1)], {
+        context,
+      });
+      (options.stdout ?? process.stdout).write(token);
+      process.exitCode = 0;
+    } catch (error) {
+      const formatted = formatError(error);
+      (options.stderr ?? process.stderr).write(formatted.output);
+      process.exitCode = formatted.exitCode;
+    }
+    return;
+  }
+
   // Patch process.argv[1] so axi-sdk-js's homeHeaderOutput banner shows the
   // POSIX sh launcher (dist/bin/aws-axi) rather than the .js module path
   // (dist/bin/aws-axi.js) that Bun receives after `exec bun --no-env-file`.

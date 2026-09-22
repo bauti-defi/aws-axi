@@ -346,3 +346,59 @@ describe("configure list-profiles — meta-command, not a botocore service", () 
     expect(output).not.toContain("Unknown service");
   });
 });
+
+/**
+ * `ecr get-login-password` is an AWS CLI *custom* operation, not a botocore
+ * API operation. Before the fix, aws-axi looked it up in the ECR service model,
+ * found no such operation, and exited 252 with "Unknown operation
+ * 'get-login-password' for service 'ecr'".
+ *
+ * The fix routes it to the real `aws` CLI via awsExec, streaming stdout straight
+ * through. The stub `aws` binary stands in for the registry call — the test
+ * asserts delegation (no 252, no "Unknown operation", token forwarded verbatim),
+ * never contacts a real registry, and uses only a placeholder token string.
+ */
+describe("ecr get-login-password — custom op, not a botocore operation", () => {
+  it("delegates to the aws CLI and streams stdout through instead of exiting 252", async () => {
+    // Placeholder token — never a real ECR authorization token.
+    const placeholderToken = "AXI-PLACEHOLDER-TOKEN\n";
+    const stub = createStub({ stdout: placeholderToken, exitCode: 0 });
+
+    const { output, exitCode } = await captureMain(
+      ["ecr", "get-login-password", "--region", "us-east-1"],
+      {
+        PATH: `${stubDir(stub)}:${process.env["PATH"] ?? ""}`,
+        AWS_DATA_PATH: FIXTURES_DIR,
+      },
+    );
+
+    // Delegated, not rejected: no USAGE_ERROR, no unknown-operation message.
+    expect(exitCode).not.toBe(252);
+    expect(exitCode).toBeUndefined(); // success (exit 0)
+    expect(output).not.toMatch(/Unknown operation/);
+    // Stdout streamed straight through, verbatim.
+    expect(output).toBe(placeholderToken);
+  });
+
+  it("forwards the ecr get-login-password argv to the aws CLI, region via env", async () => {
+    // Echo argv on stdout and the forwarded region env so we can assert the
+    // delegated command shape without depending on a real registry.
+    const stub = stubBin(
+      ["#!/bin/sh", 'printf "%s " "$@"', 'printf "region=%s" "$AWS_REGION"', "exit 0"].join("\n"),
+    );
+
+    const { output, exitCode } = await captureMain(
+      ["ecr", "get-login-password", "--region", "us-east-1"],
+      {
+        PATH: `${stubDir(stub)}:${process.env["PATH"] ?? ""}`,
+        AWS_DATA_PATH: FIXTURES_DIR,
+      },
+    );
+
+    expect(exitCode).toBeUndefined();
+    // The custom op is delegated verbatim; --region is lifted into context and
+    // forwarded to the child as AWS_REGION rather than an argv flag.
+    expect(output).toContain("ecr get-login-password");
+    expect(output).toContain("region=us-east-1");
+  });
+});
